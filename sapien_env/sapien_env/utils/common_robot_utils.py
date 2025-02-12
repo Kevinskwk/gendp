@@ -131,7 +131,7 @@ def wrap_link_hand_indices(link_hand_indices, method="tip_middle"):
 
 
 
-def load_robot(scene: sapien.Scene, robot_name, disable_self_collision=True) -> sapien.Articulation:
+def load_robot(scene: sapien.Scene, robot_name, disable_self_collision=True) -> sapien.physx.PhysxArticulation:
     loader = scene.create_urdf_loader()
     current_dir = Path(__file__).parent
     package_dir = (current_dir.parent / "assets").resolve()
@@ -167,15 +167,15 @@ def load_robot(scene: sapien.Scene, robot_name, disable_self_collision=True) -> 
         }
     robot_file = info.path
     filename = str(package_dir / robot_file)
-    robot_builder = loader.load_file_as_articulation_builder(filename, config=config)
+    robot_builder = loader.load_file_as_articulation_builder(filename) #, config=config)
     if disable_self_collision:
-        for link_builder in robot_builder.get_link_builders():
-            link_builder.set_collision_groups(1, 1, 17, 0)
+        for link_builder in robot_builder.link_builders:
+            link_builder.collision_groups=[1, 1, 17, 0]
     else:
         if "allegro" in robot_name:
-            for link_builder in robot_builder.get_link_builders():
-                if link_builder.get_name() in ["link_9.0", "link_5.0", "link_1.0", "link_13.0", "base_link"]:
-                    link_builder.set_collision_groups(1, 1, 17, 0)
+            for link_builder in robot_builder.link_builders:
+                if link_builder.name in ["link_9.0", "link_5.0", "link_1.0", "link_13.0", "base_link"]:
+                    link_builder.collision_groups = [1, 1, 17, 0]
     robot = robot_builder.build(fix_root_link=True)
     robot.set_name(robot_name)
 
@@ -232,7 +232,7 @@ def load_robot(scene: sapien.Scene, robot_name, disable_self_collision=True) -> 
     else:
         raise NotImplementedError
 
-    mat = scene.engine.create_physical_material(1.5, 1, 0.01)
+    mat = scene.create_physical_material(1.5, 1, 0.01)
     for link in robot.get_links():
         for geom in link.get_collision_shapes():
             geom.min_patch_radius = 0.02
@@ -242,40 +242,40 @@ def load_robot(scene: sapien.Scene, robot_name, disable_self_collision=True) -> 
     return robot
 
 
-def modify_robot_visual(robot: sapien.Articulation):
-    robot_name = robot.get_name()
-    if "mano" in robot_name:
-        return robot
-    arm_link_names = [f"link{i}" for i in range(1, 8)] + ["link_base"]
-    for link in robot.get_links():
-        if link.get_name() in arm_link_names:
-            pass
-        else:
-            for geom in link.get_visual_bodies():
-                for shape in geom.get_render_shapes():
-                    mat_viz = shape.material
-                    mat_viz.set_specular(0.07)
-                    mat_viz.set_metallic(0.3)
-                    mat_viz.set_roughness(0.2)
-                    if 'adroit' in robot_name:
-                        mat_viz.set_specular(0.02)
-                        mat_viz.set_metallic(0.1)
-                        mat_viz.set_base_color(np.power(np.array([0.9, 0.7, 0.5, 1]), 1.5))
-                    elif 'allegro' in robot_name:
-                        if "tip" not in link.get_name():
-                            mat_viz.set_specular(0.8)
-                            mat_viz.set_base_color(np.array([0.1, 0.1, 0.1, 1]))
-                        else:
-                            mat_viz.set_base_color(np.array([0.9, 0.9, 0.9, 1]))
-                    elif 'svh' in robot_name:
-                        link_names = ["right_hand_c", "right_hand_t", "right_hand_s", "right_hand_r", "right_hand_q",
-                                      "right_hand_e1"]
-                        if link.get_name() not in link_names:
-                            mat_viz.set_specular(0.02)
-                            mat_viz.set_metallic(0.1)
-                    else:
-                        pass
-    return robot
+# def modify_robot_visual(robot: sapien.physx.PhysxArticulation):
+#     robot_name = robot.get_name()
+#     if "mano" in robot_name:
+#         return robot
+#     arm_link_names = [f"link{i}" for i in range(1, 8)] + ["link_base"]
+#     for link in robot.get_links():
+#         if link.get_name() in arm_link_names:
+#             pass
+#         else:
+#             for geom in link.get_visual_bodies():
+#                 for shape in geom.get_render_shapes():
+#                     mat_viz = shape.material
+#                     mat_viz.set_specular(0.07)
+#                     mat_viz.set_metallic(0.3)
+#                     mat_viz.set_roughness(0.2)
+#                     if 'adroit' in robot_name:
+#                         mat_viz.set_specular(0.02)
+#                         mat_viz.set_metallic(0.1)
+#                         mat_viz.set_base_color(np.power(np.array([0.9, 0.7, 0.5, 1]), 1.5))
+#                     elif 'allegro' in robot_name:
+#                         if "tip" not in link.get_name():
+#                             mat_viz.set_specular(0.8)
+#                             mat_viz.set_base_color(np.array([0.1, 0.1, 0.1, 1]))
+#                         else:
+#                             mat_viz.set_base_color(np.array([0.9, 0.9, 0.9, 1]))
+#                     elif 'svh' in robot_name:
+#                         link_names = ["right_hand_c", "right_hand_t", "right_hand_s", "right_hand_r", "right_hand_q",
+#                                       "right_hand_e1"]
+#                         if link.get_name() not in link_names:
+#                             mat_viz.set_specular(0.02)
+#                             mat_viz.set_metallic(0.1)
+#                     else:
+#                         pass
+#     return robot
 
 
 class LPFilter:

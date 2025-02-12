@@ -53,8 +53,13 @@ class PenInsertionRLEnv(PenInsertionEnv, BaseRLEnv):
         theta_cos = np.sum(np.array([0, 0, 1]) * z_axis)
         palm_pose = self.palm_link.get_pose()
         object_in_palm = object_pose.p - palm_pose.p
-        v = self.manipulated_object.get_velocity()
-        w = self.manipulated_object.get_angular_velocity()
+        rigid_component = self.manipulated_object.find_component_by_type(sapien.physx.PhysxRigidBaseComponent)
+        if rigid_component is None:
+            v = np.zeros(3)
+            w = np.zeros(3)
+        else:
+            v = rigid_component.get_linear_velocity()
+            w = rigid_component.get_angular_velocity()
         return np.concatenate([robot_qpos_vec, object_pose_vec, v, w, object_in_palm, np.array([theta_cos])])
 
     def get_robot_state(self):
@@ -81,7 +86,9 @@ class PenInsertionRLEnv(PenInsertionEnv, BaseRLEnv):
             arm_qpos = self.robot_info.arm_init_qpos
             qpos[:self.arm_dof] = arm_qpos
             self.robot.set_qpos(qpos)
-            self.robot.set_drive_target(qpos)
+            # self.robot.set_drive_target(qpos)
+            for joint, pos in zip(self.robot.get_active_joints(), qpos):
+                joint.set_drive_target(pos)
             init_pos = ARM_INIT + self.robot_info.root_offset
             init_pose = sapien.Pose(init_pos, transforms3d.euler.euler2quat(0, 0, 0))
         elif self.is_trossen_arm:
@@ -91,14 +98,18 @@ class PenInsertionRLEnv(PenInsertionEnv, BaseRLEnv):
             arm_qpos = self.robot_info.arm_init_qpos
             qpos[:self.arm_dof] = arm_qpos
             self.robot.set_qpos(qpos)
-            self.robot.set_drive_target(qpos)
+            # self.robot.set_drive_target(qpos)
+            for joint, pos in zip(self.robot.get_active_joints(), qpos):
+                joint.set_drive_target(pos)
             init_pos = ARM_INIT + self.robot_info.root_offset
             init_pose = sapien.Pose(init_pos, transforms3d.euler.euler2quat(0, 0, 0))
         
         elif self.is_panda:
             qpos = self.robot_info.arm_init_qpos.copy()
             self.robot.set_qpos(qpos)
-            self.robot.set_drive_target(qpos)
+            # self.robot.set_drive_target(qpos)
+            for joint, pos in zip(self.robot.get_active_joints(), qpos):
+                joint.set_drive_target(pos)
             init_pos = np.array([0.0, -0.5, 0.0])
             init_ori = transforms3d.euler.euler2quat(0, 0, np.pi / 2)
             init_pose = sapien.Pose(init_pos, init_ori)
@@ -107,7 +118,7 @@ class PenInsertionRLEnv(PenInsertionEnv, BaseRLEnv):
         self.robot.set_pose(init_pose)
         self.reset_internal()
         for i in range(100):
-            self.robot.set_qf(self.robot.compute_passive_force(external=False, coriolis_and_centrifugal=False))
+            self.robot.set_qf(self.robot.compute_passive_force(gravity=True, coriolis_and_centrifugal=False))
             self.scene.step()
         self.object_episode_init_pose = self.manipulated_object.get_pose()
         random_quat = transforms3d.euler.euler2quat(*(self.np_random.randn(3) * self.object_pose_noise * 10))
@@ -117,9 +128,9 @@ class PenInsertionRLEnv(PenInsertionEnv, BaseRLEnv):
         return self.get_observation()
 
     def set_init(self, init_states):
-        init_pose = sapien.Pose.from_transformation_matrix(init_states[0])
+        init_pose = sapien.Pose(init_states[0])
         self.manipulated_object.set_pose(init_pose)
-        init_box_pose = sapien.Pose.from_transformation_matrix(init_states[1])
+        init_box_pose = sapien.Pose(init_states[1])
         self.pencil_sharpener.set_pose(init_box_pose)
 
     @cached_property

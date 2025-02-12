@@ -10,7 +10,8 @@ def load_open_box(scene: sapien.Scene, renderer: sapien.SapienRenderer, half_l, 
     box_visual_material = renderer.create_material()
     box_visual_material.set_metallic(0.0)
     box_visual_material.set_specular(0.3)
-    box_visual_material.set_diffuse_texture_from_file(str(map_path))
+    texture = sapien.render.RenderTexture2D(str(map_path))
+    box_visual_material.set_diffuse_texture(texture)
     box_visual_material.set_roughness(0.3)
     
     builder = scene.create_actor_builder()
@@ -81,6 +82,7 @@ YX_DEFAULT_SCALE = {
     'pencil_3': 0.03,
     'pencil_4': 3.0,
     'pencil_5': 0.01,
+    'screw_driver_1':0.01,
 }
 
 YX_DEFAULT_DENSITY = {
@@ -129,11 +131,11 @@ def load_yx_obj(scene: sapien.Scene, object_name, scale=None, material=None, col
         for collision_file in collision_file_cands:
             if os.path.exists(str(collision_file)):
                 if collision_shape == 'convex':
-                    builder.add_collision_from_file(str(collision_file), scale=scales, material=material, density=density)
+                    builder.add_convex_collision_from_file(str(collision_file), scale=scales, material=material, density=density)
                 elif collision_shape == 'nonconvex':
                     builder.add_nonconvex_collision_from_file(str(collision_file), scale=scales, material=material, density=density)
                 elif collision_shape == 'multiple':
-                    builder.add_multiple_collisions_from_file(str(collision_file), scale=scales, material=material, density=density)
+                    builder.add_multiple_convex_collisions_from_file(str(collision_file), scale=scales, material=material, density=density)
                 break
     
     if is_static:

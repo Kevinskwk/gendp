@@ -193,11 +193,11 @@ class SingleArmPolicy:
         mug_pose_mat = env.manipulated_object.get_pose().to_transformation_matrix()
         grasp_pose_in_mug_mat = grasp_pose.to_transformation_matrix()
         grasp_pose_in_world_mat = mug_pose_mat @ grasp_pose_in_mug_mat
-        grasp_pose_in_world = sapien.Pose.from_transformation_matrix(grasp_pose_in_world_mat)
+        grasp_pose_in_world = sapien.Pose(grasp_pose_in_world_mat)
         
         pre_grasp_pose_in_mug_mat = pre_grasp_pose.to_transformation_matrix()
         pre_grasp_pose_in_world_mat = mug_pose_mat @ pre_grasp_pose_in_mug_mat
-        pre_grasp_pose_in_world = sapien.Pose.from_transformation_matrix(pre_grasp_pose_in_world_mat)
+        pre_grasp_pose_in_world = sapien.Pose(pre_grasp_pose_in_world_mat)
         
         
         # place pose setting
@@ -207,17 +207,17 @@ class SingleArmPolicy:
         # place_pose = sapien.Pose(place_p,place_q)
         # place_pose_in_mug_tree_mat = place_pose.to_transformation_matrix()
         # place_pose_in_world_mat = mug_tree_mat @ place_pose_in_mug_tree_mat
-        # place_pose_in_world = sapien.Pose.from_transformation_matrix(place_pose_in_world_mat)
+        # place_pose_in_world = sapien.Pose(place_pose_in_world_mat)
         
         # post_place_pose = sapien.Pose(post_place_p,post_place_q)
         # post_place_pose_in_mug_tree_mat = post_place_pose.to_transformation_matrix()
         # post_place_pose_in_world_mat = mug_tree_mat @ post_place_pose_in_mug_tree_mat
-        # post_place_pose_in_world = sapien.Pose.from_transformation_matrix(post_place_pose_in_world_mat)
+        # post_place_pose_in_world = sapien.Pose(post_place_pose_in_world_mat)
         
         # leave_pose = sapien.Pose(leave_p,leave_q)
         # leave_pose_in_mug_tree_mat = leave_pose.to_transformation_matrix()
         # leave_pose_in_world_mat = mug_tree_mat @ leave_pose_in_mug_tree_mat
-        # leave_pose_in_world = sapien.Pose.from_transformation_matrix(leave_pose_in_world_mat)
+        # leave_pose_in_world = sapien.Pose(leave_pose_in_world_mat)
         
         
         if mode == 'straight':

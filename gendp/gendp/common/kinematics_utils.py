@@ -290,7 +290,7 @@ class KinHelper():
             tf_mat[:3, 3] = cartesian[0:3]
         elif pose_fmt == 'mat':
             tf_mat = cartesian
-        pose = sapien.Pose.from_transformation_matrix(tf_mat)
+        pose = sapien.Pose(tf_mat)
         if 'trossen' in self.robot_name:
             active_qmask= np.array([True,True,True,True,True,True,False,False])
         elif 'panda' in self.robot_name:

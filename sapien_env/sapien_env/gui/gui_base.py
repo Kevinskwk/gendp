@@ -5,9 +5,9 @@ import numpy as np
 import sapien.core as sapien
 import torch.utils.dlpack
 from sapien.core import Pose
-from sapien.core.pysapien import renderer as R
+# from sapien.pysapien import render as R
 from sapien.utils import Viewer
-from sapien_env.utils.render_scene_utils import add_mesh_to_renderer
+# from sapien_env.utils.render_scene_utils import add_mesh_to_renderer
 
 DEFAULT_TABLE_TOP_CAMERAS = {
     "left": dict(position=np.array([0, 1, 0.6]), look_at_dir=np.array([0, -1, -0.6]), right_dir=np.array([-1, 0, 0]),
@@ -89,9 +89,9 @@ def depth_to_vis_depth(depth):
     return depth_vis
 
 class GUIBase:
-    def __init__(self, scene: sapien.Scene, renderer: Union[sapien.VulkanRenderer, sapien.KuafuRenderer],
+    def __init__(self, scene: sapien.Scene, renderer: sapien.SapienRenderer,
                  resolution=(640, 480), window_scale=0.5, headless=False):
-        use_ray_tracing = isinstance(renderer, sapien.KuafuRenderer)
+        use_ray_tracing = sapien.render.get_viewer_shader_dir() == "rt"
         self.scene = scene
         self.renderer = renderer
         self.headless = headless
@@ -100,12 +100,12 @@ class GUIBase:
 
         # Context
         self.use_ray_tracing = use_ray_tracing
-        if not use_ray_tracing:
-            self.context: R.Context = renderer._internal_context
-            self.render_scene: R.Scene = scene.get_renderer_scene()._internal_scene
-            self.nodes: List[R.Node] = []
-        self.sphere_nodes: Dict[str, List[R.Node]] = {}
-        self.sphere_model: Dict[str, R.Model] = {}
+        # if not use_ray_tracing:
+        #     self.context: R.Context = renderer._internal_context
+        #     self.render_scene: R.Scene = scene.get_renderer_scene()._internal_scene
+        #     self.nodes: List[R.Node] = []
+        # self.sphere_nodes: Dict[str, List[R.Node]] = {}
+        # self.sphere_model: Dict[str, R.Model] = {}
 
         # Viewer
         if not use_ray_tracing and not headless:
@@ -144,16 +144,16 @@ class GUIBase:
         pose_mat = np.concatenate([rot_mat_homo, np.array([[0, 0, 0, 1]])])
 
         # Add camera to the scene
-        mount.set_pose(Pose.from_transformation_matrix(pose_mat))
+        mount.set_pose(Pose(pose_mat))
         self.cams.append(cam)
         self.cam_mounts.append(mount)
     
     def create_camera_from_pos_rot(self, position, rotation, name):
         builder = self.scene.create_actor_builder()
-        builder.set_mass_and_inertia(1e-2, Pose(np.zeros(3)), np.ones(3) * 1e-4)
+        # builder.set_mass_and_inertia(1e-2, Pose(np.zeros(3)), np.ones(3) * 1e-4)
         mount = builder.build_static(name=f"{name}_mount")
         cam = self.scene.add_mounted_camera(name, mount, Pose(), width=self.resolution[0], height=self.resolution[1],
-                                            fovy=0.9, fovx=0.9, near=0.1, far=10)
+                                            fovy=0.9, near=0.1, far=10)
 
         # Construct camera pose
         sapien_pose = sapien.Pose(p = position, q = rotation)
@@ -165,7 +165,7 @@ class GUIBase:
         #                        [-1., 0., 0.,],
         #                        [0., 0., -1.]]))
         # sapien_pose_tf[:3,:3] = camera_tf @ sapien_pose_tf[:3,:3]
-        sapien_pose = sapien.Pose.from_transformation_matrix(sapien_pose_tf)
+        sapien_pose = sapien.Pose(sapien_pose_tf)
 
         # Add camera to the scene
         mount.set_pose(sapien_pose)
@@ -201,7 +201,7 @@ class GUIBase:
             # rgb = rgb_tensor.type(torch.uint8).cpu().numpy()
             
             # direct np
-            rgb = (np.clip(cam.get_float_texture("Color")[..., :3],0,1) * 255).astype(np.uint8)
+            rgb = (np.clip(cam.get_picture("Color")[..., :3],0,1) * 255).astype(np.uint8)
             if use_bgr:
                 rgb = rgb[..., ::-1]
                 
@@ -210,7 +210,7 @@ class GUIBase:
                 # depth_tensor = torch.utils.dlpack.from_dlpack(cam.get_dl_tensor("Position"))[..., 2] * -1000
                 # depth = depth_tensor.cpu().numpy().astype(np.uint16)
                 # depths.append(depth)
-                depth = (-cam.get_float_texture("Position")[..., 2] * 1000).astype(np.uint16)
+                depth = (-cam.get_picture("Position")[..., 2] * 1000).astype(np.uint16)
                 depths.append(depth)
             views.append(rgb)
         if render_depth:
@@ -222,13 +222,13 @@ class GUIBase:
         for cam in self.cams:
             if cam.get_name() == camera_name:
                 cam.take_picture()
-                dlpack = cam.get_dl_tensor("Color")
+                dlpack = cam.get_picture_cuda("Color")
                 rgb = np.clip(cupy.asnumpy(cupy.from_dlpack(dlpack))[..., :3], 0, 1) * 255
                 rgb = rgb.astype(np.uint8)
                 if use_bgr:
                     rgb = np.flip(rgb, [-1])
                 if render_depth:
-                    dlpack = cam.get_dl_tensor("Position")
+                    dlpack = cam.get_picture_cuda("Position")
                     depth = (-cupy.asnumpy(cupy.from_dlpack(dlpack))[..., 2] * 1000).astype(np.uint16)
                     return rgb, depth
                 return rgb
@@ -279,18 +279,18 @@ class GUIBase:
         else:
             return views
 
-    def update_mesh(self, v, f, viz_mat: R.Material, pose: Pose, use_shadow=True, clear_context=False):
-        if clear_context:
-            for i in range(len(self.nodes)):
-                node = self.nodes.pop()
-                self.render_scene.remove_node(node)
-        node = add_mesh_to_renderer(self.scene, self.renderer, v, f, viz_mat)
-        node.set_position(pose.p)
-        node.set_rotation(pose.q)
-        if use_shadow:
-            node.shading_mode = 0
-            node.cast_shadow = True
-        self.nodes.append(node)
+    # def update_mesh(self, v, f, viz_mat: R.Material, pose: Pose, use_shadow=True, clear_context=False):
+    #     if clear_context:
+    #         for i in range(len(self.nodes)):
+    #             node = self.nodes.pop()
+    #             self.render_scene.remove_node(node)
+    #     node = add_mesh_to_renderer(self.scene, self.renderer, v, f, viz_mat)
+    #     node.set_position(pose.p)
+    #     node.set_rotation(pose.q)
+    #     if use_shadow:
+    #         node.shading_mode = 0
+    #         node.cast_shadow = True
+    #     self.nodes.append(node)
 
     def register_keydown_action(self, key, action: Callable):
         if key in self.keydown_map:
@@ -299,18 +299,19 @@ class GUIBase:
 
     def add_sphere_visual(self, label, pos: np.ndarray, rgba: np.ndarray = np.array([1, 0, 0, 1]),
                           radius: float = 0.01):
-        if label not in self.sphere_model:
-            mesh = self.context.create_uvsphere_mesh()
-            material = self.context.create_material(emission=np.zeros(4), base_color=rgba, specular=0.4, metallic=0,
-                                                    roughness=0.1)
-            self.sphere_model[label] = self.context.create_model([mesh], [material])
-            self.sphere_nodes[label] = []
-        model = self.sphere_model[label]
-        node = self.render_scene.add_object(model, parent=None)
-        node.set_scale(np.ones(3) * radius)
-        self.sphere_nodes[label].append(node)
-        node.set_position(pos)
-        return node
+    #     if label not in self.sphere_model:
+    #         mesh = self.context.create_uvsphere_mesh()
+    #         material = self.context.create_material(emission=np.zeros(4), base_color=rgba, specular=0.4, metallic=0,
+    #                                                 roughness=0.1)
+    #         self.sphere_model[label] = self.context.create_model([mesh], [material])
+    #         self.sphere_nodes[label] = []
+    #     model = self.sphere_model[label]
+    #     node = self.render_scene.add_object(model, parent=None)
+    #     node.set_scale(np.ones(3) * radius)
+    #     self.sphere_nodes[label].append(node)
+    #     node.set_position(pos)
+    #     return node
+        return
 
     def close(self):
         for camera in self.cams:

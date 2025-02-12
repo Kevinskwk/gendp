@@ -46,7 +46,7 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
         self.arm_dof: Optional[int] = None
         self.rl_step: Optional[Callable] = None
         self.get_observation: Optional[Callable] = None
-        self.robot_collision_links: Optional[List[sapien.Actor]] = None
+        self.robot_collision_links: Optional[List[sapien.Entity]] = None
         self.robot_info: Optional[Union[ArmRobotInfo, FreeRobotInfo]] = None
         self.velocity_limit: Optional[np.ndarray] = None
         self.kinematic_model: Optional[PartialKinematicModel] = None
@@ -54,7 +54,7 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
         # Robot cache
         self.control_time_step = None
         self.ee_link_name = None
-        self.ee_link: Optional[sapien.Actor] = None
+        self.ee_link: Optional[sapien.Entity] = None
         self.cartesian_error = None
 
     def seed(self, seed=None):
@@ -119,7 +119,7 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
             self.velocity_limit = np.stack([-velocity_limit, velocity_limit], axis=1)
             start_joint_name = self.robot.get_joints()[1].get_name()
             end_joint_name = self.robot.get_active_joints()[self.arm_dof - 1].get_name()
-            self.kinematic_model = PartialKinematicModel(self.robot, start_joint_name, end_joint_name)
+            self.kinematic_model = PartialKinematicModel(self.robot, self.scene, start_joint_name, end_joint_name)
             self.ee_link_name = self.kinematic_model.end_link_name
             self.ee_link = [link for link in self.robot.get_links() if link.get_name() == self.ee_link_name][0]
         elif self.is_trossen_arm:
@@ -130,7 +130,7 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
             self.velocity_limit = np.stack([-velocity_limit, velocity_limit], axis=1)
             start_joint_name = self.robot.get_joints()[1].get_name()
             end_joint_name = self.robot.get_active_joints()[self.arm_dof - 1].get_name()
-            self.kinematic_model = PartialKinematicModel(self.robot, start_joint_name, end_joint_name)
+            self.kinematic_model = PartialKinematicModel(self.robot, self.scene, start_joint_name, end_joint_name)
             self.ee_link_name = self.kinematic_model.end_link_name
             self.ee_link = [link for link in self.robot.get_links() if link.get_name() == self.ee_link_name][0]
         elif self.is_panda:
@@ -141,7 +141,7 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
             self.velocity_limit = np.stack([-velocity_limit, velocity_limit], axis=1)
             start_joint_name = self.robot.get_joints()[1].get_name()
             end_joint_name = self.robot.get_active_joints()[self.arm_dof - 1].get_name()
-            self.kinematic_model = PartialKinematicModel(self.robot, start_joint_name, end_joint_name)
+            self.kinematic_model = PartialKinematicModel(self.robot, self.scene, start_joint_name, end_joint_name)
             self.ee_link_name = self.kinematic_model.end_link_name
             self.ee_link = [link for link in self.robot.get_links() if link.get_name() == self.ee_link_name][0]
         
@@ -172,11 +172,14 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
         target_qvel = recover_action(action, self.velocity_limit)
         target_qvel[6:] = 0
         target_qpos = np.concatenate([np.zeros(6), recover_action(action[6:], self.robot.get_qlimits()[6:])])
-        self.robot.set_drive_velocity_target(target_qvel)
-        self.robot.set_drive_target(target_qpos)
+        # self.robot.set_drive_velocity_target(target_qvel)
+        # self.robot.set_drive_target(target_qpos)
+        for joint, pos, vel in zip(self.robot.get_active_joints(), target_qpos, target_qvel):
+            joint.set_drive_velocity_target(vel)
+            joint.set_drive_target(pos)
 
         for i in range(self.frame_skip):
-            self.robot.set_qf(self.robot.compute_passive_force(external=False, coriolis_and_centrifugal=False))
+            self.robot.set_qf(self.robot.compute_passive_force(gravity=True, coriolis_and_centrifugal=False))
             self.scene.step()
         self.current_step += 1
 
@@ -194,10 +197,12 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
         target_qvel = np.zeros_like(target_qpos)
         target_qvel[:self.arm_dof] = arm_qvel
         # target_qvel[self.arm_dof:] = [1,-1]
-        self.robot.set_drive_target(target_qpos)
+        # self.robot.set_drive_target(target_qpos)
+        for joint, pos in zip(self.robot.get_active_joints(), target_qpos):
+            joint.set_drive_target(pos)
 
         for i in range(self.frame_skip):
-            self.robot.set_qf(self.robot.compute_passive_force(external=False, coriolis_and_centrifugal=True))
+            self.robot.set_qf(self.robot.compute_passive_force(gravity=True, coriolis_and_centrifugal=True))
             self.scene.step()
         self.current_step += 1
 
@@ -220,11 +225,13 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
         if use_position_control:
             pid_delta_qpos = self.pid.control(delta_qpos)
             target_qpos  = pid_delta_qpos + current_qpos
-        self.robot.set_drive_target(target_qpos)
+        # self.robot.set_drive_target(target_qpos)
+        for joint, pos in zip(self.robot.get_active_joints(), target_qpos):
+            joint.set_drive_target(pos)
         self.qvel = target_qvel
         # self.robot.set_drive_velocity_target(target_qvel)
         for i in range(self.frame_skip):
-            self.robot.set_qf(self.robot.compute_passive_force(external=False, coriolis_and_centrifugal=False))
+            self.robot.set_qf(self.robot.compute_passive_force(gravity=True, coriolis_and_centrifugal=False))
             self.scene.step()
         self.current_step += 1
 
@@ -233,9 +240,11 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
         gripper_action = action[self.arm_dof:]
         gripper_action=np.clip(gripper_action, 0.0, 0.04)  
         target_qpos = np.concatenate([action[0:self.arm_dof],gripper_action,gripper_action])
-        self.robot.set_drive_target(target_qpos)
+        # self.robot.set_drive_target(target_qpos)
+        for joint, pos in zip(self.robot.get_active_joints(), target_qpos):
+            joint.set_drive_target(pos)
         for i in range(self.frame_skip):
-            self.robot.set_qf(self.robot.compute_passive_force(external=False, coriolis_and_centrifugal=False))
+            self.robot.set_qf(self.robot.compute_passive_force(gravity=True, coriolis_and_centrifugal=False))
             self.scene.step()
         self.current_step += 1
 
@@ -259,10 +268,10 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
     def reset_internal(self):
         self.current_step = 0
         if self.init_state is not None:
-            self.scene.unpack(self.init_state)
+            self.scene.unpack_poses(self.init_state)
         self.reset_env()
         if self.init_state is None:
-            self.init_state = self.scene.pack()
+            self.init_state = self.scene.pack_poses()
 
         # Reset camera pose
         for cam_name, (noise_level, original_pose) in self.camera_pose_noise.items():
@@ -322,46 +331,46 @@ class BaseRLEnv(BaseSimulationEnv, gym.Env):
         if "rgb" in modality_set and self.no_rgb:
             raise RuntimeError(f"Only point cloud, depth, and segmentation are allowed when no_rgb is enabled.")
 
-    def setup_imagination_config(self, config: Dict[str, Dict[str, int]]):
-        from sapien_env.utils.render_scene_utils import actor_to_open3d_mesh
-        import open3d as o3d
-        # Imagination can only be used with point cloud representation
-        for name, camera_cfg in self.camera_infos.items():
-            assert "point_cloud" in camera_cfg
+    # def setup_imagination_config(self, config: Dict[str, Dict[str, int]]):
+    #     from sapien_env.utils.render_scene_utils import actor_to_open3d_mesh
+    #     import open3d as o3d
+    #     # Imagination can only be used with point cloud representation
+    #     for name, camera_cfg in self.camera_infos.items():
+    #         assert "point_cloud" in camera_cfg
 
-        acceptable_imagination = ["robot", "goal", "contact"]
-        # Imagination class: 0 (observed), 1 (robot), 2 (goal), 3 (contact)
-        img_dict = {}
+    #     acceptable_imagination = ["robot", "goal", "contact"]
+    #     # Imagination class: 0 (observed), 1 (robot), 2 (goal), 3 (contact)
+    #     img_dict = {}
 
-        collision_link_names = [link.get_name() for link in self.robot_collision_links]
-        for img_type, link_config in config.items():
-            if img_type not in acceptable_imagination:
-                raise ValueError(f"Unknown Imagination config name: {img_type}.")
-            if img_type == "robot":
-                img_dict["robot"] = {}
-                for link_name, point_size in link_config.items():
-                    if link_name not in collision_link_names:
-                        raise ValueError(f"Link name {link_name} does not have collision geometry.")
-                    link = [link for link in self.robot_collision_links if link.get_name() == link_name][0]
-                    o3d_mesh = actor_to_open3d_mesh(link, use_collision_mesh=False, use_actor_pose=False)
-                    sampled_cloud = o3d_mesh.sample_points_uniformly(number_of_points=point_size)
-                    cloud_points = np.asarray(sampled_cloud.points)
-                    img_dict["robot"][link_name] = (link, cloud_points, 1)
-            elif img_type == "goal":
-                img_dict["goal"] = {}
-                # We do not use goal actor pointer to index pose. During reset, the goal actor may be removed.
-                # Thus use goal actor here to fetch pose will lead to segfault
-                # Instead, the attribute name is saved, so we can always find the latest goal actor
-                for attr_name, point_size in link_config.items():
-                    goal_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
-                    sampled_cloud = goal_sphere.sample_points_uniformly(number_of_points=point_size)
-                    cloud_points = np.asarray(sampled_cloud.points)
-                    img_dict["goal"][attr_name] = (attr_name, cloud_points, 2)
-            else:
-                raise NotImplementedError
+    #     collision_link_names = [link.get_name() for link in self.robot_collision_links]
+    #     for img_type, link_config in config.items():
+    #         if img_type not in acceptable_imagination:
+    #             raise ValueError(f"Unknown Imagination config name: {img_type}.")
+    #         if img_type == "robot":
+    #             img_dict["robot"] = {}
+    #             for link_name, point_size in link_config.items():
+    #                 if link_name not in collision_link_names:
+    #                     raise ValueError(f"Link name {link_name} does not have collision geometry.")
+    #                 link = [link for link in self.robot_collision_links if link.get_name() == link_name][0]
+    #                 o3d_mesh = actor_to_open3d_mesh(link, use_collision_mesh=False, use_actor_pose=False)
+    #                 sampled_cloud = o3d_mesh.sample_points_uniformly(number_of_points=point_size)
+    #                 cloud_points = np.asarray(sampled_cloud.points)
+    #                 img_dict["robot"][link_name] = (link, cloud_points, 1)
+    #         elif img_type == "goal":
+    #             img_dict["goal"] = {}
+    #             # We do not use goal actor pointer to index pose. During reset, the goal actor may be removed.
+    #             # Thus use goal actor here to fetch pose will lead to segfault
+    #             # Instead, the attribute name is saved, so we can always find the latest goal actor
+    #             for attr_name, point_size in link_config.items():
+    #                 goal_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
+    #                 sampled_cloud = goal_sphere.sample_points_uniformly(number_of_points=point_size)
+    #                 cloud_points = np.asarray(sampled_cloud.points)
+    #                 img_dict["goal"][attr_name] = (attr_name, cloud_points, 2)
+    #         else:
+    #             raise NotImplementedError
 
-        self.imagination_infos = config
-        self.imagination_data = img_dict
+    #     self.imagination_infos = config
+    #     self.imagination_data = img_dict
 
     def update_imagination(self, reset_goal=False):
         for img_type, img_config in self.imagination_data.items():
@@ -534,7 +543,7 @@ class BimanualBaseRLEnv(BaseSimulationEnv, gym.Env):
         self.arm_dof: Optional[int] = None
         self.rl_step: Optional[Callable] = None
         self.get_observation: Optional[Callable] = None
-        self.robot_collision_links: Optional[List[sapien.Actor]] = None
+        self.robot_collision_links: Optional[List[sapien.Entity]] = None
         self.robot_info: Optional[Union[ArmRobotInfo, FreeRobotInfo]] = None
         self.velocity_limit: Optional[np.ndarray] = None
         self.kinematic_model: Optional[PartialKinematicModel] = None
@@ -542,7 +551,7 @@ class BimanualBaseRLEnv(BaseSimulationEnv, gym.Env):
         # Robot cache
         self.control_time_step = None
         self.ee_link_name = None
-        self.ee_link: Optional[sapien.Actor] = None
+        self.ee_link: Optional[sapien.Entity] = None
         self.cartesian_error = None
     
         
@@ -597,7 +606,7 @@ class BimanualBaseRLEnv(BaseSimulationEnv, gym.Env):
         self.velocity_limit = np.stack([-velocity_limit, velocity_limit], axis=1)
         start_joint_name = self.robot.get_joints()[1].get_name()
         end_joint_name = self.robot.get_active_joints()[self.arm_dof - 1].get_name()
-        self.kinematic_model = PartialKinematicModel(self.robot, start_joint_name, end_joint_name)
+        self.kinematic_model = PartialKinematicModel(self.robot, self.scene, start_joint_name, end_joint_name)
         self.ee_link_name = self.kinematic_model.end_link_name
         self.ee_link = [link for link in self.robot.get_links() if link.get_name() == self.ee_link_name][0]
 
@@ -609,7 +618,7 @@ class BimanualBaseRLEnv(BaseSimulationEnv, gym.Env):
         self.velocity_limit_2 = np.stack([-velocity_limit_2, velocity_limit_2], axis=1)
         start_joint_name_2 = self.robot2.get_joints()[1].get_name()
         end_joint_name_2 = self.robot2.get_active_joints()[self.arm_dof_2 - 1].get_name()
-        self.kinematic_model_2 = PartialKinematicModel(self.robot2, start_joint_name_2, end_joint_name_2)
+        self.kinematic_model_2 = PartialKinematicModel(self.robot2, self.scene, start_joint_name_2, end_joint_name_2)
         self.ee_link_name_2 = self.kinematic_model_2.end_link_name
         self.ee_link_2 = [link for link in self.robot2.get_links() if link.get_name() == self.ee_link_name_2][0]
 
@@ -640,8 +649,8 @@ class BimanualBaseRLEnv(BaseSimulationEnv, gym.Env):
         self.arm_sim_step_1(action_1)
         self.arm_sim_step_2(action_2)
         for i in range(self.frame_skip):
-            self.robot.set_qf(self.robot.compute_passive_force(external=False, coriolis_and_centrifugal=False))
-            self.robot2.set_qf(self.robot2.compute_passive_force(external=False, coriolis_and_centrifugal=False))
+            self.robot.set_qf(self.robot.compute_passive_force(gravity=True, coriolis_and_centrifugal=False))
+            self.robot2.set_qf(self.robot2.compute_passive_force(gravity=True, coriolis_and_centrifugal=False))
             self.scene.step()
         self.current_step += 1
 
@@ -686,8 +695,10 @@ class BimanualBaseRLEnv(BaseSimulationEnv, gym.Env):
             pid_delta_qpos = self.pid.control(delta_qpos)
             target_qpos  = pid_delta_qpos + current_qpos
 
-        self.robot2.set_drive_target(target_qpos)
+        # self.robot2.set_drive_target(target_qpos)
         # self.robot2.set_drive_velocity_target(target_qvel)
+        for joint, pos in zip(self.robot.get_active_joints(), target_qpos):
+            joint.set_drive_target(pos)
 
     #use qoos for action
     def trossen_sim_step(self, action: np.ndarray):
@@ -700,10 +711,14 @@ class BimanualBaseRLEnv(BaseSimulationEnv, gym.Env):
         target_qvel = np.zeros_like(target_qpos)
         target_qvel[:self.arm_dof] = arm_qvel
         # print(target_qpos)
-        self.robot.set_drive_target(target_qpos)
-        self.robot.set_drive_velocity_target(target_qvel)
+        # self.robot.set_drive_target(target_qpos)
+        # self.robot.set_drive_velocity_target(target_qvel)
+        for joint, pos, vel in zip(self.robot.get_active_joints(), target_qpos, target_qvel):
+            joint.set_drive_target(pos)
+            joint.set_drive_velocity_target(vel)
+
         for i in range(self.frame_skip):
-            self.robot.set_qf(self.robot.compute_passive_force(external=False, coriolis_and_centrifugal=False))
+            self.robot.set_qf(self.robot.compute_passive_force(gravity=True, coriolis_and_centrifugal=False))
             self.scene.step()
         self.current_step += 1
 
@@ -790,46 +805,46 @@ class BimanualBaseRLEnv(BaseSimulationEnv, gym.Env):
         if "rgb" in modality_set and self.no_rgb:
             raise RuntimeError(f"Only point cloud, depth, and segmentation are allowed when no_rgb is enabled.")
 
-    def setup_imagination_config(self, config: Dict[str, Dict[str, int]]):
-        from sapien_env.utils.render_scene_utils import actor_to_open3d_mesh
-        import open3d as o3d
-        # Imagination can only be used with point cloud representation
-        for name, camera_cfg in self.camera_infos.items():
-            assert "point_cloud" in camera_cfg
+    # def setup_imagination_config(self, config: Dict[str, Dict[str, int]]):
+    #     from sapien_env.utils.render_scene_utils import actor_to_open3d_mesh
+    #     import open3d as o3d
+    #     # Imagination can only be used with point cloud representation
+    #     for name, camera_cfg in self.camera_infos.items():
+    #         assert "point_cloud" in camera_cfg
 
-        acceptable_imagination = ["robot", "goal", "contact"]
-        # Imagination class: 0 (observed), 1 (robot), 2 (goal), 3 (contact)
-        img_dict = {}
+    #     acceptable_imagination = ["robot", "goal", "contact"]
+    #     # Imagination class: 0 (observed), 1 (robot), 2 (goal), 3 (contact)
+    #     img_dict = {}
 
-        collision_link_names = [link.get_name() for link in self.robot_collision_links]
-        for img_type, link_config in config.items():
-            if img_type not in acceptable_imagination:
-                raise ValueError(f"Unknown Imagination config name: {img_type}.")
-            if img_type == "robot":
-                img_dict["robot"] = {}
-                for link_name, point_size in link_config.items():
-                    if link_name not in collision_link_names:
-                        raise ValueError(f"Link name {link_name} does not have collision geometry.")
-                    link = [link for link in self.robot_collision_links if link.get_name() == link_name][0]
-                    o3d_mesh = actor_to_open3d_mesh(link, use_collision_mesh=False, use_actor_pose=False)
-                    sampled_cloud = o3d_mesh.sample_points_uniformly(number_of_points=point_size)
-                    cloud_points = np.asarray(sampled_cloud.points)
-                    img_dict["robot"][link_name] = (link, cloud_points, 1)
-            elif img_type == "goal":
-                img_dict["goal"] = {}
-                # We do not use goal actor pointer to index pose. During reset, the goal actor may be removed.
-                # Thus use goal actor here to fetch pose will lead to segfault
-                # Instead, the attribute name is saved, so we can always find the latest goal actor
-                for attr_name, point_size in link_config.items():
-                    goal_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
-                    sampled_cloud = goal_sphere.sample_points_uniformly(number_of_points=point_size)
-                    cloud_points = np.asarray(sampled_cloud.points)
-                    img_dict["goal"][attr_name] = (attr_name, cloud_points, 2)
-            else:
-                raise NotImplementedError
+    #     collision_link_names = [link.get_name() for link in self.robot_collision_links]
+    #     for img_type, link_config in config.items():
+    #         if img_type not in acceptable_imagination:
+    #             raise ValueError(f"Unknown Imagination config name: {img_type}.")
+    #         if img_type == "robot":
+    #             img_dict["robot"] = {}
+    #             for link_name, point_size in link_config.items():
+    #                 if link_name not in collision_link_names:
+    #                     raise ValueError(f"Link name {link_name} does not have collision geometry.")
+    #                 link = [link for link in self.robot_collision_links if link.get_name() == link_name][0]
+    #                 o3d_mesh = actor_to_open3d_mesh(link, use_collision_mesh=False, use_actor_pose=False)
+    #                 sampled_cloud = o3d_mesh.sample_points_uniformly(number_of_points=point_size)
+    #                 cloud_points = np.asarray(sampled_cloud.points)
+    #                 img_dict["robot"][link_name] = (link, cloud_points, 1)
+    #         elif img_type == "goal":
+    #             img_dict["goal"] = {}
+    #             # We do not use goal actor pointer to index pose. During reset, the goal actor may be removed.
+    #             # Thus use goal actor here to fetch pose will lead to segfault
+    #             # Instead, the attribute name is saved, so we can always find the latest goal actor
+    #             for attr_name, point_size in link_config.items():
+    #                 goal_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
+    #                 sampled_cloud = goal_sphere.sample_points_uniformly(number_of_points=point_size)
+    #                 cloud_points = np.asarray(sampled_cloud.points)
+    #                 img_dict["goal"][attr_name] = (attr_name, cloud_points, 2)
+    #         else:
+    #             raise NotImplementedError
 
-        self.imagination_infos = config
-        self.imagination_data = img_dict
+    #     self.imagination_infos = config
+    #     self.imagination_data = img_dict
 
     def update_imagination(self, reset_goal=False):
         for img_type, img_config in self.imagination_data.items():

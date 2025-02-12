@@ -34,27 +34,27 @@ def get_engine_and_renderer(use_gui=True, use_ray_tracing=False, device="", mipm
     need_renderer = need_offscreen_render or use_gui
     if use_ray_tracing:
         # raise NotImplementedError
-        sapien.render_config.camera_shader_dir = "rt"
-        sapien.render_config.viewer_shader_dir = "rt"
-        sapien.render_config.rt_samples_per_pixel = 64
-        sapien.render_config.rt_use_denoiser = True
+        sapien.render.set_camera_shader_dir("rt")
+        sapien.render.set_viewer_shader_dir("rt")
+        sapien.render.set_ray_tracing_samples_per_pixel(64)
+        sapien.render.set_ray_tracing_denoiser("optix")
     # else:
     _renderer = sapien.SapienRenderer(offscreen_only=not use_gui, max_num_materials=50000, max_num_textures=50000)
     _engine.set_renderer(_renderer)
     # if need_renderer:
-    #     _renderer = sapien.VulkanRenderer(default_mipmap_levels=mipmap_levels, offscreen_only=not use_gui,
+    #     _renderer = sapien.SapienRenderer(default_mipmap_levels=mipmap_levels, offscreen_only=not use_gui,
     #                                         device=device, do_not_load_texture=no_rgb)
     #     _engine.set_renderer(_renderer)
     #     if no_rgb:
     #         print(f"Use trivial renderer without color.")
-    #         sapien.VulkanRenderer.set_camera_shader_dir("trivial")
+    #         sapien.SapienRenderer.set_camera_shader_dir("trivial")
     #     else:
-    #         sapien.VulkanRenderer.set_camera_shader_dir("ibl")
+    #         sapien.SapienRenderer.set_camera_shader_dir("ibl")
     # if use_gui:
-    #     sapien.VulkanRenderer.set_viewer_shader_dir("ibl")
+    #     sapien.SapienRenderer.set_viewer_shader_dir("ibl")
     #     viewer = Viewer(_renderer)
     #     viewer.close()
-    _engine.set_log_level("error")
+    sapien.set_log_level("error")
     return _engine, _renderer
 
 
@@ -88,10 +88,10 @@ def download_maniskill(model_id, directory=None):
     return urdf_file
 
 
-def add_default_scene_light(scene: sapien.Scene, renderer: sapien.VulkanRenderer, add_ground=True, cast_shadow=True):
+def add_default_scene_light(scene: sapien.Scene, renderer: sapien.SapienRenderer, add_ground=True, cast_shadow=True):
     # If the light is already set, then we just skip the function.
-    if len(scene.get_all_lights()) >= 3:
-        return
+    # if len(scene.get_all_lights()) >= 3:
+    #     return
     # asset_dir = Path(__file__).parent.parent.parent / "assets"
     # ktx_path = asset_dir / "misc" / "ktx" / "wall.ktx"
     # scene.set_environment_map(str(ktx_path))

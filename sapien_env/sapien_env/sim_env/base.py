@@ -31,7 +31,7 @@ class BaseSimulationEnv(object):
         self.np_random = None
         self.viewer: Optional[Viewer] = None
         self.scene: Optional[sapien.Scene] = None
-        self.robot: Optional[sapien.Articulation] = None
+        self.robot: Optional[sapien.physx.PhysxArticulation] = None
         self.init_state: Optional[Dict] = None
         self.robot_name = ""
 
@@ -83,7 +83,7 @@ class BaseSimulationEnv(object):
         else:
             raise NotImplementedError
 
-    def check_contact(self, actors1: List[sapien.Actor], actors2: List[sapien.Actor], impulse_threshold=1e-2) -> bool:
+    def check_contact(self, actors1: List[sapien.Entity], actors2: List[sapien.Entity], impulse_threshold=1e-2) -> bool:
         actor_set1 = set(actors1)
         actor_set2 = set(actors2)
         for contact in self.scene.get_contacts():
@@ -95,7 +95,7 @@ class BaseSimulationEnv(object):
                 return True
         return False
 
-    def check_actor_pair_contact(self, actor1: sapien.Actor, actor2: sapien.Actor, impulse_threshold=1e-2) -> bool:
+    def check_actor_pair_contact(self, actor1: sapien.Entity, actor2: sapien.Entity, impulse_threshold=1e-2) -> bool:
         actor_pair = {actor1, actor2}
         for contact in self.scene.get_contacts():
             contact_actors = {contact.actor0, contact.actor1}
@@ -106,7 +106,7 @@ class BaseSimulationEnv(object):
                 return True
         return False
 
-    def check_actor_pair_contacts(self, actors1: List[sapien.Actor], actor2: sapien.Actor,
+    def check_actor_pair_contacts(self, actors1: List[sapien.Entity], actor2: sapien.Entity,
                                   impulse_threshold=1e-10) -> np.ndarray:
         actor_set1 = set(actors1)
         contact_buffer = np.zeros(len(actors1))
@@ -122,7 +122,7 @@ class BaseSimulationEnv(object):
         # print(contact_buffer)
         return contact_buffer
     
-    def check_actor_contacts_continuous(self, actors1: List[sapien.Actor], actor2: sapien.Actor,
+    def check_actor_contacts_continuous(self, actors1: List[sapien.Entity], actor2: sapien.Entity,
                                   impulse_threshold=1e-10) -> np.ndarray:
         actor_set1 = set(actors1)
         contacts = np.zeros(len(actors1))
@@ -167,7 +167,8 @@ class BaseSimulationEnv(object):
             table_visual_material = self.renderer.create_material()
             table_visual_material.set_metallic(0.0)
             table_visual_material.set_specular(0.3)
-            table_visual_material.set_diffuse_texture_from_file(str(table_map_path))
+            texture = sapien.render.RenderTexture2D(str(table_map_path))
+            table_visual_material.set_diffuse_texture(texture)
             # table_visual_material.set_base_color(np.array([0,0,0, 1]))
             table_visual_material.set_roughness(0.3)
             leg_size = np.array([0.025, 0.025, (table_height / 2 - table_half_size[2])])
@@ -210,7 +211,7 @@ class BaseSimulationEnv(object):
             up_dir = np.cross(look_at_dir, -right_dir)
             rot_mat_homo = np.stack([look_at_dir, -right_dir, up_dir, position], axis=1)
             pose_mat = np.concatenate([rot_mat_homo, np.array([[0, 0, 0, 1]])])
-            pose_cam = sapien.Pose.from_transformation_matrix(pose_mat)
+            pose_cam = sapien.Pose(pose_mat)
             cam = self.scene.add_camera(name, width=resolution[0], height=resolution[1], fovy=fov, near=0.1, far=10)
             cam.set_local_pose(pose_cam)
 

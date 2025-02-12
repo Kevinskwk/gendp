@@ -5,7 +5,7 @@ import sapien.core as sapien
 
 
 class PartialKinematicModel:
-    def __init__(self, robot: sapien.Articulation, start_joint_name: str, end_joint_name: str):
+    def __init__(self, robot: sapien.physx.PhysxArticulation, scene:sapien.Scene, start_joint_name: str, end_joint_name: str):
         self.original_robot = robot
         self.start_joint_tuple = \
             [(joint, num) for num, joint in enumerate(robot.get_joints()) if
@@ -16,7 +16,7 @@ class PartialKinematicModel:
         self.start_link = self.start_joint_tuple[0].get_parent_link()
         self.end_link = self.end_joint_tuple[0].get_child_link()
         # Build new articulation for partial kinematics chain
-        scene = robot.get_builder().get_scene()
+        # scene = robot.get_builder().get_scene()
         builder = scene.create_articulation_builder()
         root = builder.create_link_builder()
         root.set_mass_and_inertia(

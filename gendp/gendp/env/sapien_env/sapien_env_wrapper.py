@@ -140,7 +140,7 @@ class SapienEnvWrapper():
             ee_rotation = transforms3d.euler.quat2euler(self.env.palm_link.get_pose().q,axes='sxyz')
             ee_gripper = self.env.robot.get_qpos()[arm_dof]
             ee_pos = np.concatenate([ee_translation,ee_rotation,[ee_gripper]])
-            ee_vel = np.concatenate([self.env.palm_link.get_velocity(),self.env.palm_link.get_angular_velocity(),self.env.robot.get_qvel()[arm_dof:arm_dof+1]])
+            ee_vel = np.concatenate([self.env.palm_link.get_linear_velocity(),self.env.palm_link.get_angular_velocity(),self.env.robot.get_qvel()[arm_dof:arm_dof+1]])
             raw_obs['ee_pos'] = ee_pos
             raw_obs['ee_vel'] = ee_vel
             rgbs, depths = self.gui.render(depth=True)

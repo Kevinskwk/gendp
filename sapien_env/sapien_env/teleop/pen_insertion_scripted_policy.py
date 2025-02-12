@@ -74,11 +74,11 @@ class SingleArmPolicy:
         # mug_pose_mat = env.manipulated_object.get_pose().to_transformation_matrix()
         # grasp_pose_in_mug_mat = grasp_pose.to_transformation_matrix()
         # grasp_pose_in_world_mat = mug_pose_mat @ grasp_pose_in_mug_mat
-        # grasp_pose_in_world = sapien.Pose.from_transformation_matrix(grasp_pose_in_world_mat)
+        # grasp_pose_in_world = sapien.Pose(grasp_pose_in_world_mat)
         
         # pre_grasp_pose_in_mug_mat = pre_grasp_pose.to_transformation_matrix()
         # pre_grasp_pose_in_world_mat = mug_pose_mat @ pre_grasp_pose_in_mug_mat
-        # pre_grasp_pose_in_world = sapien.Pose.from_transformation_matrix(pre_grasp_pose_in_world_mat)
+        # pre_grasp_pose_in_world = sapien.Pose(pre_grasp_pose_in_world_mat)
         
         
         # place pose setting
@@ -88,17 +88,17 @@ class SingleArmPolicy:
         # place_pose = sapien.Pose(place_p,place_q)
         # place_pose_in_mug_tree_mat = place_pose.to_transformation_matrix()
         # place_pose_in_world_mat = mug_tree_mat @ place_pose_in_mug_tree_mat
-        # place_pose_in_world = sapien.Pose.from_transformation_matrix(place_pose_in_world_mat)
+        # place_pose_in_world = sapien.Pose(place_pose_in_world_mat)
         
         # post_place_pose = sapien.Pose(post_place_p,post_place_q)
         # post_place_pose_in_mug_tree_mat = post_place_pose.to_transformation_matrix()
         # post_place_pose_in_world_mat = mug_tree_mat @ post_place_pose_in_mug_tree_mat
-        # post_place_pose_in_world = sapien.Pose.from_transformation_matrix(post_place_pose_in_world_mat)
+        # post_place_pose_in_world = sapien.Pose(post_place_pose_in_world_mat)
         
         # leave_pose = sapien.Pose(leave_p,leave_q)
         # leave_pose_in_mug_tree_mat = leave_pose.to_transformation_matrix()
         # leave_pose_in_world_mat = mug_tree_mat @ leave_pose_in_mug_tree_mat
-        # leave_pose_in_world = sapien.Pose.from_transformation_matrix(leave_pose_in_world_mat)
+        # leave_pose_in_world = sapien.Pose(leave_pose_in_world_mat)
         pen_pose = env.manipulated_object.get_pose()
         pen_pose_mat = pen_pose.to_transformation_matrix()
         if env.manip_obj_name == 'pencil':
@@ -200,7 +200,7 @@ def main_env():
         ee_rotation = transforms3d.euler.quat2euler(env.palm_link.get_pose().q,axes='sxyz')
         ee_gripper = env.robot.get_qpos()[arm_dof]
         ee_pos = np.concatenate([ee_translation,ee_rotation,[ee_gripper]])
-        ee_vel = np.concatenate([env.palm_link.get_velocity(),env.palm_link.get_angular_velocity(),env.robot.get_qvel()[arm_dof:arm_dof+1]])
+        ee_vel = np.concatenate([env.palm_link.get_linear_velocity(),env.palm_link.get_angular_velocity(),env.robot.get_qvel()[arm_dof:arm_dof+1]])
         # timesteps += 1
     if not gui.headless:
         gui.viewer.close()
