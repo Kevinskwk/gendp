@@ -8,7 +8,8 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
 from matplotlib import cm
-from mobile_exp.utils.draw_utils import draw_keypoints
+# from mobile_exp.utils.draw_utils import draw_keypoints
+from d3fields.utils.draw_utils import draw_keypoints
 from PIL import Image
 
 patch_h = 40
@@ -18,17 +19,18 @@ patch_w = 40
 feat_dim = 1024  # vitl14
 # feat_dim = 1536 # vitg14
 
-root_dir = "/workspaces/bdai/projects/dexterous_mobile_manipulation/src/mobile_exp/data"
-obj_type = "handle"
+# root_dir = "/workspaces/bdai/projects/dexterous_mobile_manipulation/src/mobile_exp/data"
+root_dir = "/home/showlab-ws/robotics/gendp/d3fields_dev/d3fields"
+obj_type = "allen_key"
 os.system(f"mkdir -p {root_dir}/sel_feats/{obj_type}")
 
 device = "cuda"
 
 img_paths = [
-    f"{root_dir}/wild/{obj_type}/0.jpg",
-    f"{root_dir}/wild/{obj_type}/1.jpg",
-    f"{root_dir}/wild/{obj_type}/2.jpg",
-    f"{root_dir}/wild/{obj_type}/3.jpg",
+    f"{root_dir}/data/{obj_type}/0.jpg",
+    f"{root_dir}/data/{obj_type}/1.jpg",
+    f"{root_dir}/data/{obj_type}/2.jpg",
+    f"{root_dir}/data/{obj_type}/3.jpg",
 ]
 
 transform = T.Compose(
