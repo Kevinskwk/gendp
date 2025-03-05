@@ -111,8 +111,8 @@ class GUIBase:
         if not use_ray_tracing and not headless:
             self.viewer = Viewer(renderer)
             self.viewer.set_scene(scene)
-            self.viewer.toggle_axes(False)
-            self.viewer.toggle_camera_lines(False)
+            # self.viewer.toggle_axes(False)
+            # self.viewer.toggle_camera_lines(False)
             self.viewer.set_camera_xyz(-0.3, 0, 0.5)
             self.viewer.set_camera_rpy(0, -1.4, 0)
         self.resolution = resolution
@@ -130,10 +130,10 @@ class GUIBase:
 
     def create_camera(self, position, look_at_dir, right_dir, name):
         builder = self.scene.create_actor_builder()
-        builder.set_mass_and_inertia(1e-2, Pose(np.zeros(3)), np.ones(3) * 1e-4)
+        # builder.set_mass_and_inertia(1e-2, Pose(np.zeros(3)), np.ones(3) * 1e-4)
         mount = builder.build_static(name=f"{name}_mount")
         cam = self.scene.add_mounted_camera(name, mount, Pose(), width=self.resolution[0], height=self.resolution[1],
-                                            fovy=0.9, fovx=0.9, near=0.1, far=10)
+                                            fovy=0.9, near=0.1, far=10)
 
         # Construct camera pose
         look_at_dir = look_at_dir / np.linalg.norm(look_at_dir)
@@ -175,7 +175,7 @@ class GUIBase:
     def create_free_camera(self):
         name = 'free'
         builder = self.scene.create_actor_builder()
-        builder.set_mass_and_inertia(1e-2, Pose(np.zeros(3)), np.ones(3) * 1e-4)
+        # builder.set_mass_and_inertia(1e-2, Pose(np.zeros(3)), np.ones(3) * 1e-4)
         mount = builder.build_static(name=f"{name}_mount")
         cam = self.scene.add_mounted_camera(name, mount, Pose(), width=self.resolution[0], height=self.resolution[1],
                                             fovy=0.9, fovx=0.9, near=0.1, far=10)

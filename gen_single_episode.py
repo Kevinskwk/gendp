@@ -200,7 +200,7 @@ def main_env(episode_idx, dataset_dir, headless, mode, task_name, manip_obj=None
         ee_rotation = transforms3d.euler.quat2euler(env.palm_link.get_pose().q,axes='sxyz')
         ee_gripper = env.robot.get_qpos()[arm_dof]
         ee_pos = np.concatenate([ee_translation,ee_rotation,[ee_gripper]])
-        ee_vel = np.concatenate([env.palm_link.get_velocity(),env.palm_link.get_angular_velocity(),env.robot.get_qvel()[arm_dof:arm_dof+1]])
+        ee_vel = np.concatenate([env.palm_link.get_linear_velocity(),env.palm_link.get_angular_velocity(),env.robot.get_qvel()[arm_dof:arm_dof+1]])
         data_dict['observations']['ee_pos'].append(ee_pos)
         data_dict['observations']['ee_vel'].append(ee_vel)
         data_dict['joint_action'].append(action.copy())
