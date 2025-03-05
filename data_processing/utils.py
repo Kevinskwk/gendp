@@ -141,5 +141,7 @@ def get_extrinsic(pos, quat):
     # Create the 3x4 extrinsic matrix [R|t]
     extrinsic_matrix[:3, :3] = rot.as_matrix()
     extrinsic_matrix[:3, 3:] = t
+
+    extrinsic_matrix = np.linalg.inv(extrinsic_matrix)
     
     return extrinsic_matrix

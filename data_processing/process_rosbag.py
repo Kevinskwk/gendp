@@ -9,10 +9,7 @@ import argparse
 import yaml
 from tqdm import tqdm
 import transforms3d
-# import pickle
-# import tf
 import rospy
-# from tf.transformations import quaternion_matrix, translation_from_matrix, quaternion_from_matrix
 
 from gendp.common.data_utils import save_dict_to_hdf5
 from tf_bag import BagTfTransformer
@@ -137,7 +134,6 @@ def extract_data_from_rosbag(bag_path, output_dir, topics=None):
     print("First pass: processing TF messages...")
     bag_transformer = BagTfTransformer(bag)
     # print(bag_transformer.getTransformGraphInfo())
-    # tf_t = tf.Transformer(True, rospy.Duration(3600.0))
     
     # Second pass: collect all timestamps for sensor data
     print("Second pass: collecting timestamps for sensor data...")
@@ -215,14 +211,11 @@ def extract_data_from_rosbag(bag_path, output_dir, topics=None):
             # Extract transform data for camera frames at this timestamp
             transform_data = {}
             for frame in tf_frames:
-                # transform = tf_t.lookupTransform(frame, reference_frame, rospy.Time(secs=timestamp))
                 try:
                     transform = bag_transformer.lookupTransform(reference_frame, frame, rospy.Time(secs=timestamp))
                 except:
                     transform = ([0, 0, 0], [0, 0, 0, 1])
                 if transform:
-                    # pos, quat = transform
-                    # rpy = transforms3d.euler.quat2euler(quat)
                     transform_data[frame] = transform
             
             # twist = bag_transformer.lookupTwist('panda_EE', reference_frame, rospy.Time(secs=timestamp))
@@ -235,13 +228,6 @@ def extract_data_from_rosbag(bag_path, output_dir, topics=None):
     
     # Close the bag
     bag.close()
-    
-    # Save data dictionary
-    # output_path = os.path.join(output_dir, os.path.basename(bag_path).replace('.bag', '.pkl'))
-    # with open(output_path, 'wb') as f:
-    #     pickle.dump(data, f)
-    
-    # print(f"Data saved to {output_path}")
     
     return data
 
@@ -383,7 +369,7 @@ def main(bag_path, output_dir, episode_idx):
 
 
     dataset_path = os.path.join(output_dir, f'episode_{episode_idx}.hdf5')
-    # dataset_path = os.path.join(output_dir, 'episode_0.hdf5')
+    num_timesteps = len(data['timestamps'])
 
     data_dict = {
         # 'meta': data['meta'],
@@ -392,7 +378,7 @@ def main(bag_path, output_dir, episode_idx):
             {'joint_pos': [],
              'joint_vel': [],
              'full_joint_pos': [], # this is to compute FK
-            #  'robot_base_pose_in_world': [],
+             'robot_base_pose_in_world': np.asarray([np.eye(4)] * num_timesteps),
              'ee_pos': [],
             #  'ee_vel': np.asarray(data['ee_vel']),
              'left_finger_pos': {},
@@ -471,7 +457,7 @@ if __name__ == "__main__":
 
     ros_bags = glob.glob(f"{args.input_dir}{args.demo_name}/*.bag")
     output_dir = f"{args.output_dir}{args.demo_name}/"
-    for i, bag_path in enumerate(ros_bags[1:]):
+    for i, bag_path in enumerate(ros_bags):
         print(f'Processing episode {i}')
         main(bag_path, output_dir, i)
 
