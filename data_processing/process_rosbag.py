@@ -12,8 +12,8 @@ import transforms3d
 import rospy
 
 from gendp.common.data_utils import save_dict_to_hdf5
+from gendp.common.cv2_util import get_extrinsic, combine_image_arrays_to_video_2x3
 from tf_bag import BagTfTransformer
-from utils import get_extrinsic, combine_image_arrays_to_video_2x3
 
 
 def extract_data_from_rosbag(bag_path, output_dir, topics=None):
