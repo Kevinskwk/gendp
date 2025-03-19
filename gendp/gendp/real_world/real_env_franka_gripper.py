@@ -578,11 +578,12 @@ def test_env_demo_replay():
     os.system('mkdir -p tmp')
     demo_path = '/home/manipulation-lab/gendp/data/rosbag/episode_2.hdf5'
     demo_dict, _ = load_dict_from_hdf5(demo_path)
-    actions = demo_dict['cartesian_action']
+    # actions = demo_dict['cartesian_action']
+    actions = demo_dict['joint_action']
     with RealEnvFranka(
             output_dir='tmp',
             init_joints=True,
-            ctrl_mode='eef'
+            ctrl_mode='joint'
         ) as env:
         print('Created env!')
 
@@ -606,7 +607,7 @@ def test_env_demo_replay():
             env.exec_actions(
                 actions=action_batch,
                 timestamps=timestamp_batch,
-                mode='eef',
+                mode='joint',
                 # ik_init=ik_init_batch
             )
             print(f'executed {end_step - start_step} actions')

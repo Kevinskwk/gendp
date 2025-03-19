@@ -60,9 +60,10 @@ class FrankaInterface:
 
     def get_ee_pose(self):
         ee_pose = np.array(self.server.get_ee_pose())
-        new_ee_pose = apply_tf(ee_pose, np.asarray([0., 0., 0.284, 0., 0., 0., 1.]))
-        print(new_ee_pose)
-        return new_ee_pose
+        # from pand_link8 to panda_EE
+        ee_pose = apply_tf(ee_pose, np.asarray([0., 0., 0.284, 0., 0., 0., 1.]))
+        # print(new_ee_pose)
+        return ee_pose
 
     def get_joint_positions(self):
         return np.array(self.server.get_joint_positions())
@@ -105,8 +106,9 @@ class FrankaInterface:
         )
 
     def update_desired_ee_pose(self, pose: np.ndarray):
-        print("updading desired ee pose:", pose)
-        # ee_pose = apply_tf(pose, np.asarray([0., 0., -0.284, 0., 0., 0., 1.]))
+        # from panda_EE to panda_link8
+        # print("updading desired ee pose:", pose)
+        pose = apply_tf(pose, np.asarray([0., 0., -0.284, 0., 0., 0., 1.]))
         self.server.update_desired_ee_pose(pose.tolist())
 
     def update_desired_joint_pos(self, pos: np.ndarray):
@@ -189,7 +191,7 @@ class FrankaInterpolationController(mp.Process):
         example = {
             'cmd': Command.SERVOL.value,
             'target_pose': np.zeros((7,), dtype=np.float64),
-            'target_joint_pos': np.zeros((9,), dtype=np.float64),
+            'target_joint_pos': np.zeros((8,), dtype=np.float64),
             'duration': 0.0,
             'target_time': 0.0
         }
@@ -303,7 +305,7 @@ class FrankaInterpolationController(mp.Process):
 
     def schedule_joint_waypoint(self, pos, target_time):
         pos = np.array(pos)
-        assert pos.shape == (7,) or pos.shape == (9,)
+        assert pos.shape == (7,) or pos.shape == (8,)
         #print(pos)
 
         message = {
@@ -472,7 +474,7 @@ class FrankaInterpolationController(mp.Process):
                         target_time = time.monotonic() - time.time() + target_time
                         curr_time = t_now + dt
                         target_joint_pos = command['target_joint_pos'][:7]
-                        if command['target_joint_pos'].shape== (9,):
+                        if command['target_joint_pos'].shape== (8,):
                             gripper=command['target_joint_pos'][-1]
                         joint_pos_interp = joint_pos_interp.schedule_waypoint(
                             cmd=target_joint_pos,

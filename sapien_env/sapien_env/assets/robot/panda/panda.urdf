@@ -221,5 +221,18 @@
     <limit effort="20" lower="0.0" upper="0.04" velocity="0.2"/>
     <mimic joint="panda_finger_joint1"/>
   </joint>
+  <link name="panda_EE">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.0"/>
+      <inertia ixx="0.001" ixy="0.0" ixz="0.0" iyy="0.001" iyz="0.0" izz="0.001"/>
+    </inertial>
+  </link>
+  <joint name="panda_EE_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0.284"/>
+    <parent link="panda_link8"/>
+    <child link="panda_EE"/>
+    <axis xyz="0 0 0"/>
+  </joint>
 </robot>
 
