@@ -40,6 +40,7 @@ import scipy.spatial.transform as st
 import diffusers
 from d3fields.utils.draw_utils import np2o3d
 from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
+# from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
 # from gendp.real_world.aloha_master import AlohaMaster
 # from gendp.real_world.aloha_bimanual_master import AlohaBimanualMaster
 from gendp.common.precise_sleep import precise_wait
@@ -110,7 +111,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SapceMouse command to executing on Robot in Sec.")
 @click.option('--n_action_steps', '-n', default=-1, type=int, help="Number of action steps to execute. -1 means invalid.")
-@click.option('--init_joints', '-j', is_flag=True, default=False, help="Whether to initialize robot joint configuration in the beginning.")
+@click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
 def main(input_dir, output, robot_ip, match_dataset, match_episode,
     vis_camera_idx, vis_d3fields,
     steps_per_inference, max_duration,
@@ -276,6 +277,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                     episode_id = env.episode_id
                     vis_camera_name = CAMERA_NAMES[vis_camera_idx]
                     vis_img = obs[f'camera_{vis_camera_name}_color'][-1]
+                    # vis_img = obs[f'tactile_right'][-1]
                     match_episode_id = episode_id
                     if match_episode is not None:
                         match_episode_id = match_episode
@@ -502,55 +504,55 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             print("action:", action)
 
                             # check abnormal action
-                            abnormal_action = False
-                            # abnormal_action_mask = np.zeros(action.shape[0], dtype=bool)
-                            for rob_i in range(num_bots):
-                                action_rob_i = action[:, rob_i*10:(rob_i+1)*10] # (T, 10), Da=10 (3 dof translation, 6 dof rotation, 1 gripper)
-                                full_joint_pos = obs['full_joint_pos'][-1][rob_i*9:(rob_i+1)*9]
-                                full_joint_pos[-2:] = 0
-                                curr_eef_pose_mat = kin_helper.compute_fk_sapien_links(full_joint_pos, [kin_helper.sapien_eef_idx])[0]
-                                # robot_base_poses = env.puppet_bot.base_pose_in_world # (num_bots, 4, 4)
-                                robot_base_pose = np.eye(4)
-                                curr_eef_pose_mat = np.linalg.inv(robot_base_pose) @ robot_base_pose @ curr_eef_pose_mat
-                                action_pos_cat = np.concatenate([curr_eef_pose_mat[:3,3][None], action_rob_i[:,:3]], axis=0)
-                                action_diff = action_pos_cat[1:] - action_pos_cat[:-1]
-                                action_diff_norm = np.linalg.norm(action_diff, axis=-1)
+                            # abnormal_action = False
+                            # # abnormal_action_mask = np.zeros(action.shape[0], dtype=bool)
+                            # for rob_i in range(num_bots):
+                            #     action_rob_i = action[:, rob_i*10:(rob_i+1)*10] # (T, 10), Da=10 (3 dof translation, 6 dof rotation, 1 gripper)
+                            #     full_joint_pos = obs['full_joint_pos'][-1][rob_i*9:(rob_i+1)*9]
+                            #     full_joint_pos[-2:] = 0
+                            #     curr_eef_pose_mat = kin_helper.compute_fk_sapien_links(full_joint_pos, [kin_helper.sapien_eef_idx])[0]
+                            #     # robot_base_poses = env.puppet_bot.base_pose_in_world # (num_bots, 4, 4)
+                            #     robot_base_pose = np.eye(4)
+                            #     curr_eef_pose_mat = np.linalg.inv(robot_base_pose) @ robot_base_pose @ curr_eef_pose_mat
+                            #     action_pos_cat = np.concatenate([curr_eef_pose_mat[:3,3][None], action_rob_i[:,:3]], axis=0)
+                            #     action_diff = action_pos_cat[1:] - action_pos_cat[:-1]
+                            #     action_diff_norm = np.linalg.norm(action_diff, axis=-1)
 
-                                curr_eef_quat = st.Rotation.from_matrix(curr_eef_pose_mat[:3,:3]).as_quat() # (4,)
-                                from pytorch3d.transforms import rotation_6d_to_matrix
-                                pred_act_rot_mat = rotation_6d_to_matrix(torch.from_numpy(action_rob_i[:,3:9])).numpy() # (T, 3, 3)
-                                pred_act_quat = st.Rotation.from_matrix(pred_act_rot_mat).as_quat() # (T, 4)
-                                pad_quat = np.concatenate([curr_eef_quat[None], pred_act_quat], axis=0)
-                                quat_dist = 1 - np.square(np.sum(pad_quat[:-1] * pad_quat[1:], axis=-1))
+                            #     curr_eef_quat = st.Rotation.from_matrix(curr_eef_pose_mat[:3,:3]).as_quat() # (4,)
+                            #     from pytorch3d.transforms import rotation_6d_to_matrix
+                            #     pred_act_rot_mat = rotation_6d_to_matrix(torch.from_numpy(action_rob_i[:,3:9])).numpy() # (T, 3, 3)
+                            #     pred_act_quat = st.Rotation.from_matrix(pred_act_rot_mat).as_quat() # (T, 4)
+                            #     pad_quat = np.concatenate([curr_eef_quat[None], pred_act_quat], axis=0)
+                            #     quat_dist = 1 - np.square(np.sum(pad_quat[:-1] * pad_quat[1:], axis=-1))
 
-                                if action_diff_norm.max() > 0.3 or quat_dist.max() > 1.5:
-                                    print('Predicted action', action_rob_i)
-                                    print('Concat action', action_pos_cat)
-                                    print('Concat quat', pad_quat)
-                                    abnormal_action = True
+                            #     if action_diff_norm.max() > 0.3 or quat_dist.max() > 1.5:
+                            #         print('Predicted action', action_rob_i)
+                            #         print('Concat action', action_pos_cat)
+                            #         print('Concat quat', pad_quat)
+                            #         abnormal_action = True
                                 
-                                    # for t in range(action.shape[0]):
-                                    #     if t == 0 and (action_diff_norm[t] > 0.1 or quat_dist[t] > 0.5) \
-                                    #         and (action_diff_norm[t+1] < 0.1 and quat_dist[t+1] < 0.5):
-                                    #         abnormal_action_mask[t] = True
-                                    #     elif t == action.shape[0] - 1 and (action_diff_norm[t] > 0.1 or quat_dist[t] > 0.5) \
-                                    #         and (action_diff_norm[t-1] < 0.1 and quat_dist[t-1] < 0.5):
-                                    #         abnormal_action_mask[t] = True
-                                    #     elif t > 0 and t < action.shape[0] - 1 and (action_diff_norm[t] > 0.1 or quat_dist[t] > 0.5) \
-                                    #         and (action_diff_norm[t-1] > 0.1 and quat_dist[t-1] > 0.5):
-                                    #         abnormal_action_mask[t] = True
-                            if abnormal_action:
-                                # action = action[~abnormal_action_mask]
-                                key_stroke = cv2.pollKey()
-                                if key_stroke == ord('s'):
-                                    # Stop episode
-                                    # Hand control back to human
-                                    env.end_episode()
-                                    print('Stopped.')
-                                    break
-                                # iter_idx += steps_per_inference
-                                # precise_wait(t_cycle_end - frame_latency)
-                                continue
+                            #         # for t in range(action.shape[0]):
+                            #         #     if t == 0 and (action_diff_norm[t] > 0.1 or quat_dist[t] > 0.5) \
+                            #         #         and (action_diff_norm[t+1] < 0.1 and quat_dist[t+1] < 0.5):
+                            #         #         abnormal_action_mask[t] = True
+                            #         #     elif t == action.shape[0] - 1 and (action_diff_norm[t] > 0.1 or quat_dist[t] > 0.5) \
+                            #         #         and (action_diff_norm[t-1] < 0.1 and quat_dist[t-1] < 0.5):
+                            #         #         abnormal_action_mask[t] = True
+                            #         #     elif t > 0 and t < action.shape[0] - 1 and (action_diff_norm[t] > 0.1 or quat_dist[t] > 0.5) \
+                            #         #         and (action_diff_norm[t-1] > 0.1 and quat_dist[t-1] > 0.5):
+                            #         #         abnormal_action_mask[t] = True
+                            # if abnormal_action:
+                            #     # action = action[~abnormal_action_mask]
+                            #     key_stroke = cv2.pollKey()
+                            #     if key_stroke == ord('s'):
+                            #         # Stop episode
+                            #         # Hand control back to human
+                            #         env.end_episode()
+                            #         print('Stopped.')
+                            #         break
+                            #     # iter_idx += steps_per_inference
+                            #     # precise_wait(t_cycle_end - frame_latency)
+                            #     continue
 
                             print('Inference latency:', time.time() - s)
                             print('predicted action', action)

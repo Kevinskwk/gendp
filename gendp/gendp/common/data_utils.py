@@ -83,7 +83,7 @@ def recursively_save_dict_contents_to_group(h5file, path, dic, config_dict):
                 config_dict[key] = {}
             recursively_save_dict_contents_to_group(h5file, path + key + '/', item, config_dict[key])
         else:
-            raise ValueError('Cannot save %s type'%type(item))
+            raise ValueError('Cannot save %s type for key'%type(item), key)
 
 def load_dict_from_hdf5(filename):
     """

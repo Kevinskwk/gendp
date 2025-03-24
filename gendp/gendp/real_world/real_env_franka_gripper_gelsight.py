@@ -11,6 +11,7 @@ from multiprocessing.managers import SharedMemoryManager
 # from diffusion_policy.real_world.rtde_interpolation_controller import RTDEInterpolationController
 from gendp.real_world.franka_interpolation_controller import FrankaInterpolationController
 from gendp.real_world.multi_realsense import MultiRealsense, SingleRealsense
+from gendp.real_world.multi_gelsight import MultiGelsight
 from gendp.real_world.video_recorder import VideoRecorder
 from gendp.common.timestamp_accumulator import (
     TimestampObsAccumulator,
@@ -44,6 +45,11 @@ DEFAULT_OBS_KEY_MAP = {
 CAMERA_NAMES = {
     0: 'wrist',
     1: 'fixed'
+}
+
+GELSIGHT_NAMES = {
+    0: 'left',
+    1: 'right'
 }
 
 class RealEnvFranka:
@@ -165,6 +171,18 @@ class RealEnvFranka:
             verbose=False
         )
 
+        gelsight = MultiGelsight(
+            device_ids= [13, 15],
+            shm_manager=shm_manager,
+            resolution=(1280, 960),
+            capture_fps=video_capture_fps,
+            put_fps=video_capture_fps,
+            put_downsample=False,
+            get_max_k=max_obs_buffer_size,
+            transform=None,
+            verbose=False
+        )
+
         multi_cam_vis = None
         if enable_multi_cam_vis:
             multi_cam_vis = MultiCameraVisualizer(
@@ -194,6 +212,7 @@ class RealEnvFranka:
         )
 
         self.realsense = realsense
+        self.gelsight = gelsight
         self.robot = robot
         # self.gripper = gripper
         self.multi_cam_vis = multi_cam_vis
@@ -211,6 +230,7 @@ class RealEnvFranka:
         # self.replay_buffer = replay_buffer
         # temp memory buffers
         self.last_realsense_data = None
+        self.last_gelsight_data = None
         # recording buffers
         self.obs_accumulator = None
         self.action_accumulator = None
@@ -221,10 +241,11 @@ class RealEnvFranka:
     # ======== start-stop API =============
     @property
     def is_ready(self):
-        return self.realsense.is_ready and self.robot.is_ready
+        return self.realsense.is_ready and self.gelsight.is_ready and self.robot.is_ready
 
     def start(self, wait=True):
         self.realsense.start(wait=False)
+        self.gelsight.start(wait=False)
         self.robot.start(wait=False)
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.start(wait=False)
@@ -237,11 +258,13 @@ class RealEnvFranka:
             self.multi_cam_vis.stop(wait=False)
         self.robot.stop(wait=False)
         self.realsense.stop(wait=False)
+        self.gelsight.stop(wait=False)
         if wait:
             self.stop_wait()
 
     def start_wait(self):
         self.realsense.start_wait()
+        self.gelsight.start_wait()
         self.robot.start_wait()
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.start_wait()
@@ -249,6 +272,7 @@ class RealEnvFranka:
     def stop_wait(self):
         self.robot.stop_wait()
         self.realsense.stop_wait()
+        self.gelsight.stop_wait()
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.stop_wait()
 
@@ -271,6 +295,10 @@ class RealEnvFranka:
         self.last_realsense_data = self.realsense.get(
             k=k,
             out=self.last_realsense_data)
+        
+        self.last_gelsight_data = self.gelsight.get(
+            k=k,
+            out=self.last_gelsight_data)
 
         # 125 hz, robot_receive_timestamp
         last_robot_data = self.robot.get_all_state()
@@ -297,6 +325,20 @@ class RealEnvFranka:
             camera_obs[f'camera_{camera_name}_depth'] = value['depth'][this_idxs]
             camera_obs[f'camera_{camera_name}_intrinsics'] = value['intrinsics'][this_idxs]
             camera_obs[f'camera_{camera_name}_extrinsics'] = value['extrinsics'][this_idxs]
+
+        tactile_obs = dict()
+        for camera_idx, value in self.last_gelsight_data.items():
+            this_timestamps = value['timestamp']
+            this_idxs = list()
+            for t in obs_align_timestamps:
+                is_before_idxs = np.nonzero(this_timestamps < t)[0]
+                this_idx = 0
+                if len(is_before_idxs) > 0:
+                    this_idx = is_before_idxs[-1]
+                this_idxs.append(this_idx)
+            # remap key
+            camera_name = GELSIGHT_NAMES[camera_idx]
+            tactile_obs[f'tactile_{camera_name}'] = value['color'][this_idxs]
 
         # align robot obs
         robot_timestamps = last_robot_data['robot_receive_timestamp']
@@ -332,6 +374,7 @@ class RealEnvFranka:
 
         # return obs
         obs_data = dict(camera_obs)
+        obs_data.update(tactile_obs)
         obs_data.update(robot_obs)
         obs_data['timestamp'] = obs_align_timestamps
         return obs_data
@@ -416,6 +459,10 @@ class RealEnvFranka:
         self.realsense.restart_put(start_time=start_time)
         self.realsense.start_recording(video_path=video_paths, start_time=start_time)
 
+        # start recording on gelsight
+        self.gelsight.restart_put(start_time=start_time)
+        # self.gelsight.start_recording(video_path=video_paths, start_time=start_time)
+
         # create accumulators
         self.obs_accumulator = TimestampObsAccumulator(
             start_time=start_time,
@@ -437,6 +484,7 @@ class RealEnvFranka:
 
         # stop video recorder
         self.realsense.stop_recording()
+        # self.gelsight.stop_recording()
 
         if self.obs_accumulator is not None:
             # recording
@@ -474,7 +522,9 @@ class RealEnvFranka:
                          'ee_pos': [],
                         #  'ee_vel': [],
                         #  'finger_pos': {},
-                         'images': {},},
+                         'images': {},
+                         'tactile': {},
+                        },
                     # 'joint_action': [],
                     # 'cartesian_action': [],
                 }
@@ -482,10 +532,11 @@ class RealEnvFranka:
                 # for finger in finger_names:
                 #     episode['observations']['finger_pos'][finger] = []
                 for cam in range(num_cam):
-                    episode['observations']['images'][f'camera_{cam}_color'] = []
-                    episode['observations']['images'][f'camera_{cam}_depth'] = []
-                    episode['observations']['images'][f'camera_{cam}_intrinsics'] = []
-                    episode['observations']['images'][f'camera_{cam}_extrinsics'] = []
+                    cam_name = CAMERA_NAMES[cam]
+                    episode['observations']['images'][f'camera_{cam_name}_color'] = []
+                    episode['observations']['images'][f'camera_{cam_name}_depth'] = []
+                    episode['observations']['images'][f'camera_{cam_name}_intrinsics'] = []
+                    episode['observations']['images'][f'camera_{cam_name}_extrinsics'] = []
 
                 ### create attr dict
                 attr_dict = {
@@ -502,6 +553,7 @@ class RealEnvFranka:
                     },
                 }
                 for cam in range(num_cam):
+                    cam_name = CAMERA_NAMES[cam]
                     color_save_kwargs = {
                         'chunks': (1, cam_height, cam_width, 3), # (1, 480, 640, 3)
                         'compression': 'gzip',
@@ -514,8 +566,8 @@ class RealEnvFranka:
                         'compression_opts': 9,
                         'dtype': 'uint16',
                     }
-                    config_dict['observations']['images'][f'camera_{cam}_color'] = color_save_kwargs
-                    config_dict['observations']['images'][f'camera_{cam}_depth'] = depth_save_kwargs
+                    config_dict['observations']['images'][f'camera_{cam_name}_color'] = color_save_kwargs
+                    config_dict['observations']['images'][f'camera_{cam_name}_depth'] = depth_save_kwargs
 
                 episode['timestamp'] = obs_timestamps[:n_steps]
                 if self.ctrl_mode == 'joint':
@@ -528,6 +580,8 @@ class RealEnvFranka:
                         episode['observations']['images'][key] = value[:n_steps]
                     # elif 'finger' in key:
                     #     episode['observations']['finger_pos'][key] = value[:n_steps]
+                    elif 'tactile' in key:
+                        episode['observations']['tactile'][key] = value[:n_steps]
                     else:
                         episode['observations'][key] = value[:n_steps]
 

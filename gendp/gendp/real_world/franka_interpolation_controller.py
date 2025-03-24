@@ -120,13 +120,17 @@ class FrankaInterface:
 
     def get_gripper_position(self):
         gripper_position= np.array(self.server.get_gripper_position()).reshape([1,])
-        return (1 - gripper_position / 0.085) * 255
+        # return (1 - gripper_position / 0.085) * 255
+        return gripper_position
     
     def set_gripper_position(self, pos):
         # is in range 0 - 255, 255 is fully close
-        pos += 20
-        width = (1 - pos / 255) * 0.085
-        self.server.set_gripper_position(width)
+        # pos += 20
+        # width = (3 - pos / 230) * 0.085
+        self.server.set_gripper_position(pos)
+    
+    def get_force_torque(self):
+        return np.array(self.server.get_force_torque())
 
     def terminate_current_policy(self):
         self.server.terminate_current_policy()
@@ -207,7 +211,8 @@ class FrankaInterpolationController(mp.Process):
             ('ActualQWGripper', 'get_joint_positions_w_gripper'),
             ('FullActualQWGripper', 'get_joint_positions_w_gripper'),
             ('ActualQdWGripper', 'get_joint_velocities_w_gripper'),
-            ('WristCamExtrinsics', 'get_wrist_camera_extrinsics')
+            ('WristCamExtrinsics', 'get_wrist_camera_extrinsics'),
+            ('ForceTorque', 'get_force_torque')
             # ('gripper_position', 'get_gripper_position'),
         ]
         example = dict()
@@ -220,6 +225,8 @@ class FrankaInterpolationController(mp.Process):
                 example[key] = np.zeros(1)
             elif 'extrinsics' in func_name:
                 example[key] = np.zeros((4, 4))
+            elif 'force_torque' in func_name:
+                example[key] = np.zeros(6)
 
         example['robot_receive_timestamp'] = time.time()
         example['robot_timestamp'] = time.time()
