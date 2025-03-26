@@ -41,7 +41,7 @@ from gendp.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 @click.option('--output_dir', '-o', required=True, help='Directory to save recording')
 @click.option('--robot_ip', '-ri ', default="192.168.1.143", help="Franka's IP address ")
 @click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
-@click.option('--vis_camera_idx', default=0, type=int, help="Which RealSense camera to visualize.")
+@click.option('--vis_camera_idx', default=1, type=int, help="Which RealSense camera to visualize.")
 # @click.option('--vis_d3fields', default=False, type=bool, help="Visualize d3fields.")
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SapceMouse command to executing on Robot in Sec.")
@@ -80,7 +80,7 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
             iter_idx = 0
             stop = False
             is_recording = False
-            gripper_pos = 3
+            gripper_pos = 0.14
             while not stop:
                 # calculate timing
                 t_cycle_end = t_start + (iter_idx + 1) * dt
@@ -123,11 +123,11 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                         # delete
                     elif key_stroke == KeyCode(char='g'):
                         # close gripper
-                        gripper_pos = 220
+                        gripper_pos = 0.02
                         print('Closing gripper.')
                     elif key_stroke == KeyCode(char='o'):
                         # open gripper
-                        gripper_pos = 3
+                        gripper_pos = 0.14
                         print('Opening gripper.')
                 stage = key_counter[Key.space]
                 if stage >= len(output_dir):
@@ -137,8 +137,10 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                     is_recording = False
 
                 # visualize
-                # vis_img = obs[f'camera_{CAMERA_NAMES[vis_camera_idx]}_color'][-1,:,:,::-1].copy()
-                vis_img = obs[f'tactile_right'][-1,:,:,::-1].copy()
+                rs_fixed = obs[f'camera_{CAMERA_NAMES[vis_camera_idx]}_color'][-1,:,:,::-1].copy()
+                tactile_left = obs[f'tactile_left'][-1,:,:,::-1].copy()
+                tactile_right = obs[f'tactile_right'][-1,:,:,::-1].copy()
+                vis_img = np.concatenate([tactile_left, rs_fixed, tactile_right], axis=1)
                 episode_id = env.episode_id
                 text = f'Episode: {episode_id}, Stage: {stage}'
                 if is_recording:
@@ -157,13 +159,11 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                 cv2.pollKey()
 
                 joint_pos = obs['full_joint_pos']
-                actions=joint_pos[:, :8]
-                actions[:, -1] = gripper_pos
-                # print(actions)
+                actions = joint_pos[-1, :8]
+                actions[-1] = gripper_pos
                 env.exec_actions(
-                    actions=actions,
-                    # timestamps=[t_command_target-time.monotonic()+time.time()])
-                    timestamps=obs['timestamp']+0.04)
+                    actions=[actions],
+                    timestamps=[t_command_target-time.monotonic()+time.time()])
                 precise_wait(t_cycle_end)
                 iter_idx += 1
 

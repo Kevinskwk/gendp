@@ -25,6 +25,7 @@ from gendp.common.replay_buffer import ReplayBuffer
 from gendp.common.cv2_util import (get_extrinsic,
     get_image_transform, optimal_row_cols)
 from gendp.common.data_utils import save_dict_to_hdf5
+from gendp.common.kinematics_utils import KinHelper
 
 
 DEFAULT_OBS_KEY_MAP = {
@@ -79,6 +80,8 @@ class RealEnvFranka:
             # video capture params
             video_capture_fps=30,
             video_capture_resolution=(640, 480),
+            gelsight_capture_resolution=(1280, 960),
+            gelsight_ids=(34, 36),
             # saving params
             record_raw_video=True,
             thread_per_video=2,
@@ -117,6 +120,19 @@ class RealEnvFranka:
         def transform(data):
             data['color'] = color_transform(data['color'])
             data['depth'] = cv2.resize(data['depth'], obs_image_resolution, interpolation=cv2.INTER_NEAREST)
+            return data
+
+        gs_color_tf = get_image_transform(
+            input_res=gelsight_capture_resolution,
+            output_res=obs_image_resolution,
+            # obs output rgb
+            bgr_to_rgb=True)
+        gs_color_transform = gs_color_tf
+        if obs_float32:
+            gs_color_transform = lambda x: gs_color_tf(x).astype(np.float32) / 255
+
+        def gs_transform(data):
+            data['color'] = gs_color_transform(data['color'])
             return data
 
         rw, rh, col, row = optimal_row_cols(
@@ -172,14 +188,14 @@ class RealEnvFranka:
         )
 
         gelsight = MultiGelsight(
-            device_ids= [13, 15],
+            device_ids= gelsight_ids,
             shm_manager=shm_manager,
-            resolution=(1280, 960),
+            resolution=gelsight_capture_resolution,
             capture_fps=video_capture_fps,
             put_fps=video_capture_fps,
             put_downsample=False,
             get_max_k=max_obs_buffer_size,
-            transform=None,
+            transform=gs_transform,
             verbose=False
         )
 
@@ -214,6 +230,16 @@ class RealEnvFranka:
         self.realsense = realsense
         self.gelsight = gelsight
         self.robot = robot
+        # self.kin_helper = KinHelper(robot_name='franka_ft300_robotiq_2f_140')
+        # left and right finger pose
+        # for link_idx, link in enumerate(self.kin_helper.sapien_robot.get_links()):
+        #     # print(link.name)
+        #     if link.name == 'left_gelsight':
+        #         self.left_gs_idx = link_idx
+        #     if link.name == 'right_gelsight':
+        #         self.right_gs_idx = link_idx
+        self.fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
+        
         # self.gripper = gripper
         self.multi_cam_vis = multi_cam_vis
         self.video_capture_fps = video_capture_fps
@@ -337,8 +363,8 @@ class RealEnvFranka:
                     this_idx = is_before_idxs[-1]
                 this_idxs.append(this_idx)
             # remap key
-            camera_name = GELSIGHT_NAMES[camera_idx]
-            tactile_obs[f'tactile_{camera_name}'] = value['color'][this_idxs]
+            gs_name = GELSIGHT_NAMES[camera_idx]
+            tactile_obs[f'tactile_{gs_name}'] = value['color'][this_idxs]
 
         # align robot obs
         robot_timestamps = last_robot_data['robot_receive_timestamp']
@@ -363,20 +389,29 @@ class RealEnvFranka:
                 camera_obs[f'camera_wrist_extrinsics'] = v[this_idxs]
             else:
                 robot_obs[k] = v[this_idxs]
-        fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
-        camera_obs[f'camera_fixed_extrinsics'] = np.tile(fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        # accumulate obs
-        if self.obs_accumulator is not None:
-            self.obs_accumulator.put(
-                robot_obs_raw,
-                robot_timestamps
-            )
+
+
+        camera_obs['camera_fixed_extrinsics'] = np.tile(self.fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+
+        # qpos = robot_obs['joint_pos'][0, :-1].copy()
+        # qpos[-1] *= 5  # 0.14 to 0.7
+        # print(qpos)
+        # gs_poses = self.kin_helper.compute_fk_sapien_links(qpos, [self.left_gs_idx, self.right_gs_idx])
+        # print(gs_poses)
 
         # return obs
         obs_data = dict(camera_obs)
         obs_data.update(tactile_obs)
         obs_data.update(robot_obs)
+
+        # accumulate obs
+        if self.obs_accumulator is not None:
+            self.obs_accumulator.put(
+                obs_data,
+                obs_align_timestamps
+            )
         obs_data['timestamp'] = obs_align_timestamps
+        # print(obs_data)
         return obs_data
 
     def exec_actions(self,
@@ -516,12 +551,16 @@ class RealEnvFranka:
                     'stage': None,
                     'observations': 
                         {'joint_pos': [],
+                         'joint_vel': [],
                          'full_joint_pos': [], # this is to compute FK
                          'robot_base_pose_in_world': np.asarray([np.eye(4)] * n_steps),
                         #  'joint_vel': [],
                          'ee_pos': [],
                         #  'ee_vel': [],
                         #  'finger_pos': {},
+                        #  'left_finger_pos': [], # xyz quat (7)
+                        #  'right_finger_pos': [],
+                         'force_torque': [],
                          'images': {},
                          'tactile': {},
                         },
@@ -546,7 +585,8 @@ class RealEnvFranka:
                 ### create config dict
                 config_dict = {
                     'observations': {
-                        'images': {}
+                        'images': {},
+                        'tactile': {}
                     },
                     'timestamp': {
                         'dtype': 'float64'
@@ -568,6 +608,16 @@ class RealEnvFranka:
                     }
                     config_dict['observations']['images'][f'camera_{cam_name}_color'] = color_save_kwargs
                     config_dict['observations']['images'][f'camera_{cam_name}_depth'] = depth_save_kwargs
+
+                for gs in range(2):
+                    gs_name = GELSIGHT_NAMES[gs]
+                    color_save_kwargs = {
+                        'chunks': (1, cam_height, cam_width, 3), # (1, 480, 640, 3)
+                        'compression': 'gzip',
+                        'compression_opts': 9,
+                        'dtype': 'uint8',
+                    }
+                    config_dict['observations']['tactile'][f'tactile_{gs_name}'] = color_save_kwargs
 
                 episode['timestamp'] = obs_timestamps[:n_steps]
                 if self.ctrl_mode == 'joint':

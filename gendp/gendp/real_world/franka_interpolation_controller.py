@@ -61,7 +61,7 @@ class FrankaInterface:
     def get_ee_pose(self):
         ee_pose = np.array(self.server.get_ee_pose())
         # from pand_link8 to panda_EE
-        ee_pose = apply_tf(ee_pose, np.asarray([0., 0., 0.284, 0., 0., 0., 1.]))
+        # ee_pose = apply_tf(ee_pose, np.asarray([0., 0., 0.284, 0., 0., 0., 1.]))
         # print(new_ee_pose)
         return ee_pose
 
@@ -108,7 +108,7 @@ class FrankaInterface:
     def update_desired_ee_pose(self, pose: np.ndarray):
         # from panda_EE to panda_link8
         # print("updading desired ee pose:", pose)
-        pose = apply_tf(pose, np.asarray([0., 0., -0.284, 0., 0., 0., 1.]))
+        # pose = apply_tf(pose, np.asarray([0., 0., -0.284, 0., 0., 0., 1.]))
         self.server.update_desired_ee_pose(pose.tolist())
 
     def update_desired_joint_pos(self, pos: np.ndarray):
@@ -357,7 +357,7 @@ class FrankaInterpolationController(mp.Process):
             # close gripper
             print("Testing Gripper")
             # robot.control_gripper(gripper_action=1.0)
-            robot.set_gripper_position(0)
+            robot.set_gripper_position(0.14)
             time.sleep(1.0)
 
             # main loop
@@ -389,7 +389,7 @@ class FrankaInterpolationController(mp.Process):
                     Kqd=None
                 )
 
-            gripper=0.0 
+            gripper = 0.14
 
             t_start = time.monotonic()
             iter_idx = 0
