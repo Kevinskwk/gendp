@@ -12,13 +12,15 @@ from d3fields.fusion import Fusion
 import scipy.spatial.transform as st
 
 ### hyper param
-epi_range = [0]
+epi_range = [1]
 vis_robot = True
 vis_action = True
 curr_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = f'{curr_dir}/../../data/sapien_demo/hang_mug_demo'
+# data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
+data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
 robot_name = 'panda'
-cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
+# cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
+cam_keys = ['camera_wrist', 'camera_fixed']
 
 ### set up shape_meta
 shape_meta = {
@@ -27,16 +29,24 @@ shape_meta = {
     'info': {
         'reference_frame': 'world',
         'distill_dino': True,
-        'distill_obj': 'mug',
-        'view_keys': ['left_bottom_view', 'right_bottom_view', 'left_top_view', 'right_top_view'],
+        # 'distill_obj': 'pencil',
+        'distill_obj': 'screw_driver',
+        # 'view_keys': ['left_bottom_view', 'right_bottom_view', 'left_top_view', 'right_top_view'],
+        'view_keys': ['wrist', 'fixed'],
         'N_gripper': 400,
         'boundaries': {
-            'x_lower': -0.35,
-            'x_upper': 0.35,
-            'y_lower': -0.3,
-            'y_upper': 0.5,
-            'z_lower': 0.01,
-            'z_upper': 0.5
+            # 'x_lower': -0.35,
+            # 'x_upper': 0.35,
+            # 'y_lower': -0.3,
+            # 'y_upper': 0.5,
+            # 'z_lower': 0.01,
+            # 'z_upper': 0.5
+            'x_lower': 0.2,
+            'x_upper': 0.8,
+            'y_lower': -0.4,
+            'y_upper': 0.4,
+            'z_lower': -0.03,
+            'z_upper': 0.7,
         },
         'resize_ratio': 0.5
     }
@@ -59,7 +69,8 @@ for i in tqdm(epi_range):
 
     # add meshes to visualize actions
     if vis_action:
-        init_cart = data_dict['cartesian_action'][0] # (horizon, 7)
+        # init_cart = data_dict['cartesian_action'][0] # (horizon, 7)
+        init_cart = data_dict['observations']['ee_pos'][0]
         action_horizon = init_cart.shape[0]
         action_cm = colormaps.get_cmap('plasma')
         action_colors = action_cm(np.linspace(0, 1, init_cart.shape[0], endpoint=True))[:, :3] # (horizon, 3)
@@ -74,8 +85,9 @@ for i in tqdm(epi_range):
         robot_base_in_world = robot_base_in_world_seq[t]
         colors = np.stack([data_dict['observations']['images'][f'{cam_key}_color'][t:t+1] for cam_key in cam_keys], axis=1) # (N, H, W, 3)
         depths = np.stack([data_dict['observations']['images'][f'{cam_key}_depth'][t:t+1] for cam_key in cam_keys], axis=1) / 1000. # (N, H, W)
-        intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsic'][t:t+1] for cam_key in cam_keys], axis=1)
-        extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsic'][t:t+1] for cam_key in cam_keys], axis=1)
+        intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsics'][t:t+1] for cam_key in cam_keys], axis=1)
+        extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t:t+1] for cam_key in cam_keys], axis=1)
+        extrinsics[0, 1, 1, 3] -= 0.02
         pcd, pcd_feats = d3fields_proc(
             fusion=fusion,
             shape_meta=shape_meta,
@@ -106,7 +118,8 @@ for i in tqdm(epi_range):
             # update action box
             t_start = t
             t_end = min(t_start + action_horizon, T)
-            ee_target_pose = data_dict['cartesian_action'][t_start:t_end] # (horizon, 7)
+            # ee_target_pose = data_dict['cartesian_action'][t_start:t_end] # (horizon, 7)
+            ee_target_pose = data_dict['observations']['ee_pos'][t_start:t_end] # (horizon, 7)
             ee_target_pose_mat = np.tile(np.eye(4)[None], (t_end - t_start, 1, 1))
             ee_target_pose_mat[:, :3, 3] = ee_target_pose[:, :3]
             ee_target_pose_mat[:, :3, :3] = st.Rotation.from_euler('xyz', ee_target_pose[:, 3:6]).as_matrix()

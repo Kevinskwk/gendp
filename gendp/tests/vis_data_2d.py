@@ -7,13 +7,14 @@ import cv2
 import matplotlib
 from gendp.common.data_utils import load_dict_from_hdf5
 
-epi_range = [0]
+epi_range = [4]
 
 curr_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = f'{curr_dir}/../../data/sapien_demo/hang_mug_demo'
+# data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_2_demo_100'
+data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
 obs_keys = [
-            'front_view_color',
-            'front_view_depth',
+            'camera_fixed_color',
+            'camera_fixed_depth',
             ]
 obs_format = [
             'bgr',
@@ -57,4 +58,6 @@ for i in epi_range:
         for t in range(T):
             img = vis_format(obs[t], obs_format[obs_i])
             cv2.imshow('img', img)
+            print(t)
+            print(data_dict['observations']['joint_pos'][t])
             cv2.waitKey(1)

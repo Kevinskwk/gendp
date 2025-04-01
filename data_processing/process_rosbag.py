@@ -8,7 +8,7 @@ import glob
 import argparse
 import yaml
 from tqdm import tqdm
-import transforms3d
+from scipy.spatial.transform import Rotation
 import rospy
 
 from gendp.common.data_utils import save_dict_to_hdf5
@@ -214,7 +214,10 @@ def extract_data_from_rosbag(bag_path, output_dir, topics=None):
                 try:
                     transform = bag_transformer.lookupTransform(reference_frame, frame, rospy.Time(secs=timestamp))
                 except:
-                    transform = ([0, 0, 0], [0, 0, 0, 1])
+                    if len(data['transforms']) > 0:
+                        transform = data['transforms'][-1][frame]
+                    else:
+                        transform = ([0, 0, 0], [0, 0, 0, 1])
                 if transform:
                     transform_data[frame] = transform
             
@@ -405,7 +408,7 @@ def main(bag_path, output_dir, episode_idx):
                  for joint_state, gripper_state in zip(data['joint_states'], data['gripper_state'])]
     joint_vel = [(joint_state['velocity'][6:] + [0.0, 0.0])
                  for joint_state in data['joint_states']]
-    ee_pos = [np.concatenate([transforms['panda_EE'][0], transforms3d.euler.quat2euler(transforms['panda_EE'][1]), [gripper_state['curr_pos']]])
+    ee_pos = [np.concatenate([transforms['panda_EE'][0], Rotation.from_quat(transforms['panda_EE'][1]).as_euler('xyz'), [gripper_state['curr_pos']]])
               for transforms, gripper_state in zip(data['transforms'], data['gripper_state'])]
     wrist_extrinsic = [get_extrinsic(*transforms['wrist_rs_color_optical_frame']) for transforms in data['transforms']]
     fixed_extrinsic = [get_extrinsic(*transforms['fixed_rs_color_optical_frame']) for transforms in data['transforms']]
