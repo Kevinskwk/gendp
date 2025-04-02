@@ -22,7 +22,6 @@ from multiprocessing.managers import SharedMemoryManager
 import click
 import cv2
 import numpy as np
-import transforms3d
 
 # from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
 from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
@@ -34,8 +33,8 @@ from gendp.real_world.keystroke_counter import (
 #     torque_on, torque_off, move_arms, move_grippers, get_arm_gripper_positions,
 #     START_ARM_POSE, START_EE_POSE, MASTER_GRIPPER_JOINT_MID, PUPPET_GRIPPER_JOINT_CLOSE, DT, MASTER2PUPPET_JOINT_FN
 # )
-from gendp.common.kinematics_utils import KinHelper
-from gendp.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
+# from gendp.common.kinematics_utils import KinHelper
+# from gendp.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 
 @click.command()
 @click.option('--output_dir', '-o', required=True, help='Directory to save recording')
@@ -57,7 +56,7 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
             frequency=frequency,
             n_obs_steps=2,
             # obs_image_resolution=obs_res,
-            obs_float32=True,
+            obs_float32=False,
             init_joints=init_joints,
             enable_multi_cam_vis=True,
             record_raw_video=True,
@@ -137,10 +136,13 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                     is_recording = False
 
                 # visualize
-                rs_fixed = obs[f'camera_{CAMERA_NAMES[vis_camera_idx]}_color'][-1,:,:,::-1].copy()
-                tactile_left = obs[f'tactile_left'][-1,:,:,::-1].copy()
-                tactile_right = obs[f'tactile_right'][-1,:,:,::-1].copy()
-                vis_img = np.concatenate([tactile_left, rs_fixed, tactile_right], axis=1)
+                rs_fixed = obs['camera_fixed_color'][-1,:,:,::-1].copy()
+                rs_wrist = obs['camera_wrist_color'][-1,:,:,::-1].copy()
+                tactile_left = obs['tactile_left'][-1,:,:,::-1].copy()
+                tactile_right = obs['tactile_right'][-1,:,:,::-1].copy()
+                # vis_img = np.concatenate([tactile_left, tactile_right], axis=1)
+                vis_img = np.concatenate([tactile_left, rs_fixed, tactile_right, rs_wrist], axis=1)
+                vis_img = cv2.resize(vis_img, (1280, 240))
                 episode_id = env.episode_id
                 text = f'Episode: {episode_id}, Stage: {stage}'
                 if is_recording:

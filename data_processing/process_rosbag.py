@@ -378,22 +378,24 @@ def main(bag_path, output_dir, episode_idx):
         # 'meta': data['meta'],
         'timestamps': np.asarray(data['timestamps']),
         'observations': 
-            {'joint_pos': [],
-             'joint_vel': [],
+            {'joint_pos': [], # joint_pos (7) + finger pos (2)
+             'joint_vel': [], # joint_vel (7) + finger vel (2)
              'full_joint_pos': [], # this is to compute FK
              'robot_base_pose_in_world': np.asarray([np.eye(4)] * num_timesteps),
-             'ee_pos': [],
+             'ee_pos': [], # xyz rpy(6) + gripper state (1)
             #  'ee_vel': np.asarray(data['ee_vel']),
-             'left_finger_pos': {},
-             'right_finger_pos': {},
-             'force_torque': np.asarray(data['force_torque']),
+             'left_finger_pos': {}, # xyz quat (7)
+             'right_finger_pos': {}, # xyz quat (7)
+             'force_torque': np.asarray(data['force_torque']), # 6
              'images': {
                  'wrist_color': np.asarray(data['wrist_rgb'], dtype=np.uint8),
                  'wrist_depth': np.asarray(data['wrist_depth'], dtype=np.uint16),
                  'wrist_intrinsic': np.asarray(data['wrist_info']),
+                 'wrist_extrinsic': {},
                  'fixed_color': np.asarray(data['fixed_rgb'], dtype=np.uint8),
                  'fixed_depth': np.asarray(data['fixed_depth'], dtype=np.uint16),
                  'fixed_intrinsic': np.asarray(data['fixed_info']),
+                 'wrist_extrinsic': {},
              },
              'tactile': {
                  'tactile_left': np.asarray(data['tactile_left'], dtype=np.uint8),

@@ -53,6 +53,8 @@ GELSIGHT_NAMES = {
     1: 'right'
 }
 
+GELSIGHT_IDS = [12, 14]
+
 class RealEnvFranka:
     def __init__(self,
             # required params
@@ -81,7 +83,7 @@ class RealEnvFranka:
             video_capture_fps=30,
             video_capture_resolution=(640, 480),
             gelsight_capture_resolution=(1280, 960),
-            gelsight_ids=(34, 36),
+            gelsight_ids=GELSIGHT_IDS,
             # saving params
             record_raw_video=True,
             thread_per_video=2,
@@ -609,7 +611,7 @@ class RealEnvFranka:
                     config_dict['observations']['images'][f'camera_{cam_name}_color'] = color_save_kwargs
                     config_dict['observations']['images'][f'camera_{cam_name}_depth'] = depth_save_kwargs
 
-                for gs in range(2):
+                for gs in range(len(GELSIGHT_IDS)):
                     gs_name = GELSIGHT_NAMES[gs]
                     color_save_kwargs = {
                         'chunks': (1, cam_height, cam_width, 3), # (1, 480, 640, 3)

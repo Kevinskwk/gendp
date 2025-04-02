@@ -323,16 +323,17 @@ class RealEnvFranka:
                 robot_obs[k] = v[this_idxs]
         fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
         camera_obs[f'camera_fixed_extrinsics'] = np.tile(fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        # accumulate obs
-        if self.obs_accumulator is not None:
-            self.obs_accumulator.put(
-                robot_obs_raw,
-                robot_timestamps
-            )
 
         # return obs
         obs_data = dict(camera_obs)
         obs_data.update(robot_obs)
+
+        # accumulate obs
+        if self.obs_accumulator is not None:
+            self.obs_accumulator.put(
+                obs_data,
+                obs_align_timestamps
+            )
         obs_data['timestamp'] = obs_align_timestamps
         return obs_data
 
@@ -468,13 +469,16 @@ class RealEnvFranka:
                     'stage': None,
                     'observations': 
                         {'joint_pos': [],
+                         'joint_vel': [],
                          'full_joint_pos': [], # this is to compute FK
                          'robot_base_pose_in_world': np.asarray([np.eye(4)] * n_steps),
                         #  'joint_vel': [],
                          'ee_pos': [],
                         #  'ee_vel': [],
                         #  'finger_pos': {},
-                         'images': {},},
+                         'force_torque': [],
+                         'images': {},
+                        },
                     # 'joint_action': [],
                     # 'cartesian_action': [],
                 }
@@ -482,10 +486,11 @@ class RealEnvFranka:
                 # for finger in finger_names:
                 #     episode['observations']['finger_pos'][finger] = []
                 for cam in range(num_cam):
-                    episode['observations']['images'][f'camera_{cam}_color'] = []
-                    episode['observations']['images'][f'camera_{cam}_depth'] = []
-                    episode['observations']['images'][f'camera_{cam}_intrinsics'] = []
-                    episode['observations']['images'][f'camera_{cam}_extrinsics'] = []
+                    cam_name = CAMERA_NAMES[cam]
+                    episode['observations']['images'][f'camera_{cam_name}_color'] = []
+                    episode['observations']['images'][f'camera_{cam_name}_depth'] = []
+                    episode['observations']['images'][f'camera_{cam_name}_intrinsics'] = []
+                    episode['observations']['images'][f'camera_{cam_name}_extrinsics'] = []
 
                 ### create attr dict
                 attr_dict = {
@@ -495,13 +500,14 @@ class RealEnvFranka:
                 ### create config dict
                 config_dict = {
                     'observations': {
-                        'images': {}
+                        'images': {},
                     },
                     'timestamp': {
                         'dtype': 'float64'
                     },
                 }
                 for cam in range(num_cam):
+                    cam_name = CAMERA_NAMES[cam]
                     color_save_kwargs = {
                         'chunks': (1, cam_height, cam_width, 3), # (1, 480, 640, 3)
                         'compression': 'gzip',
@@ -514,8 +520,8 @@ class RealEnvFranka:
                         'compression_opts': 9,
                         'dtype': 'uint16',
                     }
-                    config_dict['observations']['images'][f'camera_{cam}_color'] = color_save_kwargs
-                    config_dict['observations']['images'][f'camera_{cam}_depth'] = depth_save_kwargs
+                    config_dict['observations']['images'][f'camera_{cam_name}_color'] = color_save_kwargs
+                    config_dict['observations']['images'][f'camera_{cam_name}_depth'] = depth_save_kwargs
 
                 episode['timestamp'] = obs_timestamps[:n_steps]
                 if self.ctrl_mode == 'joint':
