@@ -637,7 +637,7 @@ def _convert_actions(raw_actions, rotation_transformer, action_key):
             pos, rot, gripper
         ], axis=-1).astype(np.float32)
     elif action_key == 'joint_action':
-        pass
+        raw_actions = raw_actions[..., :8]
     else:
         raise RuntimeError('unsupported action_key')
     if is_bimanual:

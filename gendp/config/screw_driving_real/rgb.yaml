@@ -34,7 +34,7 @@ logging:
   mode: offline # online
   name: ${now:%Y.%m.%d}_${task_name}_${dataset_name}
   project: gild_${task_name}
-  resume: false
+  resume: True
   tags:
   - train_diffusion_unet_hybrid
   - ${task_name}
@@ -76,27 +76,18 @@ shape_meta:
       type: low_dim
       shape:
       - 9
-    d3fields:
+    camera_wrist_color:
       shape:
-      - 5 # C
-      - 1000 # N
-      type: spatial
-      info:
-        reference_frame: robot
-        distill_dino: true
-        distill_obj: screw_driver
-        view_keys:
-        - camera_wrist
-        - camera_fixed
-        N_gripper: 100
-        boundaries:
-          x_lower: 0.2
-          x_upper: 0.8
-          y_lower: -0.4
-          y_upper: 0.4
-          z_lower: -0.03
-          z_upper: 0.7
-        resize_ratio: 0.5
+      - 3
+      - 480
+      - 640
+      type: rgb
+    camera_fixed_color:
+      shape:
+      - 3
+      - 480
+      - 640
+      type: rgb
 
 policy:
   _target_: gendp.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
@@ -149,9 +140,9 @@ task:
   shape_meta: ${shape_meta}
   task_name: ${task_name}
 task_name: screw_driving
-dataset_name: screwdriver_aligning
+dataset_name: screwdriver_staged
 training:
-  checkpoint_every: 1000
+  checkpoint_every: 250
   debug: false
   device: cuda
   device_id: 1
@@ -160,9 +151,9 @@ training:
   lr_warmup_steps: 500
   max_train_steps: null
   max_val_steps: null
-  num_epochs: 3001
-  resume: False
-  rollout_every: 1000
+  num_epochs: 1001
+  resume: True
+  rollout_every: 250
   sample_every: 5
   seed: 42
   tqdm_interval_sec: 1.0

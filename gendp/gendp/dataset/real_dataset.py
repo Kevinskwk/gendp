@@ -70,6 +70,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     spatial_keys = list()
     # construct compressors and chunks
     obs_shape_meta = shape_meta['obs']
+    trim_tail = shape_meta['trim_tail']
     for key, attr in obs_shape_meta.items():
         shape = attr['shape']
         type = attr.get('type', 'low_dim')
@@ -104,7 +105,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         feats_per_epi = list() # save it separately to avoid OOM
         with h5py.File(dataset_path) as file:
             # count total steps
-            episode_length = file['cartesian_action'].shape[0]
+            # episode_length = file['cartesian_action'].shape[0]
+            episode_length = file['joint_action'].shape[0] - trim_tail
             episode_end = prev_end + episode_length
             prev_end = episode_end
             episode_ends.append(episode_end)
@@ -116,7 +118,10 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     data_key = 'cartesian_action' if 'key' not in shape_meta['action'] else shape_meta['action']['key']
                 if key not in lowdim_data_dict:
                     lowdim_data_dict[key] = list()
-                this_data = file[data_key][()]
+                if data_key == 'cartesian_action':
+                    this_data = file['observations']['ee_pos'][:episode_length]
+                else:
+                    this_data = file[data_key][:episode_length]
                 if key == 'action':
                     this_data = _convert_actions(
                         raw_actions=this_data,
@@ -131,7 +136,10 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             for key in rgb_keys:
                 if key not in rgb_data_dict:
                     rgb_data_dict[key] = list()
-                imgs = file['observations']['images'][key][()]
+                if 'tactile' in key:
+                    imgs = file['observations']['tactile'][key][:episode_length]
+                else:
+                    imgs = file['observations']['images'][key][:episode_length]
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
                 resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in imgs]
@@ -142,7 +150,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             for key in depth_keys:
                 if key not in depth_data_dict:
                     depth_data_dict[key] = list()
-                imgs = file['observations']['images'][key][()]
+                imgs = file['observations']['images'][key][:episode_length]
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
                 resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in imgs]
@@ -167,13 +175,14 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 if 'left_tool' in shape_meta['obs'][key]['info']:
                     tool_names[1] = shape_meta['obs'][key]['info']['left_tool']
                 is_joint = ('key' in shape_meta['action'].keys()) and (shape_meta['action']['key'] == 'joint_action')
-                color_seq = np.stack([file['observations']['images'][f'{k}_color'][()] for k in view_keys], axis=1) # (T, V, H ,W, C)
-                depth_seq = np.stack([file['observations']['images'][f'{k}_depth'][()] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
-                extri_seq = np.stack([file['observations']['images'][f'{k}_extrinsics'][()] for k in view_keys], axis=1) # (T, V, 4, 4)
-                intri_seq = np.stack([file['observations']['images'][f'{k}_intrinsics'][()] for k in view_keys], axis=1) # (T, V, 3, 3)
-                qpos_seq = file['observations']['full_joint_pos'][()] if 'full_joint_pos' in file['observations'] else file['observations']['joint_pos'][()] # (T, -1)
+                color_seq = np.stack([file['observations']['images'][f'{k}_color'][:episode_length] for k in view_keys], axis=1) # (T, V, H ,W, C)
+                depth_seq = np.stack([file['observations']['images'][f'{k}_depth'][:episode_length] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
+                extri_seq = np.stack([file['observations']['images'][f'{k}_extrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 4, 4)
+                # extri_seq[:, 1, 1, 3] -= 0.02  # manual offset
+                intri_seq = np.stack([file['observations']['images'][f'{k}_intrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 3, 3)
+                qpos_seq = file['observations']['full_joint_pos'][:episode_length] if 'full_joint_pos' in file['observations'] else file['observations']['joint_pos'][:-trim_tail] # (T, -1)
                 if 'robot_base_pose_in_world' in file['observations']:
-                    robot_base_pose_in_world_seq = file['observations']['robot_base_pose_in_world'][()] # (T, 4, 4)
+                    robot_base_pose_in_world_seq = file['observations']['robot_base_pose_in_world'][:episode_length] # (T, 4, 4)
                 else:
                     robot_base_pose_in_world = np.array([[ 1.  ,  0.  ,  0.  , -0.52],
                                                          [ 0.  ,  1.  ,  0.  , -0.06],
@@ -367,6 +376,16 @@ class RealDataset(BaseImageDataset):
             if ('type' in attr) and (attr['type'] == 'depth'):
                 cache_info_str += '_rgbd'
                 break
+        if 'force_torque' in shape_meta['obs']:
+            cache_info_str += '_ft'
+        for key, attr in shape_meta['obs'].items():
+            if ('tactile' in key) and ('type' in attr) and (attr['type'] == 'rgb'):
+                cache_info_str += '_tactile_rgb'
+                break
+        for key, attr in shape_meta['obs'].items():
+            if ('tactile' in key) and ('type' in attr) and (attr['type'] == 'tactile'):
+                cache_info_str += '_tactile_ff'
+                break
         if 'd3fields' in shape_meta['obs']:
             use_seg = False
             use_dino = False
@@ -385,6 +404,8 @@ class RealDataset(BaseImageDataset):
                 cache_info_str += '_joint'
             else:
                 cache_info_str += '_eef'
+            if 'trim_tail' in shape_meta and shape_meta['trim_tail'] > 0:
+                cache_info_str += '_trim'
         if use_cache:
             cache_zarr_path = os.path.join(dataset_dir, f'cache{cache_info_str}.zarr.zip')
             cache_lock_path = cache_zarr_path + '.lock'
@@ -561,6 +582,8 @@ class RealDataset(BaseImageDataset):
             elif key.endswith('qpos'):
                 this_normalizer = get_range_normalizer_from_stat(stat)
             elif key.endswith('vel'):
+                this_normalizer = get_identity_normalizer_from_stat(stat)
+            elif key.endswith('force_torque'):
                 this_normalizer = get_identity_normalizer_from_stat(stat)
             else:
                 raise RuntimeError('unsupported')

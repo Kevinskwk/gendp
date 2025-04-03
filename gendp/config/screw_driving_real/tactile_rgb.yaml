@@ -2,7 +2,6 @@ _target_: gendp.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUn
 is_real: true
 data_root: /home/showlab-ws/robotics/gendp
 output_dir: ${data_root}/data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
-# output_dir: /users/kevinma/gendp/data/outputs/2025.03.25/13.36.38_train_diffusion_unet_hybrid_screw_driving
 checkpoint:
   save_last_ckpt: true
   save_last_snapshot: false
@@ -55,27 +54,14 @@ optimizer:
   lr: 0.0001
   weight_decay: 1.0e-06
 past_action_visible: false
+
 shape_meta:
-  trim_tail: 0
+  trim_tail: 200
   action:
-    # key: joint_action
-    # shape:
-    # - 8
+    key: joint_action
     shape:
-    - 10
+    - 8
   obs:
-    ee_pos:
-      type: low_dim
-      shape:
-      - 7
-    joint_pos:
-      type: low_dim
-      shape:
-      - 9
-    joint_vel:
-      type: low_dim
-      shape:
-      - 9
     d3fields:
       shape:
       - 5 # C
@@ -86,8 +72,8 @@ shape_meta:
         distill_dino: true
         distill_obj: screw_driver
         view_keys:
-        - camera_wrist
-        - camera_fixed
+        - wrist
+        - fixed
         N_gripper: 100
         boundaries:
           x_lower: 0.2
@@ -97,6 +83,23 @@ shape_meta:
           z_lower: -0.03
           z_upper: 0.7
         resize_ratio: 0.5
+    force_torque:
+      shape:
+      - 6
+      type: low_dim
+    tactile_left:
+      shape:
+      - 3
+      - 480
+      - 640
+      type: rgb
+    tactile_right:
+      shape:
+      - 3
+      - 480
+      - 640
+      type: rgb
+
 
 policy:
   _target_: gendp.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
@@ -127,11 +130,12 @@ policy:
   feat_proc: distill # none, linear, mlp
   compositional: false
   shape_meta: ${shape_meta}
+
 task:
   abs_action: true
   dataset:
     _target_: gendp.dataset.real_dataset.RealDataset
-    dataset_dir: ${data_root}/data/polymetis/${dataset_name}
+    dataset_dir: ${data_root}/data/rosbag/${dataset_name}
     vis_input: false
     horizon: 16
     pad_after: 7
@@ -144,25 +148,25 @@ task:
     shape_meta: ${shape_meta}
     use_cache: true
     val_ratio: 0.1
-  dataset_dir: ${data_root}/data/polymetis/${dataset_name}
+  dataset_dir: ${data_root}/data/rosbag/${dataset_name}
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
-task_name: screw_driving
-dataset_name: screwdriver_aligning
+task_name: screw_driving_tactile_rgb
+dataset_name: bosch_hex_short
 training:
   checkpoint_every: 1000
   debug: false
   device: cuda
-  device_id: 1
+  device_id: 2
   gradient_accumulate_every: 1
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_train_steps: null
   max_val_steps: null
-  num_epochs: 3001
-  resume: False
-  rollout_every: 1000
+  num_epochs: 10001
+  resume: false
+  rollout_every: 500
   sample_every: 5
   seed: 42
   tqdm_interval_sec: 1.0
