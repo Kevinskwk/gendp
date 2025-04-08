@@ -56,6 +56,7 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
             'depth': [],
             'scan': [],
             'spatial': [],
+            'tactile': [],
         }
         obs_key_shapes = dict()
         for key, attr in obs_shape_meta.items():
@@ -71,6 +72,8 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
                 obs_config['spatial'].append(key)
             elif type == 'depth':
                 obs_config['depth'].append(key)
+            elif type == 'tactile':
+                obs_config['tactile'].append(key)
             else:
                 raise RuntimeError(f"Unsupported obs type: {type}")
 
@@ -146,6 +149,9 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
             encoder_kwargs['spatial']["core_kwargs"]["use_pos"] = False
             encoder_kwargs['spatial']["core_kwargs"]["decomp_part"] = False
         
+        # encoder_kwargs['tactile']['core_kwargs'] = encoder_kwargs['spatial']["core_kwargs"]
+        encoder_kwargs['tactile']['core_kwargs']['output_dim'] = 16
+
         encoder = ObservationGroupEncoder(
             observation_group_shapes=observation_group_shapes,
             encoder_kwargs=encoder_kwargs,

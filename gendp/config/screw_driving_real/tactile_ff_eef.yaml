@@ -2,12 +2,11 @@ _target_: gendp.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUn
 is_real: true
 data_root: /home/showlab-ws/robotics/gendp
 output_dir: ${data_root}/data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
-# output_dir: /users/kevinma/gendp/data/outputs/2025.03.25/13.36.38_train_diffusion_unet_hybrid_screw_driving
 checkpoint:
   save_last_ckpt: true
   save_last_snapshot: false
   topk:
-    format_str: epoch={epoch:04d}-test_me1an_score={test_mean_score:.3f}.ckpt
+    format_str: epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt
     k: 5
     mode: max
     monitor_key: test_mean_score
@@ -55,27 +54,13 @@ optimizer:
   lr: 0.0001
   weight_decay: 1.0e-06
 past_action_visible: false
+
 shape_meta:
   trim_tail: 0
   action:
-    # key: joint_action
-    # shape:
-    # - 8
     shape:
     - 10
   obs:
-    ee_pos:
-      type: low_dim
-      shape:
-      - 7
-    joint_pos:
-      type: low_dim
-      shape:
-      - 9
-    joint_vel:
-      type: low_dim
-      shape:
-      - 9
     d3fields:
       shape:
       - 5 # C
@@ -88,7 +73,7 @@ shape_meta:
         view_keys:
         - camera_wrist
         - camera_fixed
-        N_gripper: 100
+        N_gripper: 10
         boundaries:
           x_lower: 0.2
           x_upper: 0.8
@@ -97,6 +82,44 @@ shape_meta:
           z_lower: 0.03
           z_upper: 0.7
         resize_ratio: 0.5
+    ee_pos:
+      type: low_dim
+      shape:
+      - 7
+    joint_pos:
+      type: low_dim
+      shape:
+      - 9
+    joint_vel:
+      type: low_dim
+      shape:
+      - 9
+    tactile_left:
+      shape:
+      - 4
+      - 48
+      setting:
+        N: 8
+        M: 6
+        fps: 10
+        x0: 25
+        y0: 82
+        dx: 72
+        dy: 72
+      type: tactile
+    tactile_right:
+      shape:
+      - 4
+      - 48
+      setting:
+        N: 8
+        M: 6
+        fps: 10
+        x0: 60
+        y0: 70
+        dx: 72
+        dy: 72
+      type: tactile
 
 policy:
   _target_: gendp.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
@@ -127,6 +150,7 @@ policy:
   feat_proc: distill # none, linear, mlp
   compositional: false
   shape_meta: ${shape_meta}
+
 task:
   abs_action: true
   dataset:
@@ -148,21 +172,21 @@ task:
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
-task_name: screw_driving
+task_name: screw_driving_tactile_ff
 dataset_name: screwdriver_aligning
 training:
   checkpoint_every: 1000
   debug: false
   device: cuda
-  device_id: 1
+  device_id: 0
   gradient_accumulate_every: 1
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_train_steps: null
   max_val_steps: null
   num_epochs: 3001
-  resume: False
-  rollout_every: 1000
+  resume: false
+  rollout_every: 500
   sample_every: 5
   seed: 42
   tqdm_interval_sec: 1.0
