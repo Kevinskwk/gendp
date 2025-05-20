@@ -18,7 +18,8 @@ class PenInsertionEnv(BaseSimulationEnv):
         scene_config = sapien.SceneConfig()
         scene_config.gravity = np.array([0.0, 0.0, -0.1])
         self.scene = self.engine.create_scene(config=scene_config)
-        self.scene.set_timestep(0.004)
+        self.dt = 0.004
+        self.scene.set_timestep(self.dt)
         self.friction = friction
         self.object_scale = object_scale
         self.randomness_scale = randomness_scale

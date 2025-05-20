@@ -32,7 +32,8 @@ class KinHelper():
             self.eef_name = 'vx300s/ee_arm_link'
         elif "panda" in robot_name:
             urdf_path = f"{package_dir}/robot/panda/panda.urdf"
-            self.eef_name = 'panda_EE'
+            # self.eef_name = 'panda_EE'
+            self.eef_name = 'panda_hand'
         self.robot_name = robot_name
         # with suppress_stdout(): # suppress pybullet annoying print
         #     self.bullet_robot = p.loadURDF(urdf_path, useFixedBase=True)

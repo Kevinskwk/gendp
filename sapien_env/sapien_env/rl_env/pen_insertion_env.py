@@ -62,6 +62,38 @@ class PenInsertionRLEnv(PenInsertionEnv, BaseRLEnv):
             w = rigid_component.get_angular_velocity()
         return np.concatenate([robot_qpos_vec, object_pose_vec, v, w, object_in_palm, np.array([theta_cos])])
 
+    def is_object_in_contact_with_all_fingers(self):
+        # Use check_actor_pair_contacts to check contact between each finger tip and manipulated_object
+        contacts = self.check_actor_pair_contacts(self.finger_tip_links, self.manipulated_object)
+        # contacts is a binary array indicating contact for each finger tip
+        return all(contacts)
+
+    def get_contact_points(self, impulse_threshold=1e-3):
+        # Only get contacts between manipulated_object and non-finger entities
+        # print("Is object in contact with all fingers:", self.is_object_in_contact_with_all_fingers())
+        if not self.is_object_in_contact_with_all_fingers():
+            return []
+        contacts = self.scene.get_contacts()
+        finger_names = set(link.name for link in self.finger_tip_links)
+        contact_points = []
+        for contact in contacts:
+            entities = [contact.bodies[0].entity, contact.bodies[1].entity]
+            # print(entities[0].name, entities[1].name)
+            if self.manipulated_object not in entities:
+                continue
+            other = entities[0] if entities[1] == self.manipulated_object else entities[1]
+            if other.name in finger_names:
+                continue
+            for point in contact.points:
+                if np.sum(np.abs(point.impulse)) < impulse_threshold:
+                    continue
+                if self.manipulated_object == entities[0]:
+                    contact_force = point.impulse / self.dt
+                else:
+                    contact_force = -point.impulse / self.dt
+                contact_points.append(np.concatenate([point.position, contact_force]))
+        return contact_points
+
     def get_robot_state(self):
         robot_qpos_vec = self.robot.get_qpos()
         palm_pose = self.palm_link.get_pose()

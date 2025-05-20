@@ -137,6 +137,7 @@ def main_env(episode_idx, dataset_dir, headless, mode, task_name, manip_obj=None
              'robot_base_pose_in_world': [],
              'ee_pos': [],
              'ee_vel': [],
+             'contact_points': [],
             #  'finger_pos': {},
              'images': {},},
         'joint_action': [],
@@ -196,13 +197,22 @@ def main_env(episode_idx, dataset_dir, headless, mode, task_name, manip_obj=None
         data_dict['observations']['joint_vel'].append(env.robot.get_qvel()[:-1])
         data_dict['observations']['full_joint_pos'].append(env.robot.get_qpos())
         data_dict['observations']['robot_base_pose_in_world'].append(env.robot.get_pose().to_transformation_matrix())
-        ee_translation = env.palm_link.get_pose().p
-        ee_rotation = transforms3d.euler.quat2euler(env.palm_link.get_pose().q,axes='sxyz')
+        ee_translation = env.palm_link.get_entity_pose().p
+        ee_rotation = transforms3d.euler.quat2euler(env.palm_link.get_entity_pose().q,axes='sxyz')
         ee_gripper = env.robot.get_qpos()[arm_dof]
         ee_pos = np.concatenate([ee_translation,ee_rotation,[ee_gripper]])
         ee_vel = np.concatenate([env.palm_link.get_linear_velocity(),env.palm_link.get_angular_velocity(),env.robot.get_qvel()[arm_dof:arm_dof+1]])
         data_dict['observations']['ee_pos'].append(ee_pos)
         data_dict['observations']['ee_vel'].append(ee_vel)
+        contact_points = np.asarray(env.get_contact_points()).reshape(-1, 6)
+        # Pad contact_points to have length 10 with zeros
+        if contact_points.shape[0] < 10:
+            pad_width = ((0, 10 - contact_points.shape[0]), (0, 0)) if contact_points.ndim == 2 else (0, 10 - contact_points.shape[0])
+            contact_points = np.pad(contact_points, pad_width, mode='constant', constant_values=0)
+        elif contact_points.shape[0] > 10:
+            contact_points = contact_points[:10]
+        print("Contact points:", contact_points.shape) # should be (10, 6)
+        data_dict['observations']['contact_points'].append(contact_points)
         data_dict['joint_action'].append(action.copy())
         data_dict['cartesian_action'].append(cartisen_action.copy())
         # for finger_idx, finger in enumerate(finger_names):

@@ -108,18 +108,27 @@ class BaseSimulationEnv(object):
 
     def check_actor_pair_contacts(self, actors1: List[sapien.Entity], actor2: sapien.Entity,
                                   impulse_threshold=1e-10) -> np.ndarray:
-        actor_set1 = set(actors1)
+        """
+        For each actor in actors1, check if it is in contact with actor2.
+        Returns a binary array indicating contact for each actor in actors1.
+        Entities are matched by their name.
+        """
         contact_buffer = np.zeros(len(actors1))
-        for contact in self.scene.get_contacts():
-            contact_actors = {contact.actor0, contact.actor1}
-            if len(actor_set1 & contact_actors) > 0 and actor2 in contact_actors:
-                impulse = [point.impulse for point in contact.points]
-                if np.sum(np.abs(impulse)) < impulse_threshold:
-                    continue
-                contact_actors.remove(actor2)
-                actor_index = actors1.index(contact_actors.pop())
-                contact_buffer[actor_index] = 1
-        # print(contact_buffer)
+        contacts = self.scene.get_contacts()
+        actor2_name = actor2.name
+        actors1_names = [actor.name for actor in actors1]
+        for contact in contacts:
+            entities = [contact.bodies[0].entity, contact.bodies[1].entity]
+            entity_names = [e.name for e in entities]
+            if actor2_name in entity_names:
+                other_index = 0 if entity_names[1] == actor2_name else 1
+                other_name = entity_names[other_index]
+                if other_name in actors1_names:
+                    impulse = [point.impulse for point in contact.points]
+                    if np.sum(np.abs(impulse)) < impulse_threshold:
+                        continue
+                    actor_index = actors1_names.index(other_name)
+                    contact_buffer[actor_index] = 1
         return contact_buffer
     
     def check_actor_contacts_continuous(self, actors1: List[sapien.Entity], actor2: sapien.Entity,
