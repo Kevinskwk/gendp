@@ -6,7 +6,7 @@ import sapien.core as sapien
 from sapien_env.rl_env.pen_insertion_env import PenInsertionRLEnv
 from sapien_env.sim_env.constructor import add_default_scene_light
 from sapien_env.gui.gui_base import GUIBase, DEFAULT_TABLE_TOP_CAMERAS, YX_TABLE_TOP_CAMERAS
-from gendp.common.kinematics_utils import KinHelper
+from gendp.gendp.common.kinematics_utils import KinHelper
 
 
 class SingleArmPolicy:

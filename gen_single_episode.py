@@ -1,4 +1,7 @@
 import os
+import sys
+sys.path.append('/home/kevin/gendp/gendp')
+sys.path.append('/home/kevin/gendp')
 
 import cv2
 import numpy as np
@@ -7,11 +10,11 @@ import sapien.core as sapien
 from omegaconf import OmegaConf
 import hydra
 
-from sapien_env.rl_env.mug_collect_env import BaseRLEnv
-from sapien_env.sim_env.constructor import add_default_scene_light
-from sapien_env.gui.gui_base import GUIBase, DEFAULT_TABLE_TOP_CAMERAS, YX_TABLE_TOP_CAMERAS
-from gendp.common.data_utils import save_dict_to_hdf5
-from gendp.common.kinematics_utils import KinHelper
+from sapien_env.sapien_env.rl_env.mug_collect_env import BaseRLEnv
+from sapien_env.sapien_env.sim_env.constructor import add_default_scene_light
+from sapien_env.sapien_env.gui.gui_base import GUIBase, DEFAULT_TABLE_TOP_CAMERAS, YX_TABLE_TOP_CAMERAS
+from gendp.gendp.common.data_utils import save_dict_to_hdf5
+from gendp.gendp.common.kinematics_utils import KinHelper
 
 def stack_dict(dic):
     # stack list of numpy arrays into a single numpy array inside a nested dict
@@ -182,7 +185,7 @@ def main_env(episode_idx, dataset_dir, headless, mode, task_name, manip_obj=None
     
     while True:
         action = np.zeros(arm_dof+1)
-        cartisen_action, quit = scripted_policy.single_trajectory(env,env.palm_link.get_pose(),mode=mode)
+        cartisen_action, quit = scripted_policy.single_trajectory(env,env.palm_link.get_entity_pose(),mode=mode)
         # transform cartisen_action from robot to world frame
         if quit:
             break

@@ -6,6 +6,7 @@ import h5py
 import cv2
 import torch
 from tqdm import tqdm
+from scipy.spatial import cKDTree
 
 from d3fields.utils.draw_utils import np2o3d
 
@@ -27,7 +28,7 @@ MASTER_GRIPPER_POSITION_CLOSE = 0.01244
 PUPPET_GRIPPER_POSITION_OPEN = 0.05800
 PUPPET_GRIPPER_POSITION_CLOSE = 0.01844
 
-# Gripper joint limits (qpos[6])
+# Gripper joint limits (qpos[6])gendp.
 MASTER_GRIPPER_JOINT_OPEN = 0.3083
 MASTER_GRIPPER_JOINT_CLOSE = -0.6842
 PUPPET_GRIPPER_JOINT_OPEN = 1.4910
@@ -646,3 +647,148 @@ def _convert_actions(raw_actions, rotation_transformer, action_key):
     actions = raw_actions
     # vis_post_actions(actions[:,10:])
     return actions
+
+def get_contact_field(pcd, contact_points, 
+                     min_force_magnitude=0.001,
+                     smoothing_radius=0.05,
+                     smoothing_sigma=0.02,
+                     force_scaling=1.0):
+    """
+    Generate a contact field for a point cloud based on contact points and forces.
+    
+    Args:
+        pcd (np.ndarray): Scene point cloud of shape (N, 3)
+        contact_points (np.ndarray): Contact data of shape (10, 6), where each row is
+                                   [x, y, z, fx, fy, fz] (position + force vector)
+        min_force_magnitude (float): Minimum force magnitude to consider valid contact
+        smoothing_radius (float): Radius for spatial smoothing of contact field
+        smoothing_sigma (float): Gaussian smoothing parameter
+        force_scaling (float): Scaling factor for force magnitude normalization
+        
+    Returns:
+        pcd_contact_feats (np.ndarray): Contact features of shape (N, 4) where each row is
+                                      [contact_probability, fx_normalized, fy_normalized, fz_normalized]
+    """
+    
+    if pcd.shape[0] == 0:
+        return np.zeros((0, 4))
+    
+    # Initialize output features
+    pcd_contact_feats = np.zeros((pcd.shape[0], 4))
+    
+    # Filter valid contact points (non-zero force)
+    force_magnitudes = np.linalg.norm(contact_points[:, 3:], axis=1)
+    valid_mask = force_magnitudes > min_force_magnitude
+    
+    if not np.any(valid_mask):
+        # No valid contacts, return zero field
+        return pcd_contact_feats
+    
+    valid_contacts = contact_points[valid_mask]
+    valid_positions = valid_contacts[:, :3]
+    valid_forces = valid_contacts[:, 3:]
+    valid_force_mags = force_magnitudes[valid_mask]
+    
+    # Build KD-tree for efficient nearest neighbor search
+    pcd_tree = cKDTree(pcd)
+    
+    # Map each contact point to closest point cloud point
+    contact_to_pcd_distances, contact_to_pcd_indices = pcd_tree.query(valid_positions)
+    
+    # Initialize contact probability and force fields
+    contact_probabilities = np.zeros(pcd.shape[0])
+    contact_forces = np.zeros((pcd.shape[0], 3))
+    print(len(valid_positions), ' valid contact points found.')
+
+    # For each valid contact point
+    for i, (contact_pos, contact_force, force_mag, closest_idx) in enumerate(
+        zip(valid_positions, valid_forces, valid_force_mags, contact_to_pcd_indices)):
+        
+        # Set contact probability at closest point
+        # Use normalized force magnitude as base probability
+        base_probability = min(force_mag * force_scaling, 1.0)
+        
+        # Add contact influence at the closest point
+        contact_probabilities[closest_idx] = max(
+            contact_probabilities[closest_idx], 
+            base_probability
+        )
+        print(f'Contact {i+1}/{len(valid_positions)}: Closest PCD Index {closest_idx}, Base Probability {base_probability:.4f}')
+        
+        # Weighted average for force vectors (in case of overlapping influences)
+        current_prob = contact_probabilities[closest_idx]
+        if current_prob > 0:
+            # Weighted combination of forces
+            weight = base_probability / current_prob
+            contact_forces[closest_idx] = (
+                (1 - weight) * contact_forces[closest_idx] + 
+                weight * (contact_force / force_mag)  # Normalized force direction
+            )
+        else:
+            contact_forces[closest_idx] = contact_force / force_mag
+    
+    # Spatial smoothing of contact field
+    if smoothing_radius > 0:
+        # Find all points within smoothing radius for each point
+        smoothed_probabilities = np.zeros_like(contact_probabilities)
+        smoothed_forces = np.zeros_like(contact_forces)
+        
+        # Use KD-tree to find neighbors efficiently
+        neighbor_indices = pcd_tree.query_ball_tree(pcd_tree, smoothing_radius)
+        
+        for i, neighbors in enumerate(neighbor_indices):
+            if len(neighbors) <= 1:
+                # No neighbors or only self
+                smoothed_probabilities[i] = contact_probabilities[i]
+                smoothed_forces[i] = contact_forces[i]
+                continue
+            
+            neighbors = np.array(neighbors)
+            neighbor_points = pcd[neighbors]
+            
+            # Calculate distances to neighbors
+            distances = np.linalg.norm(neighbor_points - pcd[i], axis=1)
+            
+            # Gaussian weighting based on distance
+            weights = np.exp(-(distances**2) / (2 * smoothing_sigma**2))
+            weights = weights / np.sum(weights)  # Normalize weights
+            
+            # Weighted average of contact probabilities
+            smoothed_probabilities[i] = np.sum(weights * contact_probabilities[neighbors])
+            
+            # Weighted average of force vectors
+            neighbor_forces = contact_forces[neighbors]
+            # Weight by both spatial distance and contact probability
+            force_weights = weights * contact_probabilities[neighbors]
+            
+            if np.sum(force_weights) > 0:
+                force_weights = force_weights / np.sum(force_weights)
+                smoothed_forces[i] = np.sum(force_weights[:, np.newaxis] * neighbor_forces, axis=0)
+            else:
+                smoothed_forces[i] = np.zeros(3)
+        
+        contact_probabilities = smoothed_probabilities
+        contact_forces = smoothed_forces
+    
+    # Ensure force vectors are normalized where contact probability > 0
+    nonzero_mask = contact_probabilities > 1e-6
+    if np.any(nonzero_mask):
+        force_norms = np.linalg.norm(contact_forces[nonzero_mask], axis=1)
+        valid_force_mask = force_norms > 1e-6
+        
+        if np.any(valid_force_mask):
+            # Create indexing arrays
+            nonzero_indices = np.where(nonzero_mask)[0]
+            valid_force_indices = nonzero_indices[valid_force_mask]
+            
+            # Normalize force vectors
+            contact_forces[valid_force_indices] = (
+                contact_forces[valid_force_indices] / 
+                force_norms[valid_force_mask][:, np.newaxis]
+            )
+    
+    # Combine into output features
+    pcd_contact_feats[:, 0] = contact_probabilities
+    pcd_contact_feats[:, 1:4] = contact_forces
+    
+    return pcd_contact_feats
