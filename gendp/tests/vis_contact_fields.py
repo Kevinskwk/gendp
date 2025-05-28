@@ -79,8 +79,11 @@ for i in tqdm(epi_range):
     
     T = data_dict['observations']['images'][f'{cam_keys[0]}_color'].shape[0]
     robot_base_in_world_seq = data_dict['observations']['robot_base_pose_in_world'][()]
+
+    visualizer.add_triangle_mesh('origin', 'base', size=0.2)
+    visualizer.update_triangle_mesh('base', tf=np.eye(4))
     
-    for t in tqdm(range(T*2//3, T)):
+    for t in tqdm(range(T*3//4, T)):
         # visualize point cloud
         robot_base_in_world = robot_base_in_world_seq[t]
         colors = np.stack([data_dict['observations']['images'][f'{cam_key}_color'][t:t+1] for cam_key in cam_keys], axis=1)
@@ -123,6 +126,7 @@ for i in tqdm(epi_range):
         pcd_o3d = np2o3d(pcd, pcd_colors)
         visualizer.update_pcd(pcd_o3d, 'pcd')
 
+        visualizer.update_triangle_mesh('base', tf=np.linalg.inv(robot_base_in_world))
         
         # visualize robot
         if vis_robot:
@@ -141,17 +145,24 @@ for i in tqdm(epi_range):
             ee_target_pose_mat = np.linalg.inv(robot_base_in_world) @ ee_target_pose_mat
             for a_i in range(t_end - t_start):
                 visualizer.update_triangle_mesh(f'action_{a_i}', tf=ee_target_pose_mat[a_i])
-        
+
         # Visualize contact field
-        # if vis_contact_vector:
-        #     contact_points = data_dict['observations']['contact_points'][t]
-        #     for c_i, contact_point in enumerate(contact_points):
-        #         base = contact_point[:3]
-        #         force = contact_point[3:]
-        #         force_mag = np.linalg.norm(force)
-        #         if force_mag < min_force_magnitude:
-        #             arrow = visualizer.get_arrow_mesh(base=base, end=base+force, visible=False)
-        #         else:
-        #             arrow = visualizer.get_arrow_mesh(base=base, end=base + force * force_scale / (force_mag + 1e-8))
-        #         visualizer.update_custom_mesh(arrow, f'arrow_{c_i}')
+        if vis_contact_vector:
+            contact_points = data_dict['observations']['contact_points'][t]
+            for c_i, contact_point in enumerate(contact_points):
+                base = contact_point[:3]
+                force = contact_point[3:]
+                force_mag = np.linalg.norm(force)
+                end = base + force * force_scale / (force_mag + 1e-8)
+                # Transform base and end points to world frame
+                base = np.linalg.inv(robot_base_in_world) @ np.concatenate([base, [1.0]])
+                end = np.linalg.inv(robot_base_in_world) @ np.concatenate([end, [1.0]])
+                base = base[:3]
+                end = end[:3]
+
+                if force_mag < min_force_magnitude:
+                    arrow = visualizer.get_arrow_mesh(base=base, end=end, visible=False)
+                else:
+                    arrow = visualizer.get_arrow_mesh(base=base, end=end)
+                visualizer.update_custom_mesh(arrow, f'arrow_{c_i}')
         visualizer.render()

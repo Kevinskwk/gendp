@@ -607,6 +607,37 @@ class o3dVisualizer:
             self.vis_dict[mesh_name].vertices = mesh.vertices
         self.visualizer.update_geometry(self.vis_dict[mesh_name])
 
+    def get_arrow_mesh(self, base: np.ndarray, end: np.ndarray, radius: float = 0.005, visible=True) -> o3d.geometry.TriangleMesh:
+        """create an arrow mesh for visualization from base to end
+
+        Args:
+            radius (float, optional): radius of the arrow. Defaults to 0.1.
+            height (float, optional): height of the arrow. Defaults to 0.1.
+
+        Returns:
+            o3d.geometry.TriangleMesh: arrow mesh
+        """
+        if not visible:
+            radius = 1e-7
+            end = base + np.array([1e-7, 1e-7, 1e-7])  # avoid zero-length arrow
+
+        height = np.linalg.norm(end - base)
+        arrow = o3d.geometry.TriangleMesh.create_arrow(
+            cylinder_radius=radius, cone_radius=radius * 2, cylinder_height=height, cone_height=height
+        )
+        arrow.rotate(arrow.get_rotation_matrix_from_xyz((np.pi / 2, 0, 0)), center=(0, 0, 0))
+        arrow.translate(base)
+        arrow_end = end - base
+        print(base, end)
+        if np.linalg.norm(arrow_end) > 1e-6:
+            arrow_end = arrow_end / np.linalg.norm(arrow_end)
+            angle = np.arccos(np.clip(np.dot(arrow_end, np.array([0, 0, 1])), -1.0, 1.0))
+            rotation_axis = np.cross(np.array([0, 0, 1]), arrow_end)
+            rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+            arrow.rotate(o3d.geometry.get_rotation_matrix_from_axis_angle(rotation_axis * angle), center=base)
+            # arrow.paint_uniform_color([1, 0, 0])  # TODO: fix color
+        return arrow
+
     def render(
         self,
         render_names: Optional[str] = None,
