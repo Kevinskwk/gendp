@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 from tqdm import tqdm
-from sapien_env.utils.misc_utils import get_current_YYYY_MM_DD_hh_mm_ss_ms
+# from sapien_env.sapien_env.utils.misc_utils import get_current_YYYY_MM_DD_hh_mm_ss_ms
 
 ### hyper parameter specification
 mode = 'straight'
@@ -17,16 +17,17 @@ mode = 'straight'
 # obj = 'black_mug'
 # obj = 'white_mug'
 # obj = 'aluminum_mug'
-# obj = 'pencil'
-obj = 'pencil_2'
+obj = 'pencil'
+# obj = 'pencil_2'
 # task_name = 'hang_mug'
-task_name = 'pen_insertion'
+task_name = 'pen_insertion_contact'
 # task_name = 'mug_collect'
-dataset_name = f'{obj}_demo_100'
-headless = False
-s_idx = 50
-e_idx = 100
-data_root = '/home/yixuan/gendp'
+# dataset_name = f'{obj}_demo'
+dataset_name = 'insertion_contact_demo_mixed'
+headless = True
+s_idx = 0
+e_idx = 50
+data_root = '/home/kevin/gendp'
 dataset_dir = f"{data_root}/data/sapien_demo/{dataset_name}"
 os.system(f'mkdir -p {dataset_dir}')
 

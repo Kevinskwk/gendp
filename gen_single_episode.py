@@ -91,6 +91,22 @@ def task_to_cfg(task, manip_obj=None):
                 '_target_': 'sapien_env.teleop.pen_insertion_scripted_policy.SingleArmPolicy',
             }
         )
+    elif task == 'pen_insertion_contact':
+        cfg = OmegaConf.create(
+            {
+                '_target_': 'sapien_env.rl_env.pen_insertion_contact_env.PenInsertionContactRLEnv',
+                'use_gui': True,
+                'robot_name': 'panda',
+                'frame_skip': 10,
+                'use_visual_obs': False,
+                'manip_obj': 'pencil' if manip_obj is None else manip_obj,
+            }
+        )
+        policy_cfg = OmegaConf.create(
+            {
+                '_target_': 'sapien_env.teleop.pen_insertion_contact_scripted_policy.SingleArmPolicy',
+            }
+        )
     else:
         raise ValueError(f'Unknown task {task}')
     return cfg, policy_cfg
@@ -214,7 +230,7 @@ def main_env(episode_idx, dataset_dir, headless, mode, task_name, manip_obj=None
             contact_points = np.pad(contact_points, pad_width, mode='constant', constant_values=0)
         elif contact_points.shape[0] > 10:
             contact_points = contact_points[:10]
-        print("Contact points:", contact_points.shape) # should be (10, 6)
+        # print("Contact points:", contact_points.shape) # should be (10, 6)
         data_dict['observations']['contact_points'].append(contact_points)
         data_dict['joint_action'].append(action.copy())
         data_dict['cartesian_action'].append(cartisen_action.copy())
@@ -241,7 +257,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('episode_idx', help='random seed for the episode')
     parser.add_argument('dataset_dir', help='directory to save the dataset')
-    parser.add_argument('task_name', help='task name, including hang_mug, mug_collect, pen_insertion')
+    parser.add_argument('task_name', help='task name, including hang_mug, mug_collect, pen_insertion, pen_insertion_contact')
     parser.add_argument('--headless', action='store_true', help='whether to run in headless mode')
     parser.add_argument('--obj_name', default=None, help='manipulated object name. The full list is shown in YX_DEFAULT_SCALE at sapien_env/sapien_env/utils/yx_object_utils.py')
     parser.add_argument('--mode', default='straight', help='mode for scripted policy. Examples are shown in generate_trajectory() at sapien_env/sapien_env/teleop/mug_collect_scripted_policy.py')

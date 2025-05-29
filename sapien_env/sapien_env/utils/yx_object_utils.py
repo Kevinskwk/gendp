@@ -83,6 +83,7 @@ YX_DEFAULT_SCALE = {
     'pencil_4': 3.0,
     'pencil_5': 0.01,
     'screw_driver_1':0.01,
+    'pencil_holder': 1.0,
 }
 
 YX_DEFAULT_DENSITY = {
@@ -90,7 +91,7 @@ YX_DEFAULT_DENSITY = {
     'blue_mug': 1,
 }
 
-def load_yx_obj(scene: sapien.Scene, object_name, scale=None, material=None, collision_shape = 'convex', density=None, is_static=False):
+def load_yx_obj(scene: sapien.Scene, object_name, scale=None, material=None, collision_shape = 'convex', density=None, is_static=False, get_length=False):
     current_dir = Path(__file__).parent
     yx_dir = current_dir.parent / "assets" / "yx"
     
@@ -119,14 +120,19 @@ def load_yx_obj(scene: sapien.Scene, object_name, scale=None, material=None, col
 
     if object_name=='pencil':
         builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.01,0.01,0.08],density=density,material=material)
+        half_length = 0.08
     elif object_name=='pencil_2':
         builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.01,0.01,0.09],density=density,material=material)
+        half_length = 0.09
     elif object_name=='pencil_3':
         builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.01,0.01,0.12],density=density,material=material)
+        half_length = 0.12
     elif object_name=='pencil_4':
         builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.01,0.01,0.06],density=density,material=material)
+        half_length = 0.06
     elif object_name=='pencil_5':
         builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.012,0.012,0.10],density=density,material=material)
+        half_length = 0.10
     else:
         for collision_file in collision_file_cands:
             if os.path.exists(str(collision_file)):
@@ -142,4 +148,7 @@ def load_yx_obj(scene: sapien.Scene, object_name, scale=None, material=None, col
         actor = builder.build_static(name=object_name)
     else:
         actor = builder.build(name=object_name)
-    return actor
+    if get_length:
+        return actor, half_length
+    else:
+        return actor
