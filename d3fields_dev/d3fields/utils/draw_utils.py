@@ -625,7 +625,6 @@ class o3dVisualizer:
         arrow = o3d.geometry.TriangleMesh.create_arrow(
             cylinder_radius=radius, cone_radius=radius * 2, cylinder_height=height, cone_height=height
         )
-        arrow.rotate(arrow.get_rotation_matrix_from_xyz((np.pi / 2, 0, 0)), center=(0, 0, 0))
         arrow.translate(base)
         arrow_end = end - base
         print(base, end)

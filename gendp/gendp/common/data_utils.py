@@ -698,7 +698,7 @@ def get_contact_field(pcd, contact_points,
     # Initialize contact probability and force fields
     contact_probabilities = np.zeros(pcd.shape[0])
     contact_forces = np.zeros((pcd.shape[0], 3))
-    print(len(valid_positions), ' valid contact points found.')
+    # print(len(valid_positions), ' valid contact points found.')
 
     # For each valid contact point
     for i, (contact_pos, contact_force, force_mag, closest_idx) in enumerate(
@@ -713,7 +713,7 @@ def get_contact_field(pcd, contact_points,
             contact_probabilities[closest_idx], 
             base_probability
         )
-        print(f'Contact {i+1}/{len(valid_positions)}: Closest PCD Index {closest_idx}, Base Probability {base_probability:.4f}')
+        # print(f'Contact {i+1}/{len(valid_positions)}: Closest PCD Index {closest_idx}, Base Probability {base_probability:.4f}')
         
         # Weighted average for force vectors (in case of overlapping influences)
         current_prob = contact_probabilities[closest_idx]

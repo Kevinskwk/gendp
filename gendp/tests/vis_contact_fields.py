@@ -23,7 +23,7 @@ vis_action = True
 vis_contact = True
 vis_contact_vector = True
 curr_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = f'{curr_dir}/../../data/sapien_demo/pencil'
+data_dir = f'{curr_dir}/../../data/sapien_demo/insertion_contact_demo_mixed'
 robot_name = 'panda'
 cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 
@@ -83,7 +83,7 @@ for i in tqdm(epi_range):
     visualizer.add_triangle_mesh('origin', 'base', size=0.2)
     visualizer.update_triangle_mesh('base', tf=np.eye(4))
     
-    for t in tqdm(range(T*3//4, T)):
+    for t in tqdm(range(T)):
         # visualize point cloud
         robot_base_in_world = robot_base_in_world_seq[t]
         colors = np.stack([data_dict['observations']['images'][f'{cam_key}_color'][t:t+1] for cam_key in cam_keys], axis=1)
