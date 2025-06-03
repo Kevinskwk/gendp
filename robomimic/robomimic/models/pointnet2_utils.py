@@ -410,7 +410,7 @@ class PointNet2Encoder(nn.Module):
         super(PointNet2Encoder, self).__init__()
         
         # self.sa1 = PointNetSetAbstractionMsg(50, [0.02, 0.04, 0.08], [8, 16, 64], in_channel - 3,[[32, 32, 64], [64, 64, 128], [64, 96, 128]])
-        # self.sa2 = PointNetSetAbstractionMsg(10, [0.04, 0.08, 0.16], [16, 32, 64], 320,[[64, 64, 128], [128, 128, 256], [128, 128, 256]])
+        # self.sa2 = PointNetSetAbstractionMsg(10, [0.04, 0.08, 0.16], [16, 32, 64], 3core_kwargs20,[[64, 64, 128], [128, 128, 256], [128, 128, 256]])
         # self.sa3 = PointNetSetAbstraction(None, None, None, 640 + 3, [256, 512, 1024], True)
         # self.sa1 = PointNetSetAbstraction(npoint=64, radius=0.04, nsample=16, in_channel=in_channels, mlp=[64, 64, 128], group_all=False)
         # self.sa2 = PointNetSetAbstraction(npoint=16, radius=0.08, nsample=32, in_channel=128 + 3, mlp=[128, 128, 256], group_all=False)
@@ -439,7 +439,7 @@ class PointNet2Encoder(nn.Module):
         if self.bn:
             self.bn2 = nn.BatchNorm1d(256)
 
-        # copy variables
+        # copy variablescore_kwargs
         self.in_channels = in_channels
 
     def forward(self, xyz):

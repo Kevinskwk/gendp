@@ -16,7 +16,7 @@ from sapien_env.gui.gui_base import GUIBase, YX_TABLE_TOP_CAMERAS
 from sapien_env.sim_env.constructor import add_default_scene_light
 from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
 from gendp.common.kinematics_utils import KinHelper
-from gendp.common.data_utils import d3fields_proc
+from gendp.common.data_utils import d3fields_proc, get_contact_field
 from d3fields.fusion import Fusion
 
 def transform_action_from_world_to_robot(action : np.ndarray, pose : sapien.Pose):
@@ -157,6 +157,7 @@ class SapienEnvWrapper():
             if 'd3fields' in self.shape_meta['obs']:
                 use_dino = False
                 distill_dino = self.shape_meta['obs']['d3fields']['info']['distill_dino'] if 'distill_dino' in self.shape_meta['obs']['d3fields']['info'] else False
+                use_contact_field = 'contact_field' in self.shape_meta['obs']['d3fields']
                 intrinsics = np.stack([cam.get_intrinsic_matrix() for cam in self.gui.cams], axis=0) # (V, 3, 3)
                 extrinsics = np.stack([cam.get_extrinsic_matrix() for cam in self.gui.cams], axis=0) # (V, 4, 4)
                 robot_base_pose_in_world = self.env.robot.get_pose().to_transformation_matrix() # (4, 4)
@@ -181,6 +182,29 @@ class SapienEnvWrapper():
                     aggr_pts_feats = np.concatenate([aggr_src_pts, aggr_feats], axis=-1)
                 else:
                     aggr_pts_feats = aggr_src_pts
+
+                if use_contact_field:
+                    # compute contact field
+                    min_force_magnitude = self.shape_meta['obs']['d3fields']['contact_field'].get('min_force_magnitude', 0.01)
+                    smoothing_radius = self.shape_meta['obs']['d3fields']['contact_field'].get('smoothing_radius', 0.05)
+                    smoothing_sigma = self.shape_meta['obs']['d3fields']['contact_field'].get('smoothing_sigma', 0.01)
+                    force_scaling = self.shape_meta['obs']['d3fields']['contact_field'].get('force_scaling', 1.0)
+                    contact_points = np.asarray(self.env.get_contact_points()).reshape(-1, 6)
+                    # Pad contact_points to have length 10 with zeros
+                    if contact_points.shape[0] < 10:
+                        pad_width = ((0, 10 - contact_points.shape[0]), (0, 0)) if contact_points.ndim == 2 else (0, 10 - contact_points.shape[0])
+                        contact_points = np.pad(contact_points, pad_width, mode='constant', constant_values=0)
+                    elif contact_points.shape[0] > 10:
+                        contact_points = contact_points[:10]
+                    contact_field = get_contact_field(
+                        pcd=aggr_pts_feats[:, :3],
+                        contact_points=contact_points,
+                        min_force_magnitude=min_force_magnitude,
+                        smoothing_radius=smoothing_radius,
+                        smoothing_sigma=smoothing_sigma,
+                        force_scaling=force_scaling,
+                    )
+                    aggr_pts_feats = np.concatenate([aggr_src_pts, contact_field], axis=-1)
                 
                 raw_obs['d3fields'] = aggr_pts_feats.transpose(1,0)
         

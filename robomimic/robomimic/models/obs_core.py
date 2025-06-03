@@ -415,6 +415,7 @@ class SpatialCore(EncoderCore, BaseNets.ConvBase):
                  use_feats=False,
                  preproc_feats=False,
                  proj_feats=False,
+                 contact_field_dim=0,
                  n_per_obj=100):
         super(SpatialCore, self).__init__(input_shape=input_shape)
         self.output_dim = output_dim
@@ -432,12 +433,13 @@ class SpatialCore(EncoderCore, BaseNets.ConvBase):
         self.preproc_feats = preproc_feats
         self.proj_feats = proj_feats
         pn_net_cls = PointNet2Encoder # PointNet; PointNet2Encoder
-        # pn_net_cls = CAMPointNetEncoder # PointNet; PointNet2Encoder
+        # pn_net_cls = CAMPointNetEncoder # PointNinput_shapeet; PointNet2Encoder
         # pn_net_cls = PointNetAttnEncoder # PointNet; PointNet2Encoder
+        in_channels = input_shape[0] + contact_field_dim
         if pn_net_cls == CAMPointNetEncoder:
-            self.nets = pn_net_cls(in_channels=input_shape[0], use_bn=False, use_softmax=True)
+            self.nets = pn_net_cls(in_channels=in_channels, use_bn=False, use_softmax=True)
         else:
-            self.nets = pn_net_cls(in_channels=input_shape[0], use_bn=False)
+            self.nets = pn_net_cls(in_channels=in_channels, use_bn=False)
         if self.use_pos:
             self.pos_mlp = nn.Sequential(
                 nn.Linear(3, 64),
@@ -456,7 +458,7 @@ class SpatialCore(EncoderCore, BaseNets.ConvBase):
                 self.output_dim += 64 * self.n_obj
         if self.preproc_feats:
             self.preproc_mlp = nn.Sequential(
-                nn.Linear(input_shape[0] - 3, 512),
+                nn.Linear(in_channels - 3, 512),
                 nn.ReLU(),
                 nn.Linear(512, 256),
                 nn.ReLU(),
@@ -630,7 +632,7 @@ class SparseTransformer(EncoderCore, BaseNets.ConvBase):
         self.output_dim = n_emb
         # self.postproc_mlp = nn.Sequential(
         #     nn.Linear(n_emb, 256),
-        #     nn.ReLU(),
+        #     nn.ReLU(),use_feats
         #     nn.Linear(256, 256),
         #     nn.ReLU(),
         #     nn.Linear(256, 256),

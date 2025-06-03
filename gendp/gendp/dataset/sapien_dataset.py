@@ -25,7 +25,7 @@ import scipy.spatial.transform as st
 from gendp.common.pytorch_util import dict_apply
 from gendp.common.replay_buffer import ReplayBuffer
 from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
-from gendp.common.data_utils import d3fields_proc, _convert_actions
+from gendp.common.data_utils import d3fields_proc, _convert_actions, get_contact_field
 from gendp.model.common.rotation_transformer import RotationTransformer
 from gendp.common.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
@@ -162,6 +162,8 @@ def _convert_sapein_to_dp_replay(store, shape_meta, dataset_dir, rotation_transf
                 use_dino = False
                 distill_dino = shape_meta['obs'][key]['info']['distill_dino'] if 'distill_dino' in shape_meta['obs'][key]['info'] else False
                 use_seg = False
+                use_contact_field = 'contact_field' in shape_meta['obs'][key]
+                # print(f'Processing {key} with distill_dino={distill_dino}, use_seg={use_seg}, use_contact_field={use_contact_field}')
                 is_joint = ('key' in shape_meta['action'].keys()) and (shape_meta['action']['key'] == 'joint_action')
                 color_seq = np.stack([file['observations']['images'][f'{k}_color'][()] for k in view_keys], axis=1) # (T, V, H ,W, C)
                 depth_seq = np.stack([file['observations']['images'][f'{k}_depth'][()] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
@@ -198,6 +200,25 @@ def _convert_sapein_to_dp_replay(store, shape_meta, dataset_dir, rotation_transf
                 
                 if key not in spatial_data_dict:
                     spatial_data_dict[key] = list()
+
+                if use_contact_field:
+                    # compute contact field
+                    min_force_magnitude = shape_meta['obs'][key]['contact_field'].get('min_force_magnitude', 0.01)
+                    smoothing_radius = shape_meta['obs'][key]['contact_field'].get('smoothing_radius', 0.05)
+                    smoothing_sigma = shape_meta['obs'][key]['contact_field'].get('smoothing_sigma', 0.01)
+                    force_scaling = shape_meta['obs'][key]['contact_field'].get('force_scaling', 1.0)
+                    for t, aggr_src_pts in enumerate(aggr_src_pts_ls):
+                        # print(f'Processing contact field for timestep {t} with shape {aggr_src_pts.shape}')
+                        contact_field = get_contact_field(
+                            pcd=aggr_src_pts_ls[t][:, :3],
+                            contact_points=file['observations']['contact_points'][t],
+                            min_force_magnitude=min_force_magnitude,
+                            smoothing_radius=smoothing_radius,
+                            smoothing_sigma=smoothing_sigma,
+                            force_scaling=force_scaling,
+                        )
+                        # print(f'Contact field shape: {contact_field.shape}')
+                        aggr_src_pts_ls[t] = np.concatenate([aggr_src_pts, contact_field], axis=-1, dtype=np.float32)
                 
                 spatial_data_dict[key] = spatial_data_dict[key] + aggr_src_pts_ls
                 feats_per_epi = feats_per_epi + aggr_feats_ls
@@ -376,6 +397,10 @@ class SapienDataset(BaseImageDataset):
                 cache_info_str += '_distill_dino'
             else:
                 cache_info_str += '_dino'
+            use_contact_field = 'contact_field' in shape_meta['obs']['d3fields']
+            print(f'Using contact field: {use_contact_field}')
+            if use_contact_field:
+                cache_info_str += '_contact'
             if 'key' in shape_meta['action'] and shape_meta['action']['key'] == 'joint_action':
                 cache_info_str += '_joint'
             else:

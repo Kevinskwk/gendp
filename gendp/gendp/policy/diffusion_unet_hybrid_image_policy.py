@@ -145,6 +145,11 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
             encoder_kwargs['spatial']["core_kwargs"]["compositional"] = False
             encoder_kwargs['spatial']["core_kwargs"]["use_pos"] = False
             encoder_kwargs['spatial']["core_kwargs"]["decomp_part"] = False
+
+        if 'd3fields' in shape_meta['obs'] and 'contact_field' in shape_meta['obs']['d3fields']:
+            encoder_kwargs['spatial']["core_kwargs"]["contact_field_dim"] = shape_meta['obs']['d3fields']['contact_field']['dimension']
+        else:
+            encoder_kwargs['spatial']["core_kwargs"]["contact_field_dim"] = 0
         
         encoder = ObservationGroupEncoder(
             observation_group_shapes=observation_group_shapes,
