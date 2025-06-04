@@ -204,7 +204,7 @@ class SapienEnvWrapper():
                         smoothing_sigma=smoothing_sigma,
                         force_scaling=force_scaling,
                     )
-                    aggr_pts_feats = np.concatenate([aggr_src_pts, contact_field], axis=-1)
+                    aggr_pts_feats = np.concatenate([aggr_pts_feats, contact_field], axis=-1, dtype=np.float32)
                 
                 raw_obs['d3fields'] = aggr_pts_feats.transpose(1,0)
         
