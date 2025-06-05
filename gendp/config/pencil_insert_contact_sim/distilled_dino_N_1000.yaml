@@ -195,10 +195,10 @@ task:
     n_action_steps: 8
     n_envs: null
     n_obs_steps: 2
-    n_test: 5
-    n_test_vis: 5
-    n_train: 2
-    n_train_vis: 2
+    n_test: 2
+    n_test_vis: 2
+    n_train: 1
+    n_train_vis: 1
     train_obj_ls:
     - pencil
     - pencil_2
