@@ -148,8 +148,8 @@ task:
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
-task_name: screw_driving
-dataset_name: screwdriver_aligning
+task_name: screwdriver_insertion
+dataset_name: screwdriver_insert # screwdriver_aligning
 training:
   checkpoint_every: 1000
   debug: false

@@ -29,7 +29,8 @@ from gendp.common.sampler import (
 from gendp.common.kinematics_utils import KinHelper
 from gendp.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
-from gendp.common.data_utils import d3fields_proc, _convert_actions, load_dict_from_hdf5, modify_hdf5_from_dict, force_field_proc
+from gendp.common.data_utils import d3fields_proc, _convert_actions, load_dict_from_hdf5, modify_hdf5_from_dict
+from gendp.common.tactile_utils import force_field_proc
 from gendp.dataset.base_dataset import BaseImageDataset
 from gendp.codecs.imagecodecs_numcodecs import register_codecs, Jpeg2k
 from gendp.common.normalize_util import (
@@ -182,12 +183,18 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 color_seq = np.stack([file['observations']['images'][f'{k}_color'][:episode_length] for k in view_keys], axis=1) # (T, V, H ,W, C)
                 depth_seq = np.stack([file['observations']['images'][f'{k}_depth'][:episode_length] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
                 extri_seq = np.stack([file['observations']['images'][f'{k}_extrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 4, 4)
-                # extri_seq[:, 1, 1, 3] -= 0.02  # manual offset
+                if 'fixed_cam_offest' in shape_meta['obs'][key]['info']:
+                    offset = shape_meta['obs'][key]['info']['fixed_cam_offest']
+                    for i, delta in enumerate(offset):
+                        extri_seq[:, 1, i, 3] += delta  # manual offset
+                    # extri_seq[:, 1, 1, 3] -= 0.02  # manual offset
+                    # extri_seq[:, 1, 0, 3] += 0.01  # manual offset
                 intri_seq = np.stack([file['observations']['images'][f'{k}_intrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 3, 3)
                 qpos_seq = file['observations']['full_joint_pos'][:episode_length] if 'full_joint_pos' in file['observations'] else file['observations']['joint_pos'][:-trim_tail] # (T, -1)
                 if 'robot_base_pose_in_world' in file['observations']:
                     robot_base_pose_in_world_seq = file['observations']['robot_base_pose_in_world'][:episode_length] # (T, 4, 4)
                 else:
+                    print('using default robot base pose!')
                     robot_base_pose_in_world = np.array([[ 1.  ,  0.  ,  0.  , -0.52],
                                                          [ 0.  ,  1.  ,  0.  , -0.06],
                                                          [ 0.  ,  0.  ,  1.  ,  0.03],
@@ -444,6 +451,8 @@ class RealDataset(BaseImageDataset):
                 cache_info_str += '_eef'
             if 'trim_tail' in shape_meta and shape_meta['trim_tail'] > 0:
                 cache_info_str += '_trim'
+            if 'fixed_cam_offest' in shape_meta['obs']['d3fields']['info']:
+                cache_info_str += '_offset'
         if use_cache:
             cache_zarr_path = os.path.join(dataset_dir, f'cache{cache_info_str}.zarr.zip')
             cache_lock_path = cache_zarr_path + '.lock'
