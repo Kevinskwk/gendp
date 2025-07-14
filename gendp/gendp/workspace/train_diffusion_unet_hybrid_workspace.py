@@ -251,7 +251,7 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
                 policy.eval()
                 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0:
+                if (self.epoch % cfg.training.checkpoint_every) == 0 and self.epoch > 0:
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         time.sleep(1) # wait for the checkpoint to be written
@@ -330,7 +330,7 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
 
                 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0: # and self.epoch > 0:
+                if (self.epoch % cfg.training.checkpoint_every) == 0 and self.epoch > 0:
                     # sanitize metric names
                     metric_dict = dict()
                     for key, value in step_log.items():

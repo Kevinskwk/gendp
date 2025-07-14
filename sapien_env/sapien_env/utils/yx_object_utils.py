@@ -125,8 +125,8 @@ def load_yx_obj(scene: sapien.Scene, object_name, scale=None, material=None, col
         builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.01,0.01,0.09],density=density,material=material)
         half_length = 0.09
     elif object_name=='pencil_3':
-        builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.01,0.01,0.05],density=density,material=material)
-        half_length = 0.05
+        builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.01,0.01,0.075],density=density,material=material)
+        half_length = 0.075
     elif object_name=='pencil_4':
         builder.add_box_collision(pose=sapien.Pose([0,0,0]), half_size=[0.01,0.01,0.06],density=density,material=material)
         half_length = 0.06
