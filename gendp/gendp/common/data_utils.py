@@ -10,7 +10,8 @@ from tqdm import tqdm
 from d3fields.utils.draw_utils import np2o3d
 
 import sys
-sys.path.append('/users/kevinma/gendp/GelsightKCL')
+import os.path as osp
+sys.path.append(osp.join(osp.dirname(__file__), '..', '..', '..', 'GelsightKCL'))
 from A_utility import marker_center, process_frame
 import find_marker
 

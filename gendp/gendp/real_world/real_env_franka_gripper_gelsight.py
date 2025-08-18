@@ -82,10 +82,11 @@ class RealEnvFranka:
             # video capture params
             video_capture_fps=30,
             video_capture_resolution=(640, 480),
-            gelsight_capture_resolution=(1280, 960),
+            # gelsight_capture_resolution=(1280, 960),
+            gelsight_capture_resolution=(960, 720),
             gelsight_ids=GELSIGHT_IDS,
             # saving params
-            record_raw_video=True,
+            record_raw_video=False,
             thread_per_video=2,
             video_crf=21,
             # vis params
@@ -286,7 +287,7 @@ class RealEnvFranka:
             self.multi_cam_vis.stop(wait=False)
         self.robot.stop(wait=False)
         self.realsense.stop(wait=False)
-        self.gelsight.stop(wait=False)
+        # self.gelsight.stop(wait=False)
         if wait:
             self.stop_wait()
 

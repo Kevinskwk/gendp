@@ -166,6 +166,14 @@ class SingleGelsight(mp.Process):
             if not ret:
                 if self.verbose:
                     print(f"Camera {self.device_id}: Failed to read frame")
+                if not cap.isOpened() and (self.device_id == 14 or 15):
+                    self.device_id = 14 if self.device_id == 15 else 15
+                    cap.release()
+                    cap = cv2.VideoCapture(self.device_id)
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+                    cap.set(cv2.CAP_PROP_FPS, self.capture_fps)
+                    ret, frame = cap.read()
                 continue
 
             # Prepare frame data

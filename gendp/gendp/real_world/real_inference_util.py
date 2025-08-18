@@ -2,7 +2,7 @@ from typing import Dict, Callable, Tuple, Optional
 import numpy as np
 import cv2
 from gendp.common.cv2_util import get_image_transform
-from gendp.common.data_utils import d3fields_proc
+from gendp.common.data_utils import d3fields_proc, force_field_proc
 
 def get_real_obs_dict(
         env_obs: Dict[str, np.ndarray], 
@@ -73,10 +73,10 @@ def get_real_obs_dict(
                 tool_names[0] = attr['info']['right_tool']
             if 'left_tool' in attr['info']:
                 tool_names[1] = attr['info']['left_tool']
-            color_seq = np.stack([env_obs[f'camera_{k}_color'] for k in view_keys], axis=1) # (T, V, H ,W, C)
-            depth_seq = np.stack([env_obs[f'camera_{k}_depth'] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
-            extri_seq = np.stack([env_obs[f'camera_{k}_extrinsics'] for k in view_keys], axis=1) # (T, V, 4, 4)
-            intri_seq = np.stack([env_obs[f'camera_{k}_intrinsics'] for k in view_keys], axis=1) # (T, V, 3, 3)
+            color_seq = np.stack([env_obs[f'{k}_color'] for k in view_keys], axis=1) # (T, V, H ,W, C)
+            depth_seq = np.stack([env_obs[f'{k}_depth'] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
+            extri_seq = np.stack([env_obs[f'{k}_extrinsics'] for k in view_keys], axis=1) # (T, V, 4, 4)
+            intri_seq = np.stack([env_obs[f'{k}_intrinsics'] for k in view_keys], axis=1) # (T, V, 3, 3)
             qpos_seq = env_obs['full_joint_pos'] if 'full_joint_pos' in env_obs else env_obs['joint_pos'] # (T, -1)
             if 'robot_base_pose_in_world' in env_obs:
                 robot_base_pose_in_world_seq = env_obs['robot_base_pose_in_world'] # (T, 4, 4)
@@ -102,6 +102,15 @@ def get_real_obs_dict(
             else:
                 aggr_pts_feats = aggr_src_pts
             obs_dict_np[key] = aggr_pts_feats.transpose(0,2,1)
+            # print('pts shape', obs_dict_np[key].shape)
+            # print('pts dtype', obs_dict_np[key].dtype)
+        elif type == 'tactile':
+            this_data_in = env_obs[key]
+            setting = attr['setting']
+            force_field = force_field_proc(this_data_in, setting)
+            # print('force field shape', force_field.shape)  # (T, 4, N*M)
+            # print('force field dtype', force_field.dtype)
+            obs_dict_np[key] = force_field.transpose(0,2,1)
 
     return obs_dict_np
 

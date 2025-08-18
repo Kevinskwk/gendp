@@ -39,8 +39,8 @@ from omegaconf import open_dict
 import scipy.spatial.transform as st
 import diffusers
 from d3fields.utils.draw_utils import np2o3d
-from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
-# from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
+# from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
+from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
 # from gendp.real_world.aloha_master import AlohaMaster
 # from gendp.real_world.aloha_bimanual_master import AlohaBimanualMaster
 from gendp.common.precise_sleep import precise_wait
@@ -230,6 +230,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
             thread_per_video=3,
             # video recording quality, lower is better (but slower).
             video_crf=21,
+            ctrl_mode=action_mode,
             shm_manager=shm_manager) as env:
             cv2.setNumThreads(1)
 
@@ -274,9 +275,16 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                     obs = env.get_obs()
 
                     # visualize
+                    rs_fixed = obs['camera_fixed_color'][-1,:,:,::-1].copy()
+                    rs_wrist = obs['camera_wrist_color'][-1,:,:,::-1].copy()
+                    tactile_left = obs['tactile_left'][-1,:,:,::-1].copy()
+                    tactile_right = obs['tactile_right'][-1,:,:,::-1].copy()
+                    # vis_img = np.concatenate([tactile_left, tactile_right], axis=1)
+                    vis_img = np.concatenate([tactile_left, rs_fixed, tactile_right, rs_wrist], axis=1)
+                    vis_img = cv2.resize(vis_img, (1280, 240))
                     episode_id = env.episode_id
-                    vis_camera_name = CAMERA_NAMES[vis_camera_idx]
-                    vis_img = obs[f'camera_{vis_camera_name}_color'][-1]
+                    # vis_camera_name = CAMERA_NAMES[vis_camera_idx]
+                    # vis_img = obs[f'camera_{vis_camera_name}_color'][-1]
                     # vis_img = obs[f'tactile_right'][-1]
                     match_episode_id = episode_id
                     if match_episode is not None:
@@ -501,7 +509,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             result = policy.predict_action(obs_dict)
                             # this action starts from the first obs step
                             action = result['action'][0].detach().to('cpu').numpy() # (T, Da), Da=10 (3 dof translation, 6 dof rotation, 1 gripper)
-                            print("action:", action)
+                            # print("action:", action)
 
                             # check abnormal action
                             # abnormal_action = False
@@ -555,7 +563,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             #     continue
 
                             print('Inference latency:', time.time() - s)
-                            print('predicted action', action)
+                            # print('predicted action', action)
                         
                         ### visualize policy
                         if vis_d3fields:
@@ -610,6 +618,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                         
                         env_actions = policy_action_to_env_action(action, action_mode, num_bots)
                         print('env_actions:', env_actions)
+                        print(action_mode)
 
                         # deal with timing
                         # the same step actions are always the target for
