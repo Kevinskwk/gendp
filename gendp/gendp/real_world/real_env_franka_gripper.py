@@ -33,7 +33,7 @@ DEFAULT_OBS_KEY_MAP = {
     'FullActualQWGripper': 'full_joint_pos',
     'ActualQdWGripper': 'joint_vel',
     'WristCamExtrinsics': 'wrist_cam_extrinsics',
-    'ForceTorque': 'force_torque',
+    # 'ForceTorque': 'force_torque',
     #gripper
     # 'gripper_position': 'gripper_position',
     # timestamps
@@ -43,7 +43,8 @@ DEFAULT_OBS_KEY_MAP = {
 
 CAMERA_NAMES = {
     0: 'wrist',
-    1: 'fixed'
+    1: 'left',
+    2: 'right'
 }
 
 class RealEnvFranka:
@@ -98,6 +99,8 @@ class RealEnvFranka:
             shm_manager.start()
         if camera_serial_numbers is None:
             camera_serial_numbers = SingleRealsense.get_connected_devices_serial()
+
+        print(camera_serial_numbers)
 
         color_tf = get_image_transform(
             input_res=video_capture_resolution,
@@ -321,8 +324,14 @@ class RealEnvFranka:
                 camera_obs[f'camera_wrist_extrinsics'] = v[this_idxs]
             else:
                 robot_obs[k] = v[this_idxs]
-        fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
-        camera_obs[f'camera_fixed_extrinsics'] = np.tile(fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        # fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
+        cam_1_extri = get_extrinsic([0.33140649116301046, 0.5088971764480946, 0.11701259737976832],
+                                    [-0.14112166822506242, 0.7072779422922251, -0.6794010610611806, 0.1351176721720494])
+        cam_2_extri = get_extrinsic([0.6093451170018969, -0.21758103645789892, 0.14001694566120815],
+                                    [0.06233815389071674, -0.6854456458464545, -0.717860365560187, 0.10466478260345545])
+        # camera_obs[f'camera_fixed_extrinsics'] = np.tile(fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        camera_obs[f'camera_1_extrinsics'] = np.tile(cam_1_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        camera_obs[f'camera_2_extrinsics'] = np.tile(cam_2_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
 
         # return obs
         obs_data = dict(camera_obs)
@@ -476,7 +485,7 @@ class RealEnvFranka:
                          'ee_pos': [],
                         #  'ee_vel': [],
                         #  'finger_pos': {},
-                         'force_torque': [],
+                        #  'force_torque': [],
                          'images': {},
                         },
                     # 'joint_action': [],
@@ -607,7 +616,9 @@ def test_env_demo_replay():
         print(demo_dict['observations']['images']['fixed_extrinsic'][0])
         print(demo_dict['observations']['images']['wrist_extrinsic'][0])
         obs_dict = env.get_obs()
-        print(obs_dict['camera_fixed_extrinsics'])
+        # print(obs_dict['camera_fixed_extrinsics'])
+        print(obs_dict['camera_left_extrinsics'])
+        print(obs_dict['camera_right_extrinsics'])
         print(obs_dict['camera_wrist_extrinsics'])
         start_step = 0
         while True:

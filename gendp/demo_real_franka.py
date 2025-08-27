@@ -23,8 +23,8 @@ import click
 import cv2
 import numpy as np
 
-# from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
-from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
+from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
+# from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
 from gendp.common.precise_sleep import precise_wait
 from gendp.real_world.keystroke_counter import (
     KeystrokeCounter, Key, KeyCode
@@ -66,6 +66,8 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
             video_crf=21,
             shm_manager=shm_manager) as env:
             cv2.setNumThreads(1)
+            cv2.namedWindow('default', cv2.WINDOW_AUTOSIZE)
+            cv2.waitKey(1)  # Initialize the window system
 
             # realsense exposure
             # env.realsense.set_exposure(exposure=120, gain=0)
@@ -79,7 +81,7 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
             iter_idx = 0
             stop = False
             is_recording = False
-            gripper_pos = 0.14
+            gripper_pos = 0.08
             while not stop:
                 # calculate timing
                 t_cycle_end = t_start + (iter_idx + 1) * dt
@@ -95,6 +97,7 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                     if key_stroke == KeyCode(char='q'):
                         # Exit program
                         stop = True
+                        print('Quitting.')
                     elif key_stroke == KeyCode(char='c'):
                         # Start recording
                         env.start_episode(t_start + (iter_idx + 2) * dt - time.monotonic() + time.time(), curr_outdir=output_dir)
@@ -122,11 +125,11 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                         # delete
                     elif key_stroke == KeyCode(char='g'):
                         # close gripper
-                        gripper_pos = 0.02
+                        gripper_pos = 0.00
                         print('Closing gripper.')
                     elif key_stroke == KeyCode(char='o'):
                         # open gripper
-                        gripper_pos = 0.14
+                        gripper_pos = 0.08
                         print('Opening gripper.')
                 stage = key_counter[Key.space]
                 if stage >= len(output_dir):
@@ -136,13 +139,17 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                     is_recording = False
 
                 # visualize
-                rs_fixed = obs['camera_fixed_color'][-1,:,:,::-1].copy()
+                rs_left = obs['camera_left_color'][-1,:,:,::-1].copy()
                 rs_wrist = obs['camera_wrist_color'][-1,:,:,::-1].copy()
-                tactile_left = obs['tactile_left'][-1,:,:,::-1].copy()
-                tactile_right = obs['tactile_right'][-1,:,:,::-1].copy()
+                # tactile_left = obs['tactile_left'][-1,:,:,::-1].copy()
+                # print("DEBUG: tactile_left shape:", tactile_left.shape)
+                # tactile_right = obs['tactile_right'][-1,:,:,::-1].copy()
+                # print("DEBUG: tactile_right shape:", tactile_right.shape)
+
                 # vis_img = np.concatenate([tactile_left, tactile_right], axis=1)
-                vis_img = np.concatenate([tactile_left, rs_fixed, tactile_right, rs_wrist], axis=1)
-                vis_img = cv2.resize(vis_img, (1280, 240))
+                # vis_img = np.concatenate([tactile_left, rs_left, tactile_right, rs_wrist], axis=1)
+                vis_img = np.concatenate([rs_left, rs_wrist], axis=1)
+                vis_img = cv2.resize(vis_img, (640, 240))
                 episode_id = env.episode_id
                 text = f'Episode: {episode_id}, Stage: {stage}'
                 if is_recording:

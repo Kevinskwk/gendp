@@ -132,6 +132,17 @@ class FrankaInterface:
     def get_force_torque(self):
         return np.array(self.server.get_force_torque())
 
+    def get_marker_flow(self):
+        marker_flow_right, marker_flow_left, marker_depth_right, marker_depth_left = self.server.get_marker_flow()
+        marker_flow_left = np.array(marker_flow_left).reshape((7, 9, 2))
+        marker_flow_right = np.array(marker_flow_right).reshape((7, 9, 2))
+        marker_depth_left = np.array(marker_depth_left).reshape((7, 9, 1))
+        marker_depth_right = np.array(marker_depth_right).reshape((7, 9, 1))
+        marker_left = np.concatenate([marker_flow_left, marker_depth_left], axis=-1)
+        marker_right = np.concatenate([marker_flow_right, marker_depth_right], axis=-1)
+        # return stacked marker array as (2, 7, 9, 3)
+        return np.stack([marker_left, marker_right], axis=0).reshape((2, 7, 9, 3))
+
     def terminate_current_policy(self):
         self.server.terminate_current_policy()
 
@@ -212,7 +223,8 @@ class FrankaInterpolationController(mp.Process):
             ('FullActualQWGripper', 'get_joint_positions_w_gripper'),
             ('ActualQdWGripper', 'get_joint_velocities_w_gripper'),
             ('WristCamExtrinsics', 'get_wrist_camera_extrinsics'),
-            ('ForceTorque', 'get_force_torque')
+            ('MarkerFlow', 'get_marker_flow'),
+            # ('ForceTorque', 'get_force_torque')
             # ('gripper_position', 'get_gripper_position'),
         ]
         example = dict()
@@ -227,6 +239,8 @@ class FrankaInterpolationController(mp.Process):
                 example[key] = np.zeros((4, 4))
             elif 'force_torque' in func_name:
                 example[key] = np.zeros(6)
+            elif 'marker_flow' in func_name:
+                example[key] = np.zeros((2, 7, 9, 3))
 
         example['robot_receive_timestamp'] = time.time()
         example['robot_timestamp'] = time.time()
@@ -357,7 +371,7 @@ class FrankaInterpolationController(mp.Process):
             # close gripper
             print("Testing Gripper")
             # robot.control_gripper(gripper_action=1.0)
-            robot.set_gripper_position(0.14)
+            robot.set_gripper_position(0.0)
             time.sleep(1.0)
 
             # main loop
@@ -389,7 +403,7 @@ class FrankaInterpolationController(mp.Process):
                     Kqd=None
                 )
 
-            gripper = 0.14
+            gripper = 0.8
 
             t_start = time.monotonic()
             iter_idx = 0

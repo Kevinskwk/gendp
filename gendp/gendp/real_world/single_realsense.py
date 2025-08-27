@@ -559,9 +559,21 @@ class SingleRealsense(mp.Process):
             pipeline = rs.pipeline()
             pipeline_profile = pipeline.start(rs_config)
 
+            # Check available sensors first
+            device = pipeline_profile.get_device()
+            print(f"Device {self.serial_number} sensors:")
+            for i in range(len(device.sensors)):
+                sensor = device.sensors[i]
+                print(f"  Sensor {i}: {sensor.get_info(rs.camera_info.name)}")
+
+
             # report global time
             # https://github.com/IntelRealSense/librealsense/pull/3909
-            d = pipeline_profile.get_device().first_color_sensor()
+            print("getting device:", self.serial_number)
+            try:
+                d = pipeline_profile.get_device().first_color_sensor()
+            except:
+                d = pipeline_profile.get_device().first_depth_sensor()
             d.set_option(rs.option.global_time_enabled, 1)
 
             # setup advanced mode
