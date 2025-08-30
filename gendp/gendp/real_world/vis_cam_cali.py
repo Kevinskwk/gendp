@@ -1,10 +1,26 @@
 import time
 import argparse
+import scipy.spatial.transform as st
 
 import numpy as np
 import open3d as o3d
+
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from d3fields.utils.draw_utils import aggr_point_cloud_from_data
 from gendp.real_world.multi_realsense import MultiRealsense
+from gendp.common.cv2_util import get_extrinsic
+
+
+boundaries = {
+            'x_lower': 0.2,
+            'x_upper': 0.8,
+            'y_lower': -0.4,
+            'y_upper': 0.4,
+            'z_lower': 0.0,
+            'z_upper': 0.5,
+        }
 
 def visualize_calibration_result(iterative=False):
     with MultiRealsense(
@@ -42,12 +58,30 @@ def visualize_calibration_result(iterative=False):
         intrinsics = np.stack(value['intrinsics'] for value in out.values())
         extrinsics = np.stack(value['extrinsics'] for value in out.values())
         origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+
+        cam_front_extri = get_extrinsic([0.8408891228960659, -0.2306640654217388, 0.32780918960803124],
+                                    [-0.7493846612312357, -0.41228123056776256, 0.28491736181125427, 0.4327457837707866])
+        cam_left_extri = get_extrinsic([0.27804807679768973, -0.23545503302949033, 0.13971720258705824],
+                                    [-0.6954162447452916, 0.16984997468823826, -0.2334766373619014, 0.6580546272528907])
+        cam_right_extri = get_extrinsic([0.3281305272599807, 0.5090284215384193, 0.12379313280393066],
+                                    [-0.14095227077856376, 0.7139867190308669, -0.6725150321346475, 0.13445800073940598])
+
+        extrinsics = np.stack([cam_front_extri, cam_left_extri, cam_right_extri])
+
+        # visualize ee_pose
+        ee_pose = ([0.45332, -0.0096058, 0.31102-0.14], [3.14, 0.00, 0.0])
+        ee_rot = st.Rotation.from_euler('xyz', ee_pose[1]).as_matrix()
+        ee = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        ee.rotate(ee_rot, center=(0, 0, 0))
+        ee.translate(ee_pose[0])
+        
         if iterative:
             for i in range(colors.shape[0]):
-                pcd = aggr_point_cloud_from_data(colors=colors[i:i+1], depths=depths[i:i+1], Ks=intrinsics[i:i+1], poses=extrinsics[i:i+1], downsample=False)
-                o3d.visualization.draw_geometries([pcd, origin])
-        pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=False)
-        o3d.visualization.draw_geometries([pcd, origin])
+                pcd = aggr_point_cloud_from_data(colors=colors[i:i+1], depths=depths[i:i+1], Ks=intrinsics[i:i+1], poses=extrinsics[i:i+1], downsample=False, boundaries=boundaries)
+                o3d.visualization.draw_geometries([pcd, origin, ee])
+
+        pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=False, boundaries=boundaries)
+        o3d.visualization.draw_geometries([pcd, origin, ee])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

@@ -166,6 +166,7 @@ def combine_image_arrays_to_video_2x3(
     """
     Combines six series of images into a single video arranged in a 2x3 grid layout.
     The first two series are depth images (uint16), while the rest are regular RGB/BGR images.
+    Uses imageio for video creation instead of OpenCV for better reliability.
     
     Parameters:
     -----------
@@ -189,6 +190,8 @@ def combine_image_arrays_to_video_2x3(
     bool
         True if video was successfully created, False otherwise
     """
+    import imageio
+    from matplotlib import cm
     # Check if all arrays have the same number of frames
     frame_counts = [
         series1.shape[0], series2.shape[0], series3.shape[0], 
@@ -221,9 +224,8 @@ def combine_image_arrays_to_video_2x3(
     video_width = grid_cell_width * 3
     video_height = grid_cell_height * 2
     
-    # Create video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(output_path, fourcc, fps, (video_width, video_height))
+    # Collect all frames first, then write video
+    all_frames = []
     
     # Process each frame
     for i in range(min_frames):
@@ -231,39 +233,40 @@ def combine_image_arrays_to_video_2x3(
         depth1 = series1[i].astype(np.float32)
         depth2 = series2[i].astype(np.float32)
         
-        # Normalize depth data to 0-255 range for visualization
-        depth1_normalized = np.clip((depth1 - depth_min) / (depth_max - depth_min) * 255, 0, 255).astype(np.uint8)
-        depth2_normalized = np.clip((depth2 - depth_min) / (depth_max - depth_min) * 255, 0, 255).astype(np.uint8)
+        # Normalize depth data to 0-1 range for visualization
+        depth1_normalized = np.clip((depth1 - depth_min) / (depth_max - depth_min), 0, 1)
+        depth2_normalized = np.clip((depth2 - depth_min) / (depth_max - depth_min), 0, 1)
         
-        # Apply colormap to depth images for better visualization (COLORMAP_JET is common for depth)
-        depth1_colored = cv2.applyColorMap(depth1_normalized, cv2.COLORMAP_JET)
-        depth2_colored = cv2.applyColorMap(depth2_normalized, cv2.COLORMAP_JET)
+        # Apply colormap to depth images using matplotlib (jet colormap)
+        depth1_colored = (cm.jet(depth1_normalized)[:, :, :3] * 255).astype(np.uint8)
+        depth2_colored = (cm.jet(depth2_normalized)[:, :, :3] * 255).astype(np.uint8)
         
         # Get the regular images
-        if series3.shape[3] == 3:  # If it has 3 channels (assume RGB)
-            img3 = series3[i][..., ::-1].copy()  # Convert RGB to BGR
-            img4 = series4[i][..., ::-1].copy()
-            img5 = series5[i][..., ::-1].copy()
-            img6 = series6[i][..., ::-1].copy()
+        if series3.shape[3] == 3:  # If it has 3 channels (assume RGB, keep as RGB)
+            img3 = series3[i].copy()
+            img4 = series4[i].copy()
+            img5 = series5[i].copy()
+            img6 = series6[i].copy()
         else:
             img3 = series3[i].copy()
             img4 = series4[i].copy()
             img5 = series5[i].copy()
             img6 = series6[i].copy()
         
-        # Convert all to uint8 for OpenCV
+        # Convert all to uint8 
         img3 = img3.astype(np.uint8)
         img4 = img4.astype(np.uint8)
         img5 = img5.astype(np.uint8)
         img6 = img6.astype(np.uint8)
         
-        # Resize all images to have the same dimensions
-        depth1_colored = cv2.resize(depth1_colored, (grid_cell_width, grid_cell_height))
-        depth2_colored = cv2.resize(depth2_colored, (grid_cell_width, grid_cell_height))
-        img3 = cv2.resize(img3, (grid_cell_width, grid_cell_height))
-        img4 = cv2.resize(img4, (grid_cell_width, grid_cell_height))
-        img5 = cv2.resize(img5, (grid_cell_width, grid_cell_height))
-        img6 = cv2.resize(img6, (grid_cell_width, grid_cell_height))
+        # Resize all images to have the same dimensions using PIL/skimage
+        from skimage.transform import resize
+        depth1_colored = (resize(depth1_colored, (grid_cell_height, grid_cell_width), anti_aliasing=True) * 255).astype(np.uint8)
+        depth2_colored = (resize(depth2_colored, (grid_cell_height, grid_cell_width), anti_aliasing=True) * 255).astype(np.uint8)
+        img3 = (resize(img3, (grid_cell_height, grid_cell_width), anti_aliasing=True) * 255).astype(np.uint8)
+        img4 = (resize(img4, (grid_cell_height, grid_cell_width), anti_aliasing=True) * 255).astype(np.uint8)
+        img5 = (resize(img5, (grid_cell_height, grid_cell_width), anti_aliasing=True) * 255).astype(np.uint8)
+        img6 = (resize(img6, (grid_cell_height, grid_cell_width), anti_aliasing=True) * 255).astype(np.uint8)
         
         # Create the top row and bottom row
         top_row = np.hstack((depth1_colored, img3, img5))
@@ -272,13 +275,17 @@ def combine_image_arrays_to_video_2x3(
         # Combine top and bottom rows
         combined = np.vstack((top_row, bottom_row))
         
-        # Write the combined frame to the video
-        video_writer.write(combined)
+        # Add frame to collection
+        all_frames.append(combined)
     
-    # Release the video writer
-    video_writer.release()
-    print(f"Video successfully created at {output_path}")
-    return True
+    # Write all frames to video using imageio
+    try:
+        imageio.mimsave(output_path, all_frames, fps=fps)
+        print(f"Video successfully created at {output_path}")
+        return True
+    except Exception as e:
+        print(f"Error creating video: {e}")
+        return False
 
 def get_extrinsic(pos, quat):
     extrinsic_matrix = np.eye(4)

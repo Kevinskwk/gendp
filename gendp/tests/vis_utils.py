@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.spatial.transform as st
+import cv2
 
 def t_quat_to_matrix(pose):
     t = pose[:3]
@@ -79,3 +80,84 @@ def get_finger_poses(left_base_pose, right_base_pose, gripper_state):
     right_finger_global = np.dot(right_base_tf, finger_local)
     
     return left_finger_global, right_finger_global
+
+def segment_pointcloud_by_color(pcd, pcd_colors, 
+                               pink_hue_range=(300, 30), 
+                               green_hue_range=(80, 140),
+                               pink_saturation_range=(30, 255),
+                               pink_value_range=(30, 255),
+                               green_saturation_range=(30, 255),
+                               green_value_range=(30, 255),
+                               object_boundaries=None,
+                               env_boundaries=None):
+    """
+    Segment point cloud by color using HSV color space with separate spatial boundaries.
+    
+    Args:
+        pcd: (N, 3) point cloud coordinates
+        pcd_colors: (N, 3) RGB colors in [0, 1] range
+        pink_hue_range: (min_hue, max_hue) for pink in degrees
+        green_hue_range: (min_hue, max_hue) for green in degrees
+        pink_saturation_range: (min_sat, max_sat) for pink (0-255)
+        pink_value_range: (min_val, max_val) for pink (0-255)
+        green_saturation_range: (min_sat, max_sat) for green (0-255)
+        green_value_range: (min_val, max_val) for green (0-255)
+        object_boundaries: dict with x_lower, x_upper, y_lower, y_upper, z_lower, z_upper for objects
+        env_boundaries: dict with x_lower, x_upper, y_lower, y_upper, z_lower, z_upper for environment
+    
+    Returns:
+        object_pointcloud: (M, 3) pink colored points within object boundaries
+        env_pointcloud: (K, 3) green colored points within env boundaries
+        object_colors: (M, 3) corresponding colors
+        env_colors: (K, 3) corresponding colors
+    """
+    # Convert RGB to HSV
+    rgb_uint8 = (pcd_colors * 255).astype(np.uint8)
+    # Reshape for cv2 processing
+    rgb_image = rgb_uint8.reshape(1, -1, 3)
+    hsv_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2HSV)
+    hsv_values = hsv_image.reshape(-1, 3)
+    
+    # Extract hue, saturation, value
+    hue = hsv_values[:, 0] * 2  # Convert to 0-360 range
+    saturation = hsv_values[:, 1]
+    value = hsv_values[:, 2]
+    
+    # Create masks for pink and green colors
+    # Pink mask - handle wrapping around 0/360 for pink/magenta colors
+    if pink_hue_range[0] > pink_hue_range[1]:  # Wraps around (e.g., 300-30)
+        pink_hue_mask = (hue >= pink_hue_range[0]) | (hue <= pink_hue_range[1])
+    else:
+        pink_hue_mask = (hue >= pink_hue_range[0]) & (hue <= pink_hue_range[1])
+    
+    pink_mask = pink_hue_mask & \
+                (saturation >= pink_saturation_range[0]) & (saturation <= pink_saturation_range[1]) & \
+                (value >= pink_value_range[0]) & (value <= pink_value_range[1])
+    
+    # Green mask
+    green_mask = (hue >= green_hue_range[0]) & (hue <= green_hue_range[1]) & \
+                 (saturation >= green_saturation_range[0]) & (saturation <= green_saturation_range[1]) & \
+                 (value >= green_value_range[0]) & (value <= green_value_range[1])
+    
+    # Apply spatial boundaries for objects (pink)
+    if object_boundaries is not None:
+        object_spatial_mask = (pcd[:, 0] >= object_boundaries['x_lower']) & (pcd[:, 0] <= object_boundaries['x_upper']) & \
+                              (pcd[:, 1] >= object_boundaries['y_lower']) & (pcd[:, 1] <= object_boundaries['y_upper']) & \
+                              (pcd[:, 2] >= object_boundaries['z_lower']) & (pcd[:, 2] <= object_boundaries['z_upper'])
+        pink_mask = pink_mask & object_spatial_mask
+    
+    # Apply spatial boundaries for environment (green)
+    if env_boundaries is not None:
+        env_spatial_mask = (pcd[:, 0] >= env_boundaries['x_lower']) & (pcd[:, 0] <= env_boundaries['x_upper']) & \
+                           (pcd[:, 1] >= env_boundaries['y_lower']) & (pcd[:, 1] <= env_boundaries['y_upper']) & \
+                           (pcd[:, 2] >= env_boundaries['z_lower']) & (pcd[:, 2] <= env_boundaries['z_upper'])
+        green_mask = green_mask & env_spatial_mask
+    
+    # Filter point clouds
+    object_pointcloud = pcd[pink_mask]
+    object_colors = pcd_colors[pink_mask]
+    
+    env_pointcloud = pcd[green_mask]
+    env_colors = pcd_colors[green_mask]
+    
+    return object_pointcloud, env_pointcloud, object_colors, env_colors 

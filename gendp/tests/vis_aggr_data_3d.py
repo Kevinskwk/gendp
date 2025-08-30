@@ -2,27 +2,74 @@
 # coding: utf-8
 import os
 import numpy as np
+import cv2
 from tqdm import tqdm
 from matplotlib import colormaps
+# add path for importing
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gendp.common.data_utils import load_dict_from_hdf5
 from gendp.common.kinematics_utils import KinHelper
 from d3fields.utils.draw_utils import aggr_point_cloud_from_data, np2o3d, o3dVisualizer, ImgEncoding, ExtriConvention
 import scipy.spatial.transform as st
 
-from vis_utils import get_finger_poses 
+from vis_utils import segment_pointcloud_by_color
+
 
 ### hyper param
-epi_range = [2]
+epi_range = [0]
 vis_robot = False
 vis_action = True
+apply_color_segmentation = True  # Set to True to apply color filtering
+vis_segmented_separately = True  # Set to True to show object and env separately
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
-data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
+# data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
+data_dir = f'{curr_dir}/../../data/sim2real'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
-cam_keys = ['camera_wrist', 'camera_fixed']
+# cam_keys = ['camera_wrist', 'camera_fixed']
+cam_keys = ['camera_wrist', 'camera_left', 'camera_right']
+# cam_keys = ['camera_left', 'camera_right']
 
-### create visualizer
+# Color segmentation parameters
+PINK_HUE_RANGE = (0, 100)   # Pink/Magenta range (wraps around)
+GREEN_HUE_RANGE = (120, 180)  # Green range
+
+# Separate saturation and value ranges for pink and green
+PINK_SATURATION_RANGE = (50, 255)   # Pink saturation range (min, max)
+PINK_VALUE_RANGE = (110, 255)        # Pink brightness range (min, max)
+GREEN_SATURATION_RANGE = (30, 255)  # Green saturation range (min, max)
+GREEN_VALUE_RANGE = (100, 255)       # Green brightness range (min, max)
+
+# Separate spatial boundaries for object and environment
+OBJECT_BOUNDARIES = {
+    'x_lower': 0.3,
+    'x_upper': 0.6,
+    'y_lower': -0.15,
+    'y_upper': 0.15,
+    'z_lower': 0.01,
+    'z_upper': 0.25,
+}
+
+ENV_BOUNDARIES = {
+    'x_lower': 0.2,
+    'x_upper': 0.7,
+    'y_lower': -0.2,
+    'y_upper': 0.2,
+    'z_lower': 0.01,
+    'z_upper': 0.06,
+}
+
+
+# Set initial camera view to Z-up
+view_ctrl_info = {
+    "front": [-1, 1, 0.5],      # X axis right
+    "lookat": [0.5, 0, 0.1],     # Look at origin
+    "up": [0, 0, 1],         # Z axis up
+    "zoom": 1.0              # Adjust as needed
+}
+# visualizer = o3dVisualizer(view_ctrl_info=view_ctrl_info)
 visualizer = o3dVisualizer()
 visualizer.start()
 
@@ -46,7 +93,8 @@ for i in tqdm(epi_range):
     
     visualizer.add_triangle_mesh('origin', 'base', size=0.2)
     visualizer.add_triangle_mesh('origin', 'wrist')
-    visualizer.add_triangle_mesh('origin', 'fixed')
+    visualizer.add_triangle_mesh('origin', 'left')
+    visualizer.add_triangle_mesh('origin', 'right')
     # visualizer.add_triangle_mesh('origin', 'left_finger', size=0.05)
     # visualizer.add_triangle_mesh('origin', 'right_finger', size=0.05)
     visualizer.update_triangle_mesh('base', tf=np.eye(4))
@@ -62,22 +110,30 @@ for i in tqdm(epi_range):
         intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsics'][t] for cam_key in cam_keys])
         extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t] for cam_key in cam_keys])
         # Manual offset for fixed camera extrinsics
-        # TODO: Change the fixed camera tf directly when collecting data
-        extrinsics[1, 1, 3] -= 0.02
-        extrinsics[1, 0, 3] += 0.01
-        # print(extrinsics)
+
+        print(intrinsics)
+        print(extrinsics)
+        depths[0] *= 0.1
         boundaries = {
             'x_lower': 0.2,
-            'x_upper': 0.8,
-            'y_lower': -0.4,
-            'y_upper': 0.4,
-            'z_lower': 0.03,
-            'z_upper': 0.7,
+            'x_upper': 0.7,
+            'y_lower': -0.2,
+            'y_upper': 0.2,
+            'z_lower': 0.01,
+            'z_upper': 0.5,
         }
-        pcd, pcd_colors = aggr_point_cloud_from_data(colors,
-                                                     depths,
-                                                     intrinsics,
-                                                     extrinsics,
+        # boundaries = {
+        #     'x_lower': -1,
+        #     'x_upper': 1,
+        #     'y_lower': -1,
+        #     'y_upper': 1,
+        #     'z_lower': -1,
+        #     'z_upper': 1,
+        # }
+        pcd, pcd_colors = aggr_point_cloud_from_data(colors[:],
+                                                     depths[:],
+                                                     intrinsics[:],
+                                                     extrinsics[:],
                                                      downsample=False,
                                                      out_o3d=False,
                                                      boundaries=boundaries,
@@ -86,10 +142,52 @@ for i in tqdm(epi_range):
                                                      )
         pcd = np.linalg.inv(robot_base_in_world) @ np.concatenate([pcd, np.ones((pcd.shape[0], 1))], axis=-1).T
         pcd = pcd.T[:, :3]
-        pcd = np2o3d(pcd, pcd_colors)
-        visualizer.update_pcd(pcd, 'pcd')
+        
+        # Apply color segmentation if enabled
+        if apply_color_segmentation:
+            object_pointcloud, env_pointcloud, object_colors, env_colors = segment_pointcloud_by_color(
+                pcd, pcd_colors,
+                pink_hue_range=PINK_HUE_RANGE,
+                green_hue_range=GREEN_HUE_RANGE,
+                pink_saturation_range=PINK_SATURATION_RANGE,
+                pink_value_range=PINK_VALUE_RANGE,
+                green_saturation_range=GREEN_SATURATION_RANGE,
+                green_value_range=GREEN_VALUE_RANGE,
+                object_boundaries=OBJECT_BOUNDARIES,
+                env_boundaries=ENV_BOUNDARIES
+            )
+            
+            if vis_segmented_separately:
+                # Show object and environment points separately
+                if len(object_pointcloud) > 0:
+                    object_pcd_o3d = np2o3d(object_pointcloud, object_colors)
+                    visualizer.update_pcd(object_pcd_o3d, 'object_pcd')
+                
+                if len(env_pointcloud) > 0:
+                    env_pcd_o3d = np2o3d(env_pointcloud, env_colors)
+                    visualizer.update_pcd(env_pcd_o3d, 'env_pcd')
+            else:
+                # Show all segmented points in one view
+                all_segmented_points = np.concatenate([object_pointcloud, env_pointcloud], axis=0) if len(object_pointcloud) > 0 and len(env_pointcloud) > 0 else \
+                                     object_pointcloud if len(object_pointcloud) > 0 else env_pointcloud
+                all_segmented_colors = np.concatenate([object_colors, env_colors], axis=0) if len(object_pointcloud) > 0 and len(env_pointcloud) > 0 else \
+                                     object_colors if len(object_pointcloud) > 0 else env_colors
+                if len(all_segmented_points) > 0:
+                    combined_pcd_o3d = np2o3d(all_segmented_points, all_segmented_colors)
+                    visualizer.update_pcd(combined_pcd_o3d, 'pcd')
+            
+            # Print statistics
+            total_points = len(pcd)
+            object_ratio = len(object_pointcloud) / total_points if total_points > 0 else 0
+            env_ratio = len(env_pointcloud) / total_points if total_points > 0 else 0
+            print(f"Frame {t}: Total: {total_points}, Object: {len(object_pointcloud)} ({object_ratio:.1%}), Environment: {len(env_pointcloud)} ({env_ratio:.1%})")
+        else:
+            # Original visualization without segmentation
+            pcd_o3d = np2o3d(pcd, pcd_colors)
+            visualizer.update_pcd(pcd_o3d, 'pcd')
         visualizer.update_triangle_mesh('wrist', tf=np.linalg.inv(extrinsics[0]))
-        visualizer.update_triangle_mesh('fixed', tf=np.linalg.inv(extrinsics[1]))
+        visualizer.update_triangle_mesh('left', tf=np.linalg.inv(extrinsics[1]))
+        visualizer.update_triangle_mesh('right', tf=np.linalg.inv(extrinsics[2]))
 
         # left_finger_pose, right_finger_pose = get_finger_poses(
         #     data_dict['observations']['left_finger_pos'][t],
