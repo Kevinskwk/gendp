@@ -165,9 +165,8 @@ def robot_control_loop(output_dir, robot_ip, init_joints, frequency, command_lat
     """Main robot control loop running in separate thread"""
     global robot_state
     
-    dt = 1/frequency
+    dt = 1/frequency    
     robot_state['output_dir'] = output_dir
-    
     try:
         with SharedMemoryManager() as shm_manager:
             with KeystrokeCounter() as key_counter, \
@@ -183,46 +182,29 @@ def robot_control_loop(output_dir, robot_ip, init_joints, frequency, command_lat
                 thread_per_video=3,
                 video_crf=21,
                 shm_manager=shm_manager) as env:
-                
                 print('Robot ready! Open http://localhost:8000 in your browser')
                 robot_state['running'] = True
-                
-                time.sleep(1.0)
+                socketio.sleep(1.0)
                 state = env.get_robot_state()
                 t_start = time.monotonic()
                 iter_idx = 0
-                
                 while not robot_state['stop']:
-                    # Calculate timing
                     t_cycle_end = t_start + (iter_idx + 1) * dt
                     t_sample = t_cycle_end - command_latency
                     t_command_target = t_cycle_end + dt
-
-                    # Get observations
                     obs = env.get_obs()
-                    
-                    # Process commands
                     process_commands(key_counter, env)
-                    
-                    # Update stage
                     robot_state['stage'] = key_counter[Key.space]
                     robot_state['episode_id'] = env.episode_id
-                    
-                    # Create visualization
                     rs_left = obs['camera_left_color'][-1,:,:,::-1].copy()
                     rs_wrist = obs['camera_wrist_color'][-1,:,:,::-1].copy()
-                    
-                    # Concatenate images
                     vis_img = np.concatenate([rs_left, rs_wrist], axis=1)
-                    vis_img = cv2.resize(vis_img, (960, 360))  # Larger for web display
-                    
-                    # Add status text
+                    vis_img = cv2.resize(vis_img, (960, 360))
                     episode_id = robot_state['episode_id']
                     stage = robot_state['stage']
                     text = f'Episode: {episode_id}, Stage: {stage}'
                     if robot_state['recording']:
                         text += ', Recording!'
-                    
                     cv2.putText(
                         vis_img,
                         text,
@@ -232,29 +214,23 @@ def robot_control_loop(output_dir, robot_ip, init_joints, frequency, command_lat
                         thickness=2,
                         color=(0, 255, 0) if robot_state['recording'] else (255, 255, 255)
                     )
-                    
-                    # Send image to web interface
                     image_data = encode_image_to_base64(vis_img)
                     socketio.emit('image_update', {
                         'image': image_data,
                         'status': robot_state
                     })
-                    
-                    # Execute robot actions
+                    socketio.sleep(0)
                     joint_pos = obs['full_joint_pos']
                     actions = joint_pos[-1, :8]
                     actions[-1] = robot_state['gripper_pos']
                     env.exec_actions(
                         actions=[actions],
                         timestamps=[t_command_target-time.monotonic()+time.time()])
-                    
                     precise_wait(t_cycle_end)
                     iter_idx += 1
-                    
-                    # Throttle web updates (every 3rd frame)
                     if iter_idx % 3 == 0:
                         socketio.emit('status_update', robot_state)
-                        
+                        socketio.sleep(0)
     except Exception as e:
         print(f"Error in robot control loop: {e}")
         robot_state['stop'] = True
@@ -272,25 +248,17 @@ def robot_control_loop(output_dir, robot_ip, init_joints, frequency, command_lat
 @click.option('--port', '-p', default=8000, type=int, help="Web server port.")
 def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_latency, port):
     os.system(f'mkdir -p {output_dir}')
-    
-    # Start robot control in separate thread
-    robot_thread = threading.Thread(
-        target=robot_control_loop,
-        args=(output_dir, robot_ip, init_joints, frequency, command_latency),
-        daemon=True
-    )
-    robot_thread.start()
-    
-    # Start web server
+    # Start robot control as a Flask-SocketIO background task
+    def start_robot_task():
+        socketio.start_background_task(robot_control_loop, output_dir, robot_ip, init_joints, frequency, command_latency)
+    start_robot_task()
     print(f"Starting web server on http://localhost:{port}")
     print("Press Ctrl+C to exit")
-    
     try:
         socketio.run(app, host='0.0.0.0', port=port, debug=False)
     except KeyboardInterrupt:
         print("\nShutting down...")
         robot_state['stop'] = True
-        robot_thread.join(timeout=2)
 
 if __name__ == '__main__':
     main()

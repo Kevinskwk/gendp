@@ -82,12 +82,12 @@ def get_finger_poses(left_base_pose, right_base_pose, gripper_state):
     return left_finger_global, right_finger_global
 
 def segment_pointcloud_by_color(pcd, pcd_colors, 
-                               pink_hue_range=(300, 30), 
-                               green_hue_range=(80, 140),
-                               pink_saturation_range=(30, 255),
-                               pink_value_range=(30, 255),
-                               green_saturation_range=(30, 255),
-                               green_value_range=(30, 255),
+                               obj_hue_range=(300, 30), 
+                               obj_saturation_range=(30, 255),
+                               obj_value_range=(30, 255),
+                               env_hue_range=(80, 140),
+                               env_saturation_range=(30, 255),
+                               env_value_range=(30, 255),
                                object_boundaries=None,
                                env_boundaries=None):
     """
@@ -96,12 +96,12 @@ def segment_pointcloud_by_color(pcd, pcd_colors,
     Args:
         pcd: (N, 3) point cloud coordinates
         pcd_colors: (N, 3) RGB colors in [0, 1] range
-        pink_hue_range: (min_hue, max_hue) for pink in degrees
-        green_hue_range: (min_hue, max_hue) for green in degrees
-        pink_saturation_range: (min_sat, max_sat) for pink (0-255)
-        pink_value_range: (min_val, max_val) for pink (0-255)
-        green_saturation_range: (min_sat, max_sat) for green (0-255)
-        green_value_range: (min_val, max_val) for green (0-255)
+        obj_hue_range: (min_hue, max_hue) for pink in degrees
+        obj_saturation_range: (min_sat, max_sat) for pink (0-255)
+        obj_value_range: (min_val, max_val) for pink (0-255)
+        env_hue_range: (min_hue, max_hue) for green in degrees
+        env_saturation_range: (min_sat, max_sat) for green (0-255)
+        env_value_range: (min_val, max_val) for green (0-255)
         object_boundaries: dict with x_lower, x_upper, y_lower, y_upper, z_lower, z_upper for objects
         env_boundaries: dict with x_lower, x_upper, y_lower, y_upper, z_lower, z_upper for environment
     
@@ -125,19 +125,19 @@ def segment_pointcloud_by_color(pcd, pcd_colors,
     
     # Create masks for pink and green colors
     # Pink mask - handle wrapping around 0/360 for pink/magenta colors
-    if pink_hue_range[0] > pink_hue_range[1]:  # Wraps around (e.g., 300-30)
-        pink_hue_mask = (hue >= pink_hue_range[0]) | (hue <= pink_hue_range[1])
+    if obj_hue_range[0] > obj_hue_range[1]:  # Wraps around (e.g., 300-30)
+        pink_hue_mask = (hue >= obj_hue_range[0]) | (hue <= obj_hue_range[1])
     else:
-        pink_hue_mask = (hue >= pink_hue_range[0]) & (hue <= pink_hue_range[1])
+        pink_hue_mask = (hue >= obj_hue_range[0]) & (hue <= obj_hue_range[1])
     
     pink_mask = pink_hue_mask & \
-                (saturation >= pink_saturation_range[0]) & (saturation <= pink_saturation_range[1]) & \
-                (value >= pink_value_range[0]) & (value <= pink_value_range[1])
+                (saturation >= obj_saturation_range[0]) & (saturation <= obj_saturation_range[1]) & \
+                (value >= obj_value_range[0]) & (value <= obj_value_range[1])
     
     # Green mask
-    green_mask = (hue >= green_hue_range[0]) & (hue <= green_hue_range[1]) & \
-                 (saturation >= green_saturation_range[0]) & (saturation <= green_saturation_range[1]) & \
-                 (value >= green_value_range[0]) & (value <= green_value_range[1])
+    green_mask = (hue >= env_hue_range[0]) & (hue <= env_hue_range[1]) & \
+                 (saturation >= env_saturation_range[0]) & (saturation <= env_saturation_range[1]) & \
+                 (value >= env_value_range[0]) & (value <= env_value_range[1])
     
     # Apply spatial boundaries for objects (pink)
     if object_boundaries is not None:

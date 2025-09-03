@@ -29,10 +29,12 @@ from gendp.common.data_utils import save_dict_to_hdf5
 DEFAULT_OBS_KEY_MAP = {
     # robot
     'ActualTCPPoseWGripper': 'ee_pos',
+    # 'ActualTCPVel': 'ee_vel',
     'ActualQWGripper': 'joint_pos',
     'FullActualQWGripper': 'full_joint_pos',
     'ActualQdWGripper': 'joint_vel',
     'WristCamExtrinsics': 'wrist_cam_extrinsics',
+    'MarkerFlow': 'marker_flow',
     # 'ForceTorque': 'force_torque',
     #gripper
     # 'gripper_position': 'gripper_position',
@@ -43,8 +45,9 @@ DEFAULT_OBS_KEY_MAP = {
 
 CAMERA_NAMES = {
     0: 'wrist',
-    1: 'left',
-    2: 'right'
+    1: 'front',
+    2: 'left',
+    3: 'right'
 }
 
 class RealEnvFranka:
@@ -325,13 +328,20 @@ class RealEnvFranka:
             else:
                 robot_obs[k] = v[this_idxs]
         # fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
-        cam_1_extri = get_extrinsic([0.33140649116301046, 0.5088971764480946, 0.11701259737976832],
-                                    [-0.14112166822506242, 0.7072779422922251, -0.6794010610611806, 0.1351176721720494])
-        cam_2_extri = get_extrinsic([0.6093451170018969, -0.21758103645789892, 0.14001694566120815],
-                                    [0.06233815389071674, -0.6854456458464545, -0.717860365560187, 0.10466478260345545])
+        # cam_right_extri = get_extrinsic([0.33140649116301046, 0.5088971764480946, 0.11701259737976832],
+        #                             [-0.14112166822506242, 0.7072779422922251, -0.6794010610611806, 0.1351176721720494])
+        # cam_left_extri = get_extrinsic([0.6093451170018969, -0.21758103645789892, 0.14001694566120815],
+        #                             [0.06233815389071674, -0.6854456458464545, -0.717860365560187, 0.10466478260345545])
+        cam_front_extri = get_extrinsic([0.8408891228960659, -0.2306640654217388, 0.32780918960803124],
+                                        [-0.7493846612312357, -0.41228123056776256, 0.28491736181125427, 0.4327457837707866])
+        cam_left_extri = get_extrinsic([0.27804807679768973, -0.23545503302949033, 0.13971720258705824],
+                                        [-0.6954162447452916, 0.16984997468823826, -0.2334766373619014, 0.6580546272528907])
+        cam_right_extri = get_extrinsic([0.3281305272599807, 0.5090284215384193, 0.12379313280393066],
+                                        [-0.14095227077856376, 0.7139867190308669, -0.6725150321346475, 0.13445800073940598])
         # camera_obs[f'camera_fixed_extrinsics'] = np.tile(fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        camera_obs[f'camera_1_extrinsics'] = np.tile(cam_1_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        camera_obs[f'camera_2_extrinsics'] = np.tile(cam_2_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        camera_obs[f'camera_right_extrinsics'] = np.tile(cam_right_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        camera_obs[f'camera_left_extrinsics'] = np.tile(cam_left_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        camera_obs[f'camera_front_extrinsics'] = np.tile(cam_front_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
 
         # return obs
         obs_data = dict(camera_obs)
@@ -487,6 +497,7 @@ class RealEnvFranka:
                         #  'finger_pos': {},
                         #  'force_torque': [],
                          'images': {},
+                         'tactile': {},
                         },
                     # 'joint_action': [],
                     # 'cartesian_action': [],
@@ -543,6 +554,8 @@ class RealEnvFranka:
                         episode['observations']['images'][key] = value[:n_steps]
                     # elif 'finger' in key:
                     #     episode['observations']['finger_pos'][key] = value[:n_steps]
+                    elif 'marker_flow' in key:
+                        episode['observations']['tactile'][key] = value[:n_steps]
                     else:
                         episode['observations'][key] = value[:n_steps]
 
@@ -617,6 +630,7 @@ def test_env_demo_replay():
         print(demo_dict['observations']['images']['wrist_extrinsic'][0])
         obs_dict = env.get_obs()
         # print(obs_dict['camera_fixed_extrinsics'])
+        print(obs_dict['camera_front_extrinsics'])
         print(obs_dict['camera_left_extrinsics'])
         print(obs_dict['camera_right_extrinsics'])
         print(obs_dict['camera_wrist_extrinsics'])

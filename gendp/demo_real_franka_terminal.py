@@ -106,7 +106,7 @@ def process_commands(key_counter, env, output_dir):
                 robot_state['recording'] = False
                 print('🗑️  Episode deleted!')
             elif command == 'g':
-                robot_state['gripper_pos'] = 0.01
+                robot_state['gripper_pos'] = 0.0
                 print('✊ Closing gripper...')
             elif command == 'o':
                 robot_state['gripper_pos'] = 0.08
@@ -152,7 +152,7 @@ def process_commands(key_counter, env, output_dir):
             robot_state['recording'] = False
             print('🗑️  Episode deleted!')
         elif key_stroke == KeyCode(char='g'):
-            robot_state['gripper_pos'] = 0.01
+            robot_state['gripper_pos'] = 0.0
             print('✊ Closing gripper...')
         elif key_stroke == KeyCode(char='o'):
             robot_state['gripper_pos'] = 0.08
@@ -163,11 +163,11 @@ def save_visualization_images(vis_img, output_dir, iter_idx, save_interval=30):
     if iter_idx % save_interval == 0:
         viz_dir = os.path.join(output_dir, 'visualization')
         os.makedirs(viz_dir, exist_ok=True)
-        filename = os.path.join(viz_dir, f'frame_{iter_idx:06d}.jpg')
+        # filename = os.path.join(viz_dir, f'frame_{iter_idx:06d}.jpg')
         latest_file_name = os.path.join(viz_dir, 'latest.jpg')
-        cv2.imwrite(filename, vis_img)
+        # cv2.imwrite(filename, vis_img)
         cv2.imwrite(latest_file_name, vis_img)
-        print(f"💾 Saved visualization: {filename}")
+        # print(f"💾 Saved visualization: {filename}")
 
 @click.command()
 @click.option('--output_dir', '-o', required=True, help='Directory to save recording')
@@ -195,7 +195,7 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                 n_obs_steps=2,
                 obs_float32=False,
                 init_joints=init_joints,
-                enable_multi_cam_vis=False,
+                enable_multi_cam_vis=True,
                 record_raw_video=True,
                 thread_per_video=3,
                 video_crf=21,
@@ -227,11 +227,11 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                     robot_state['episode_id'] = env.episode_id
                     
                     # Create visualization (but don't display)
-                    rs_left = obs['camera_left_color'][-1,:,:,::-1].copy()
+                    rs_front = obs['camera_front_color'][-1,:,:,::-1].copy()
                     rs_wrist = obs['camera_wrist_color'][-1,:,:,::-1].copy()
                     
                     # Concatenate images
-                    vis_img = np.concatenate([rs_left, rs_wrist], axis=1)
+                    vis_img = np.concatenate([rs_front, rs_wrist], axis=1)
                     vis_img = cv2.resize(vis_img, (960, 360))
                     
                     # Add status text

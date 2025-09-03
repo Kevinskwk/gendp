@@ -17,7 +17,7 @@ from vis_utils import segment_pointcloud_by_color
 
 
 ### hyper param
-epi_range = [0]
+epi_range = [4]
 vis_robot = False
 vis_action = True
 apply_color_segmentation = True  # Set to True to apply color filtering
@@ -25,22 +25,29 @@ vis_segmented_separately = True  # Set to True to show object and env separately
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
 # data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
-data_dir = f'{curr_dir}/../../data/sim2real'
+data_dir = f'{curr_dir}/../../data/sim2real_4cam'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 # cam_keys = ['camera_wrist', 'camera_fixed']
-cam_keys = ['camera_wrist', 'camera_left', 'camera_right']
+cam_keys = ['camera_front', 'camera_left', 'camera_right']
 # cam_keys = ['camera_left', 'camera_right']
 
 # Color segmentation parameters
 PINK_HUE_RANGE = (0, 100)   # Pink/Magenta range (wraps around)
-GREEN_HUE_RANGE = (120, 180)  # Green range
-
-# Separate saturation and value ranges for pink and green
 PINK_SATURATION_RANGE = (50, 255)   # Pink saturation range (min, max)
 PINK_VALUE_RANGE = (110, 255)        # Pink brightness range (min, max)
+
+PURPLE_HUE_RANGE = (215, 230)  # Purple range
+PURPLE_SATURATION_RANGE = (100, 255)  # Purple saturation range (min, max)
+PURPLE_VALUE_RANGE = (120, 255)       # Purple brightness range (min, max)
+
+GREEN_HUE_RANGE = (120, 180)  # Green range
 GREEN_SATURATION_RANGE = (30, 255)  # Green saturation range (min, max)
 GREEN_VALUE_RANGE = (100, 255)       # Green brightness range (min, max)
+
+YELLOW_HUE_RANGE = (0, 100)  # Yellow range
+YELLOW_SATURATION_RANGE = (0, 255)  # Yellow saturation range (min, max)
+YELLOW_VALUE_RANGE = (0, 255)       # Yellow brightness range (min, max)
 
 # Separate spatial boundaries for object and environment
 OBJECT_BOUNDARIES = {
@@ -92,7 +99,7 @@ for i in tqdm(epi_range):
             visualizer.add_triangle_mesh('sphere', f'action_{a_i}', action_colors[a_i], radius=0.01)
     
     visualizer.add_triangle_mesh('origin', 'base', size=0.2)
-    visualizer.add_triangle_mesh('origin', 'wrist')
+    visualizer.add_triangle_mesh('origin', 'front')
     visualizer.add_triangle_mesh('origin', 'left')
     visualizer.add_triangle_mesh('origin', 'right')
     # visualizer.add_triangle_mesh('origin', 'left_finger', size=0.05)
@@ -147,12 +154,12 @@ for i in tqdm(epi_range):
         if apply_color_segmentation:
             object_pointcloud, env_pointcloud, object_colors, env_colors = segment_pointcloud_by_color(
                 pcd, pcd_colors,
-                pink_hue_range=PINK_HUE_RANGE,
-                green_hue_range=GREEN_HUE_RANGE,
-                pink_saturation_range=PINK_SATURATION_RANGE,
-                pink_value_range=PINK_VALUE_RANGE,
-                green_saturation_range=GREEN_SATURATION_RANGE,
-                green_value_range=GREEN_VALUE_RANGE,
+                obj_hue_range=PURPLE_HUE_RANGE,
+                obj_saturation_range=PURPLE_SATURATION_RANGE,
+                obj_value_range=PURPLE_VALUE_RANGE,
+                env_hue_range=YELLOW_HUE_RANGE,
+                env_saturation_range=YELLOW_SATURATION_RANGE,
+                env_value_range=YELLOW_VALUE_RANGE,
                 object_boundaries=OBJECT_BOUNDARIES,
                 env_boundaries=ENV_BOUNDARIES
             )
@@ -185,7 +192,7 @@ for i in tqdm(epi_range):
             # Original visualization without segmentation
             pcd_o3d = np2o3d(pcd, pcd_colors)
             visualizer.update_pcd(pcd_o3d, 'pcd')
-        visualizer.update_triangle_mesh('wrist', tf=np.linalg.inv(extrinsics[0]))
+        visualizer.update_triangle_mesh('front', tf=np.linalg.inv(extrinsics[0]))
         visualizer.update_triangle_mesh('left', tf=np.linalg.inv(extrinsics[1]))
         visualizer.update_triangle_mesh('right', tf=np.linalg.inv(extrinsics[2]))
 
