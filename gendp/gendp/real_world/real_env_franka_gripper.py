@@ -28,13 +28,14 @@ from gendp.common.data_utils import save_dict_to_hdf5
 
 DEFAULT_OBS_KEY_MAP = {
     # robot
-    'ActualTCPPoseWGripper': 'ee_pos',
+    'ActualTCPPoseWGripper': 'ee_pose',
     # 'ActualTCPVel': 'ee_vel',
     'ActualQWGripper': 'joint_pos',
     'FullActualQWGripper': 'full_joint_pos',
     'ActualQdWGripper': 'joint_vel',
-    'WristCamExtrinsics': 'wrist_cam_extrinsics',
-    'MarkerFlow': 'marker_flow',
+    # 'WristCamExtrinsics': 'wrist_cam_extrinsics',
+    # 'MarkerFlow': 'marker_flow',
+    # 'TactileImages': 'tactile_images',
     # 'ForceTorque': 'force_torque',
     #gripper
     # 'gripper_position': 'gripper_position',
@@ -44,10 +45,10 @@ DEFAULT_OBS_KEY_MAP = {
 }
 
 CAMERA_NAMES = {
-    0: 'wrist',
-    1: 'front',
-    2: 'left',
-    3: 'right'
+    # 0: 'wrist',
+    0: 'front',
+    1: 'left',
+    2: 'right'
 }
 
 class RealEnvFranka:
@@ -201,6 +202,13 @@ class RealEnvFranka:
 
         self.realsense = realsense
         self.robot = robot
+        self.cam_front_extri = get_extrinsic([0.8408891228960659, -0.2306640654217388, 0.32780918960803124],
+                                        [-0.7493846612312357, -0.41228123056776256, 0.28491736181125427, 0.4327457837707866])
+        self.cam_left_extri = get_extrinsic([0.27804807679768973, -0.23545503302949033, 0.13971720258705824],
+                                        [-0.6954162447452916, 0.16984997468823826, -0.2334766373619014, 0.6580546272528907])
+        self.cam_right_extri = get_extrinsic([0.3281305272599807, 0.5090284215384193, 0.12379313280393066],
+                                        [-0.14095227077856376, 0.7139867190308669, -0.6725150321346475, 0.13445800073940598])
+
         # self.gripper = gripper
         self.multi_cam_vis = multi_cam_vis
         self.video_capture_fps = video_capture_fps
@@ -323,25 +331,22 @@ class RealEnvFranka:
 
         robot_obs = dict()
         for k, v in robot_obs_raw.items():
-            if k == 'wrist_cam_extrinsics':
-                camera_obs[f'camera_wrist_extrinsics'] = v[this_idxs]
-            else:
-                robot_obs[k] = v[this_idxs]
+            # if k == 'wrist_cam_extrinsics':
+            #     camera_obs[f'camera_wrist_extrinsics'] = v[this_idxs]
+            # else:
+            robot_obs[k] = v[this_idxs]
         # fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
         # cam_right_extri = get_extrinsic([0.33140649116301046, 0.5088971764480946, 0.11701259737976832],
         #                             [-0.14112166822506242, 0.7072779422922251, -0.6794010610611806, 0.1351176721720494])
         # cam_left_extri = get_extrinsic([0.6093451170018969, -0.21758103645789892, 0.14001694566120815],
         #                             [0.06233815389071674, -0.6854456458464545, -0.717860365560187, 0.10466478260345545])
-        cam_front_extri = get_extrinsic([0.8408891228960659, -0.2306640654217388, 0.32780918960803124],
-                                        [-0.7493846612312357, -0.41228123056776256, 0.28491736181125427, 0.4327457837707866])
-        cam_left_extri = get_extrinsic([0.27804807679768973, -0.23545503302949033, 0.13971720258705824],
-                                        [-0.6954162447452916, 0.16984997468823826, -0.2334766373619014, 0.6580546272528907])
-        cam_right_extri = get_extrinsic([0.3281305272599807, 0.5090284215384193, 0.12379313280393066],
-                                        [-0.14095227077856376, 0.7139867190308669, -0.6725150321346475, 0.13445800073940598])
         # camera_obs[f'camera_fixed_extrinsics'] = np.tile(fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        camera_obs[f'camera_right_extrinsics'] = np.tile(cam_right_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        camera_obs[f'camera_left_extrinsics'] = np.tile(cam_left_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        camera_obs[f'camera_front_extrinsics'] = np.tile(cam_front_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        # camera_obs[f'camera_right_extrinsics'] = np.tile(cam_right_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        # camera_obs[f'camera_left_extrinsics'] = np.tile(cam_left_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        # camera_obs[f'camera_front_extrinsics'] = np.tile(cam_front_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        camera_obs[f'camera_right_extrinsics'] = np.tile(self.cam_right_extri, (camera_obs[f'camera_right_color'].shape[0], 1, 1))
+        camera_obs[f'camera_left_extrinsics'] = np.tile(self.cam_left_extri, (camera_obs[f'camera_left_color'].shape[0], 1, 1))
+        camera_obs[f'camera_front_extrinsics'] = np.tile(self.cam_front_extri, (camera_obs[f'camera_front_color'].shape[0], 1, 1))
 
         # return obs
         obs_data = dict(camera_obs)
@@ -492,7 +497,7 @@ class RealEnvFranka:
                          'full_joint_pos': [], # this is to compute FK
                          'robot_base_pose_in_world': np.asarray([np.eye(4)] * n_steps),
                         #  'joint_vel': [],
-                         'ee_pos': [],
+                         'ee_pose': [],
                         #  'ee_vel': [],
                         #  'finger_pos': {},
                         #  'force_torque': [],
@@ -531,17 +536,24 @@ class RealEnvFranka:
                     color_save_kwargs = {
                         'chunks': (1, cam_height, cam_width, 3), # (1, 480, 640, 3)
                         'compression': 'gzip',
-                        'compression_opts': 9,
+                        'compression_opts': 3,
+                        'dtype': 'uint8',
+                    }
+                    tactile_img_save_kwargs = {
+                        'chunks': (1, 240, 320, 3),
+                        'compression': 'gzip',
+                        'compression_opts': 3,
                         'dtype': 'uint8',
                     }
                     depth_save_kwargs = {
                         'chunks': (1, cam_height, cam_width), # (1, 480, 640)
                         'compression': 'gzip',
-                        'compression_opts': 9,
+                        'compression_opts': 3,
                         'dtype': 'uint16',
                     }
                     config_dict['observations']['images'][f'camera_{cam_name}_color'] = color_save_kwargs
                     config_dict['observations']['images'][f'camera_{cam_name}_depth'] = depth_save_kwargs
+                    config_dict['observations']['tactile']['tactile_images'] = tactile_img_save_kwargs
 
                 episode['timestamp'] = obs_timestamps[:n_steps]
                 if self.ctrl_mode == 'joint':
@@ -556,6 +568,8 @@ class RealEnvFranka:
                     #     episode['observations']['finger_pos'][key] = value[:n_steps]
                     elif 'marker_flow' in key:
                         episode['observations']['tactile'][key] = value[:n_steps]
+                    elif 'tactile_images' in key:
+                        episode['observations']['tactile'][key] = value[:n_steps]
                     else:
                         episode['observations'][key] = value[:n_steps]
 
@@ -565,15 +579,29 @@ class RealEnvFranka:
                 else:
                     self.curr_outdir = pathlib.Path(curr_outdir)
                     episode_path = self.curr_outdir.joinpath(f'episode_{self.episode_id}.hdf5')
-                save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
+                
+                import threading
+                save_thread = threading.Thread(
+                    target=self._save_episode_data,
+                    args=(episode, config_dict, episode_path, attr_dict)
+                )
+                save_thread.start()
+                
+                print(f'Episode {self.episode_id} saving in background...')
 
-                print(f'Episode {self.episode_id} saved!')
+                # save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
+                # print(f'Episode {self.episode_id} saved!')
+
                 if incr_epi:
                     self.episode_id += 1
 
             self.obs_accumulator = None
             self.action_accumulator = None
             self.stage_accumulator = None
+
+    def _save_episode_data(self, episode, config_dict, episode_path, attr_dict):
+        save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
+        print(f'Episode saved to {episode_path}!')
 
     def drop_episode(self):
         self.end_episode()
@@ -626,14 +654,14 @@ def test_env_demo_replay():
         timestamps = time.time() + np.arange(len(actions)) / 10 + 1.0
         ik_init = [demo_dict['observations']['full_joint_pos'][0]] * len(actions)
         # print(demo_dict['observations']['full_joint_pos'][()])
-        print(demo_dict['observations']['images']['fixed_extrinsic'][0])
-        print(demo_dict['observations']['images']['wrist_extrinsic'][0])
+        # print(demo_dict['observations']['images']['fixed_extrinsic'][0])
+        # print(demo_dict['observations']['images']['wrist_extrinsic'][0])
         obs_dict = env.get_obs()
         # print(obs_dict['camera_fixed_extrinsics'])
         print(obs_dict['camera_front_extrinsics'])
         print(obs_dict['camera_left_extrinsics'])
         print(obs_dict['camera_right_extrinsics'])
-        print(obs_dict['camera_wrist_extrinsics'])
+        # print(obs_dict['camera_wrist_extrinsics'])
         start_step = 0
         while True:
             curr_time = time.monotonic()

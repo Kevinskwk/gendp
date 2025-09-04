@@ -30,12 +30,13 @@ from gendp.common.kinematics_utils import KinHelper
 
 DEFAULT_OBS_KEY_MAP = {
     # robot
-    'ActualTCPPoseWGripper': 'ee_pos',
+    'ActualTCPPoseWGripper': 'ee_pose',
+    # 'ActualTCPVel': 'ee_vel',
     'ActualQWGripper': 'joint_pos',
     'FullActualQWGripper': 'full_joint_pos',
     'ActualQdWGripper': 'joint_vel',
-    'WristCamExtrinsics': 'wrist_cam_extrinsics',
-    'ForceTorque': 'force_torque',
+    # 'WristCamExtrinsics': 'wrist_cam_extrinsics',
+    # 'ForceTorque': 'force_torque',
     #gripper
     # 'gripper_position': 'gripper_position',
     # timestamps
@@ -44,16 +45,18 @@ DEFAULT_OBS_KEY_MAP = {
 }
 
 CAMERA_NAMES = {
-    0: 'wrist',
-    1: 'fixed'
+    # 0: 'wrist',
+    0: 'front',
+    1: 'left',
+    2: 'right'
 }
 
 GELSIGHT_NAMES = {
-    0: 'left',
-    1: 'right'
+    1: 'left',
+    0: 'right'
 }
 
-GELSIGHT_IDS = [12, 14]
+GELSIGHT_IDS = [20, 22]
 
 class RealEnvFranka:
     def __init__(self,
@@ -82,7 +85,7 @@ class RealEnvFranka:
             # video capture params
             video_capture_fps=30,
             video_capture_resolution=(640, 480),
-            gelsight_capture_resolution=(1280, 960),
+            gelsight_capture_resolution=(320, 240),
             gelsight_ids=GELSIGHT_IDS,
             # saving params
             record_raw_video=True,
@@ -126,7 +129,7 @@ class RealEnvFranka:
 
         gs_color_tf = get_image_transform(
             input_res=gelsight_capture_resolution,
-            output_res=obs_image_resolution,
+            output_res=gelsight_capture_resolution,
             # obs output rgb
             bgr_to_rgb=True)
         gs_color_transform = gs_color_tf
@@ -240,8 +243,14 @@ class RealEnvFranka:
         #         self.left_gs_idx = link_idx
         #     if link.name == 'right_gelsight':
         #         self.right_gs_idx = link_idx
-        self.fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
-        
+        # self.fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
+        self.cam_front_extri = get_extrinsic([0.8408891228960659, -0.2306640654217388, 0.32780918960803124],
+                                        [-0.7493846612312357, -0.41228123056776256, 0.28491736181125427, 0.4327457837707866])
+        self.cam_left_extri = get_extrinsic([0.27804807679768973, -0.23545503302949033, 0.13971720258705824],
+                                        [-0.6954162447452916, 0.16984997468823826, -0.2334766373619014, 0.6580546272528907])
+        self.cam_right_extri = get_extrinsic([0.3281305272599807, 0.5090284215384193, 0.12379313280393066],
+                                        [-0.14095227077856376, 0.7139867190308669, -0.6725150321346475, 0.13445800073940598])
+
         # self.gripper = gripper
         self.multi_cam_vis = multi_cam_vis
         self.video_capture_fps = video_capture_fps
@@ -366,7 +375,7 @@ class RealEnvFranka:
                 this_idxs.append(this_idx)
             # remap key
             gs_name = GELSIGHT_NAMES[camera_idx]
-            tactile_obs[f'tactile_{gs_name}'] = value['color'][this_idxs]
+            tactile_obs[f'tactile_img_{gs_name}'] = value['color'][this_idxs]
 
         # align robot obs
         robot_timestamps = last_robot_data['robot_receive_timestamp']
@@ -387,13 +396,16 @@ class RealEnvFranka:
 
         robot_obs = dict()
         for k, v in robot_obs_raw.items():
-            if k == 'wrist_cam_extrinsics':
-                camera_obs[f'camera_wrist_extrinsics'] = v[this_idxs]
-            else:
-                robot_obs[k] = v[this_idxs]
+            # if k == 'wrist_cam_extrinsics':
+            #     camera_obs[f'camera_wrist_extrinsics'] = v[this_idxs]
+            # else:
+            robot_obs[k] = v[this_idxs]
 
 
-        camera_obs['camera_fixed_extrinsics'] = np.tile(self.fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        # camera_obs['camera_fixed_extrinsics'] = np.tile(self.fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        camera_obs['camera_right_extrinsics'] = np.tile(self.cam_right_extri, (camera_obs['camera_right_color'].shape[0], 1, 1))
+        camera_obs['camera_left_extrinsics'] = np.tile(self.cam_left_extri, (camera_obs['camera_left_color'].shape[0], 1, 1))
+        camera_obs['camera_front_extrinsics'] = np.tile(self.cam_front_extri, (camera_obs['camera_front_color'].shape[0], 1, 1))
 
         # qpos = robot_obs['joint_pos'][0, :-1].copy()
         # qpos[-1] *= 5  # 0.14 to 0.7
@@ -488,17 +500,20 @@ class RealEnvFranka:
         this_video_dir.mkdir(parents=True, exist_ok=True)
         n_cameras = self.realsense.n_cameras
         video_paths = list()
+        # gs_video_paths = list()
         for i in range(n_cameras):
             video_paths.append(
                 str(this_video_dir.joinpath(f'{i}.mp4').absolute()))
-
+        # for i in range(self.gelsight.n_cameras):
+        #     gs_video_paths.append(
+        #         str(this_video_dir.joinpath(f'gelsight_{i}.mp4').absolute()))
         # start recording on realsense
         self.realsense.restart_put(start_time=start_time)
         self.realsense.start_recording(video_path=video_paths, start_time=start_time)
 
         # start recording on gelsight
         self.gelsight.restart_put(start_time=start_time)
-        # self.gelsight.start_recording(video_path=video_paths, start_time=start_time)
+        # self.gelsight.start_recording(video_path=gs_video_paths, start_time=start_time)
 
         # create accumulators
         self.obs_accumulator = TimestampObsAccumulator(
@@ -557,12 +572,12 @@ class RealEnvFranka:
                          'full_joint_pos': [], # this is to compute FK
                          'robot_base_pose_in_world': np.asarray([np.eye(4)] * n_steps),
                         #  'joint_vel': [],
-                         'ee_pos': [],
+                         'ee_pose': [],
                         #  'ee_vel': [],
                         #  'finger_pos': {},
                         #  'left_finger_pos': [], # xyz quat (7)
                         #  'right_finger_pos': [],
-                         'force_torque': [],
+                        #  'force_torque': [],
                          'images': {},
                          'tactile': {},
                         },
@@ -599,13 +614,13 @@ class RealEnvFranka:
                     color_save_kwargs = {
                         'chunks': (1, cam_height, cam_width, 3), # (1, 480, 640, 3)
                         'compression': 'gzip',
-                        'compression_opts': 9,
+                        'compression_opts': 5,
                         'dtype': 'uint8',
                     }
                     depth_save_kwargs = {
                         'chunks': (1, cam_height, cam_width), # (1, 480, 640)
                         'compression': 'gzip',
-                        'compression_opts': 9,
+                        'compression_opts': 5,
                         'dtype': 'uint16',
                     }
                     config_dict['observations']['images'][f'camera_{cam_name}_color'] = color_save_kwargs
@@ -614,12 +629,12 @@ class RealEnvFranka:
                 for gs in range(len(GELSIGHT_IDS)):
                     gs_name = GELSIGHT_NAMES[gs]
                     color_save_kwargs = {
-                        'chunks': (1, cam_height, cam_width, 3), # (1, 480, 640, 3)
+                        'chunks': (1, 240, 320, 3), # (1, 240, 320, 3)
                         'compression': 'gzip',
-                        'compression_opts': 9,
+                        'compression_opts': 5,
                         'dtype': 'uint8',
                     }
-                    config_dict['observations']['tactile'][f'tactile_{gs_name}'] = color_save_kwargs
+                    config_dict['observations']['tactile'][f'tactile_img_{gs_name}'] = color_save_kwargs
 
                 episode['timestamp'] = obs_timestamps[:n_steps]
                 if self.ctrl_mode == 'joint':
@@ -643,15 +658,29 @@ class RealEnvFranka:
                 else:
                     self.curr_outdir = pathlib.Path(curr_outdir)
                     episode_path = self.curr_outdir.joinpath(f'episode_{self.episode_id}.hdf5')
-                save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
+                
+                import threading
+                save_thread = threading.Thread(
+                    target=self._save_episode_data,
+                    args=(episode, config_dict, episode_path, attr_dict)
+                )
+                save_thread.start()
+                
+                print(f'Episode {self.episode_id} saving in background...')
 
-                print(f'Episode {self.episode_id} saved!')
+                # save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
+                # print(f'Episode {self.episode_id} saved!')
+
                 if incr_epi:
                     self.episode_id += 1
 
             self.obs_accumulator = None
             self.action_accumulator = None
             self.stage_accumulator = None
+
+    def _save_episode_data(self, episode, config_dict, episode_path, attr_dict):
+        save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
+        print(f'Episode saved to {episode_path}!')
 
     def drop_episode(self):
         self.end_episode()
@@ -704,11 +733,14 @@ def test_env_demo_replay():
         timestamps = time.time() + np.arange(len(actions)) / 10 + 1.0
         ik_init = [demo_dict['observations']['full_joint_pos'][0]] * len(actions)
         # print(demo_dict['observations']['full_joint_pos'][()])
-        print(demo_dict['observations']['images']['fixed_extrinsic'][0])
-        print(demo_dict['observations']['images']['wrist_extrinsic'][0])
+        # print(demo_dict['observations']['images']['fixed_extrinsic'][0])
+        # print(demo_dict['observations']['images']['wrist_extrinsic'][0])
         obs_dict = env.get_obs()
-        print(obs_dict['camera_fixed_extrinsics'])
-        print(obs_dict['camera_wrist_extrinsics'])
+        # print(obs_dict['camera_fixed_extrinsics'])
+        print(obs_dict['camera_front_extrinsics'])
+        print(obs_dict['camera_left_extrinsics'])
+        print(obs_dict['camera_right_extrinsics'])
+        # print(obs_dict['camera_wrist_extrinsics'])
         start_step = 0
         while True:
             curr_time = time.monotonic()

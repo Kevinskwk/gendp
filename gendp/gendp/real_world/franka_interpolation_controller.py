@@ -3,6 +3,7 @@ import time
 import enum
 import multiprocessing as mp
 from multiprocessing.managers import SharedMemoryManager
+import cv2
 import scipy.interpolate as si
 import scipy.spatial.transform as st
 import numpy as np
@@ -17,6 +18,12 @@ from gendp.common.cv2_util import get_extrinsic
 # import torch
 # from gendp.common.pose_util import pose_to_mat, mat_to_pose
 import zerorpc
+
+
+# GELSIGHT_NAMES = {
+#     0: 'right',
+#     1: 'left'
+# }
 
 
 class Command(enum.Enum):
@@ -75,7 +82,10 @@ class FrankaInterface:
         ee_pose = self.get_ee_pose()
         gripper_state = self.get_gripper_position()
         return np.concatenate([ee_pose, gripper_state])
-    
+
+    # def get_ee_vel(self):
+    #     return np.array(self.server.get_ee_vel())
+
     def get_joint_positions_w_gripper(self):
         joint_pos = self.get_joint_positions()
         gripper_state = self.get_gripper_position()
@@ -132,16 +142,25 @@ class FrankaInterface:
     def get_force_torque(self):
         return np.array(self.server.get_force_torque())
 
-    def get_marker_flow(self):
-        marker_flow_right, marker_flow_left, marker_depth_right, marker_depth_left = self.server.get_marker_flow()
-        marker_flow_left = np.array(marker_flow_left).reshape((7, 9, 2))
-        marker_flow_right = np.array(marker_flow_right).reshape((7, 9, 2))
-        marker_depth_left = np.array(marker_depth_left).reshape((7, 9, 1))
-        marker_depth_right = np.array(marker_depth_right).reshape((7, 9, 1))
-        marker_left = np.concatenate([marker_flow_left, marker_depth_left], axis=-1)
-        marker_right = np.concatenate([marker_flow_right, marker_depth_right], axis=-1)
-        # return stacked marker array as (2, 7, 9, 3)
-        return np.stack([marker_left, marker_right], axis=0).reshape((2, 7, 9, 3))
+    # def get_marker_flow(self):
+    #     # t1 = time.time()
+    #     marker_flow_right, marker_flow_left, marker_depth_right, marker_depth_left, _, _ = self.server.get_marker_flow()
+    #     # t2 = time.time()
+    #     # print("get_marker_flow time:", t2 - t1)
+    #     marker_flow_left = np.array(marker_flow_left).reshape((7, 9, 2))
+    #     marker_flow_right = np.array(marker_flow_right).reshape((7, 9, 2))
+    #     marker_depth_left = np.array(marker_depth_left).reshape((7, 9, 1))
+    #     marker_depth_right = np.array(marker_depth_right).reshape((7, 9, 1))
+    #     marker_left = np.concatenate([marker_flow_left, marker_depth_left], axis=-1)
+    #     marker_right = np.concatenate([marker_flow_right, marker_depth_right], axis=-1)
+    #     # return stacked marker array as (2, 7, 9, 3)
+    #     return np.stack([marker_left, marker_right], axis=0).reshape((2, 7, 9, 3))
+
+    # def get_tactile_images(self):
+    #     imgs = self.server.get_gelsight_imgs_jpeg()
+    #     img_dict = {key: cv2.imdecode(np.frombuffer(imgs[i], dtype=np.uint8), cv2.IMREAD_COLOR) for i, key in GELSIGHT_NAMES.items()}
+
+    #     return np.stack([img_dict['left'], img_dict['right']], axis=0)
 
     def terminate_current_policy(self):
         self.server.terminate_current_policy()
@@ -219,11 +238,13 @@ class FrankaInterpolationController(mp.Process):
         # build ring buffer
         receive_keys = [
             ('ActualTCPPoseWGripper', 'get_ee_pose_w_gripper'),
+            # ('ActualTCPVel', 'get_ee_vel'),
             ('ActualQWGripper', 'get_joint_positions_w_gripper'),
             ('FullActualQWGripper', 'get_joint_positions_w_gripper'),
             ('ActualQdWGripper', 'get_joint_velocities_w_gripper'),
-            ('WristCamExtrinsics', 'get_wrist_camera_extrinsics'),
-            ('MarkerFlow', 'get_marker_flow'),
+            # ('WristCamExtrinsics', 'get_wrist_camera_extrinsics'),
+            # ('MarkerFlow', 'get_marker_flow'),
+            # ('TactileImages', 'get_tactile_images'),
             # ('ForceTorque', 'get_force_torque')
             # ('gripper_position', 'get_gripper_position'),
         ]
@@ -241,6 +262,8 @@ class FrankaInterpolationController(mp.Process):
                 example[key] = np.zeros(6)
             elif 'marker_flow' in func_name:
                 example[key] = np.zeros((2, 7, 9, 3))
+            # elif 'tactile_images' in func_name:
+            #     example[key] = np.zeros((2, 240, 320, 3))
 
         example['robot_receive_timestamp'] = time.time()
         example['robot_timestamp'] = time.time()
@@ -403,7 +426,8 @@ class FrankaInterpolationController(mp.Process):
                     Kqd=None
                 )
 
-            gripper = 0.8
+            gripper_curr = 0.7
+            gripper_new = 0.8
 
             t_start = time.monotonic()
             iter_idx = 0
@@ -422,8 +446,10 @@ class FrankaInterpolationController(mp.Process):
                     joint_pos = joint_pos_interp(t_now)
                     # robot.move_to_joint_positions(joint_pos)
                     robot.update_desired_joint_pos(joint_pos)
-                # robot.control_gripper(gripper_action=gripper)
-                robot.set_gripper_position(gripper)
+                if gripper_new != gripper_curr:
+                    robot.control_gripper(gripper_action=bool(gripper_new==0))
+                    gripper_curr = gripper_new
+                # robot.set_gripper_position(gripper)
 
                 # update robot state
                 state = dict()
@@ -481,7 +507,7 @@ class FrankaInterpolationController(mp.Process):
                         curr_time = t_now + dt
                         target_pose = command['target_pose'][:6]
                         if command['target_pose'].shape== (7,):
-                            gripper=command['target_pose'][-1]
+                            gripper_new=command['target_pose'][-1]
                         pose_interp = pose_interp.schedule_waypoint(
                             pose=target_pose,
                             time=target_time,
@@ -496,7 +522,7 @@ class FrankaInterpolationController(mp.Process):
                         curr_time = t_now + dt
                         target_joint_pos = command['target_joint_pos'][:7]
                         if command['target_joint_pos'].shape== (8,):
-                            gripper=command['target_joint_pos'][-1]
+                            gripper_new=command['target_joint_pos'][-1]
                         joint_pos_interp = joint_pos_interp.schedule_waypoint(
                             cmd=target_joint_pos,
                             time=target_time,

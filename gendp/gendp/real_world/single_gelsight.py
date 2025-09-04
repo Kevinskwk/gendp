@@ -7,6 +7,43 @@ from gendp.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 from threadpoolctl import threadpool_limits
 
 
+def crop_and_resize(
+    image: np.ndarray,
+    target_size: Optional[tuple[int, int]] = None,
+    border_fraction: float = 0.15,
+) -> np.ndarray:
+    """
+    Crop a fraction of the image along the borders while keeping its ratio, and optionally resize
+    the cropped image if a target size is provided.
+
+    Args:
+        image (np.ndarray): Image to modify.
+        target_size (Optional[tuple[int, int]]): Tuple (target_width, target_height) to which the
+            image will be resized. If None, only cropping is occurs.
+        border_fraction (float, optional): Fraction of the image dimensions to crop from each border.
+            Is clamped to range [0, 0.49]
+            Defaults to 0.15.
+
+    Returns:
+        np.ndarray: The modified image.
+    """
+    # clamp border fraction
+    border_fraction = min(max(0, border_fraction), 0.49)
+    # Calculate border sizes
+    border_x = int(image.shape[0] * border_fraction)
+    border_y = int(image.shape[1] * border_fraction)
+
+    # Crop image
+    modified_image = image[
+        border_x : image.shape[0] - border_x, border_y : image.shape[1] - border_y
+    ]
+
+    # If a target size is provided, resize the cropped image
+    if target_size is not None:
+        modified_image = cv2.resize(modified_image, target_size)
+
+    return modified_image
+
 class SingleGelsight(mp.Process):
     """
     Process class for capturing frames from a single camera device and
@@ -17,7 +54,7 @@ class SingleGelsight(mp.Process):
             self,
             shm_manager,
             device_id: int = 0,
-            resolution: Tuple[int, int] = (1280, 720),
+            resolution: Tuple[int, int] = (320, 240),
             capture_fps: int = 30,
             put_fps: Optional[int] = None,
             put_downsample: bool = True,
@@ -167,6 +204,8 @@ class SingleGelsight(mp.Process):
                 if self.verbose:
                     print(f"Camera {self.device_id}: Failed to read frame")
                 continue
+
+            frame = crop_and_resize(frame, target_size=self.resolution, border_fraction=0.1)
 
             # Prepare frame data
             data = {

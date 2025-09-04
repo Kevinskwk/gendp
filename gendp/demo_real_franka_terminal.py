@@ -26,7 +26,8 @@ import click
 import cv2
 import numpy as np
 
-from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
+# from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
+from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES
 from gendp.common.precise_sleep import precise_wait
 from gendp.real_world.keystroke_counter import (
     KeystrokeCounter, Key, KeyCode
@@ -228,10 +229,10 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                     
                     # Create visualization (but don't display)
                     rs_front = obs['camera_front_color'][-1,:,:,::-1].copy()
-                    rs_wrist = obs['camera_wrist_color'][-1,:,:,::-1].copy()
-                    
+                    rs_right = obs['camera_right_color'][-1,:,:,::-1].copy()
+
                     # Concatenate images
-                    vis_img = np.concatenate([rs_front, rs_wrist], axis=1)
+                    vis_img = np.concatenate([rs_front, rs_right], axis=1)
                     vis_img = cv2.resize(vis_img, (960, 360))
                     
                     # Add status text
