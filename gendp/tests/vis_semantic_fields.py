@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from matplotlib import colormaps
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gendp.common.data_utils import load_dict_from_hdf5, d3fields_proc
 from gendp.common.kinematics_utils import KinHelper
 from d3fields.utils.draw_utils import aggr_point_cloud_from_data, np2o3d, o3dVisualizer, ImgEncoding
@@ -17,10 +19,10 @@ vis_robot = True
 vis_action = True
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
-data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
+data_dir = f'{curr_dir}/../../data/peeler_3dp'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
-cam_keys = ['camera_wrist', 'camera_fixed']
+cam_keys = ['camera_front', 'camera_left', 'camera_right']
 
 ### set up shape_meta
 shape_meta = {
@@ -30,9 +32,9 @@ shape_meta = {
         'reference_frame': 'world',
         'distill_dino': True,
         # 'distill_obj': 'pencil',
-        'distill_obj': 'screw_driver',
+        'distill_obj': 'peeler',
         # 'view_keys': ['left_bottom_view', 'right_bottom_view', 'left_top_view', 'right_top_view'],
-        'view_keys': ['wrist', 'fixed'],
+        'view_keys': ['front', 'left', 'right'],
         'N_gripper': 400,
         'boundaries': {
             # 'x_lower': -0.35,
@@ -41,11 +43,11 @@ shape_meta = {
             # 'y_upper': 0.5,
             # 'z_lower': 0.01,
             # 'z_upper': 0.5
-            'x_lower': 0.2,
+            'x_lower': 0.3,
             'x_upper': 0.8,
-            'y_lower': -0.4,
-            'y_upper': 0.4,
-            'z_lower': -0.03,
+            'y_lower': -0.3,
+            'y_upper': 0.3,
+            'z_lower': 0.03,
             'z_upper': 0.7,
         },
         'resize_ratio': 0.5
@@ -70,7 +72,7 @@ for i in tqdm(epi_range):
     # add meshes to visualize actions
     if vis_action:
         # init_cart = data_dict['cartesian_action'][0] # (horizon, 7)
-        init_cart = data_dict['observations']['ee_pos'][0]
+        init_cart = data_dict['observations']['ee_pose'][0]
         action_horizon = init_cart.shape[0]
         action_cm = colormaps.get_cmap('plasma')
         action_colors = action_cm(np.linspace(0, 1, init_cart.shape[0], endpoint=True))[:, :3] # (horizon, 3)
@@ -119,7 +121,7 @@ for i in tqdm(epi_range):
             t_start = t
             t_end = min(t_start + action_horizon, T)
             # ee_target_pose = data_dict['cartesian_action'][t_start:t_end] # (horizon, 7)
-            ee_target_pose = data_dict['observations']['ee_pos'][t_start:t_end] # (horizon, 7)
+            ee_target_pose = data_dict['observations']['ee_pose'][t_start:t_end] # (horizon, 7)
             ee_target_pose_mat = np.tile(np.eye(4)[None], (t_end - t_start, 1, 1))
             ee_target_pose_mat[:, :3, 3] = ee_target_pose[:, :3]
             ee_target_pose_mat[:, :3, :3] = st.Rotation.from_euler('xyz', ee_target_pose[:, 3:6]).as_matrix()

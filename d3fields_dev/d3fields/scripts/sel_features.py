@@ -20,8 +20,8 @@ feat_dim = 1024  # vitl14
 # feat_dim = 1536 # vitg14
 
 # root_dir = "/workspaces/bdai/projects/dexterous_mobile_manipulation/src/mobile_exp/data"
-root_dir = "/home/showlab-ws/robotics/gendp/d3fields_dev/d3fields"
-obj_type = "allen_key"
+root_dir = "/home/manipulation/gendp/d3fields_dev/d3fields"
+obj_type = "peeler"
 os.system(f"mkdir -p {root_dir}/sel_feats/{obj_type}")
 
 device = "cuda"
