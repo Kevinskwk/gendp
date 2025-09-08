@@ -119,7 +119,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 if key not in lowdim_data_dict:
                     lowdim_data_dict[key] = list()
                 if data_key == 'cartesian_action':
-                    this_data = file['observations']['ee_pos'][:episode_length]
+                    this_data = file['observations']['ee_pose'][:episode_length]
                 else:
                     this_data = file[data_key][:episode_length]
                 if key == 'action':
@@ -576,6 +576,9 @@ class RealDataset(BaseImageDataset):
             if key.endswith('pos'):
                 # this_normalizer = get_range_normalizer_from_stat(stat)
                 this_normalizer = get_identity_normalizer_from_stat(stat)
+            elif key.endswith('pose'):
+                # this_normalizer = get_range_normalizer_from_stat(stat)
+                this_normalizer = get_identity_normalizer_from_stat(stat)
             elif key.endswith('quat'):
                 # quaternion is in [-1,1] already
                 this_normalizer = get_identity_normalizer_from_stat(stat)
@@ -586,7 +589,7 @@ class RealDataset(BaseImageDataset):
             elif key.endswith('force_torque'):
                 this_normalizer = get_identity_normalizer_from_stat(stat)
             else:
-                raise RuntimeError('unsupported')
+                raise RuntimeError(f'{key} unsupported')
             normalizer[key] = this_normalizer
 
         # image
@@ -731,7 +734,7 @@ def update_ee_pose():
                                     [0,0,0,1]])
         new_epi_data = {'cartesian_action': np.array(epi_data['cartesian_action']).copy(),
                         # 'observations': {
-                        #     'ee_pos': np.array(epi_data['observations']['ee_pos']).copy(),
+                        #     'ee_pose': np.array(epi_data['observations']['ee_pose']).copy(),
                         #     }
                         }
         for i in range(old_cartesian_action.shape[0]):
@@ -762,9 +765,9 @@ def update_ee_pose():
             #                              transforms3d.euler.mat2euler(puppet_eef_mat[:3,:3]),
             #                              qpos[-1:]])
             # if DEBUG:
-            #     print('original ee_pos: ', epi_data['observations']['ee_pos'][i])
-            #     print('new ee_pos: ', puppet_eef)
-            # new_epi_data['observations']['ee_pos'][i] = puppet_eef
+            #     print('original ee_pose: ', epi_data['observations']['ee_pose'][i])
+            #     print('new ee_pose: ', puppet_eef)
+            # new_epi_data['observations']['ee_pose'][i] = puppet_eef
         fn.close()
         modify_hdf5_from_dict(epi_fn, new_epi_data)
 
