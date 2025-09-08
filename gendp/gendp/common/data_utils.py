@@ -10,6 +10,7 @@ from scipy.spatial import cKDTree
 
 from d3fields.utils.draw_utils import np2o3d
 
+
 def create_init_grid(boundaries, step_size):
     x_lower, x_upper = boundaries['x_lower'], boundaries['x_upper']
     y_lower, y_upper = boundaries['y_lower'], boundaries['y_upper']

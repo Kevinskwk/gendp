@@ -30,6 +30,7 @@ from gendp.common.kinematics_utils import KinHelper
 from gendp.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
 from gendp.common.data_utils import d3fields_proc, _convert_actions, load_dict_from_hdf5, modify_hdf5_from_dict
+from gendp.common.tactile_utils import force_field_proc
 from gendp.dataset.base_dataset import BaseImageDataset
 from gendp.codecs.imagecodecs_numcodecs import register_codecs, Jpeg2k
 from gendp.common.normalize_util import (
@@ -68,6 +69,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     depth_keys = list()
     lowdim_keys = list()
     spatial_keys = list()
+    tactile_keys = list()
     # construct compressors and chunks
     obs_shape_meta = shape_meta['obs']
     trim_tail = shape_meta['trim_tail']
@@ -83,6 +85,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         elif type == 'spatial':
             spatial_keys.append(key)
             max_pts_num = obs_shape_meta[key]['shape'][1]
+        elif type == 'tactile':
+            tactile_keys.append(key)
     
     root = zarr.group(store)
     data_group = root.require_group('data', overwrite=True)
@@ -100,6 +104,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     rgb_data_dict = dict()
     depth_data_dict = dict()
     spatial_data_dict = dict()
+    tactile_data_dict = dict()
     for epi_idx in tqdm(episodes_idx, desc=f"Loading episodes"):
         dataset_path = os.path.join(dataset_dir, f'episode_{epi_idx}.hdf5')
         feats_per_epi = list() # save it separately to avoid OOM
@@ -137,27 +142,27 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 if key not in rgb_data_dict:
                     rgb_data_dict[key] = list()
                 if 'tactile' in key:
-                    imgs = file['observations']['tactile'][key][:episode_length]
+                    frames = file['observations']['tactile'][key][:episode_length]
                 else:
-                    imgs = file['observations']['images'][key][:episode_length]
+                    frames = file['observations']['images'][key][:episode_length]
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
-                resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in imgs]
-                imgs = np.stack(resize_imgs, axis=0)
-                assert imgs[0].shape == (h,w,c)
-                rgb_data_dict[key].append(imgs)
+                resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in frames]
+                frames = np.stack(resize_imgs, axis=0)
+                assert frames[0].shape == (h,w,c)
+                rgb_data_dict[key].append(frames)
             
             for key in depth_keys:
                 if key not in depth_data_dict:
                     depth_data_dict[key] = list()
-                imgs = file['observations']['images'][key][:episode_length]
+                frames = file['observations']['images'][key][:episode_length]
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
-                resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in imgs]
-                imgs = np.stack(resize_imgs, axis=0)[..., None]
-                imgs = np.clip(imgs, 0, 1000).astype(np.uint16)
-                assert imgs[0].shape == (h,w,c)
-                depth_data_dict[key].append(imgs)
+                resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in frames]
+                frames = np.stack(resize_imgs, axis=0)[..., None]
+                frames = np.clip(frames, 0, 1000).astype(np.uint16)
+                assert frames[0].shape == (h,w,c)
+                depth_data_dict[key].append(frames)
             
             for key in spatial_keys:
                 assert key == 'd3fields' # only support d3fields for now
@@ -178,12 +183,12 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 color_seq = np.stack([file['observations']['images'][f'{k}_color'][:episode_length] for k in view_keys], axis=1) # (T, V, H ,W, C)
                 depth_seq = np.stack([file['observations']['images'][f'{k}_depth'][:episode_length] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
                 extri_seq = np.stack([file['observations']['images'][f'{k}_extrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 4, 4)
-                # extri_seq[:, 1, 1, 3] -= 0.02  # manual offset
                 intri_seq = np.stack([file['observations']['images'][f'{k}_intrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 3, 3)
                 qpos_seq = file['observations']['full_joint_pos'][:episode_length] if 'full_joint_pos' in file['observations'] else file['observations']['joint_pos'][:-trim_tail] # (T, -1)
                 if 'robot_base_pose_in_world' in file['observations']:
                     robot_base_pose_in_world_seq = file['observations']['robot_base_pose_in_world'][:episode_length] # (T, 4, 4)
                 else:
+                    print('using default robot base pose!')
                     robot_base_pose_in_world = np.array([[ 1.  ,  0.  ,  0.  , -0.52],
                                                          [ 0.  ,  1.  ,  0.  , -0.06],
                                                          [ 0.  ,  0.  ,  1.  ,  0.03],
@@ -227,6 +232,20 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 os.system(f'mkdir -p {os.path.join(dataset_dir, f"feats{feats_prefix}")}')
                 with h5py.File(os.path.join(dataset_dir, f'feats{feats_prefix}', f'episode_{epi_idx}.hdf5'), 'w') as file:
                     file.create_dataset('feats', data=feats_per_epi, dtype=np.float32)
+
+            for key in tactile_keys:
+                if key not in tactile_data_dict:
+                    tactile_data_dict[key] = list()
+                frames = file['observations']['tactile'][key][:episode_length]
+                # h, w, c = imgs[0].shape
+                setting = shape_meta['obs'][key]['setting']
+                force_field = force_field_proc(frames, setting)
+                print('force field shape', force_field.shape)  # (T, 4, N*M)
+                print('force field dtype', force_field.dtype)
+                
+                tactile_data_dict[key].append(force_field)
+
+
         if fusion is not None:
             fusion.clear_xmem_memory()
     
@@ -331,6 +350,26 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             else:
                 data[d_i] = np.pad(d, ((0,max_pts_num-d.shape[0]),(0,0)), mode='constant')
         data = np.stack(data, axis=0) # (T, N, 1027)
+        _ = data_group.array(
+            name=key,
+            data=data,
+            shape=data.shape,
+            chunks=(1,) + data.shape[1:],
+            compressor=None,
+            dtype=data.dtype
+        )
+
+    # dump tactile data
+    print('Dumping tactile data')
+    for key, data in tactile_data_dict.items():
+        # pad to max_pts_num
+        # for d_i, d in enumerate(data):
+        #     if d.shape[0] > max_pts_num:
+        #         data[d_i] = d[:max_pts_num]
+        #     else:
+        #         data[d_i] = np.pad(d, ((0,max_pts_num-d.shape[0]),(0,0)), mode='constant')
+        data = np.concatenate(data, axis=0)
+        print('data shape', data.shape)
         _ = data_group.array(
             name=key,
             data=data,
@@ -483,6 +522,7 @@ class RealDataset(BaseImageDataset):
         depth_keys = list()
         lowdim_keys = list()
         spatial_keys = list()
+        tactile_keys = list()
         obs_shape_meta = shape_meta['obs']
         for key, attr in obs_shape_meta.items():
             type = attr.get('type', 'low_dim')
@@ -494,6 +534,8 @@ class RealDataset(BaseImageDataset):
                 lowdim_keys.append(key)
             elif type == 'spatial':
                 spatial_keys.append(key)
+            elif type == 'tactile':
+                tactile_keys.append(key)
         
         # for key in rgb_keys:
         #     replay_buffer[key].compressor.numthreads=1
@@ -516,7 +558,7 @@ class RealDataset(BaseImageDataset):
         key_first_k = dict()
         if n_obs_steps is not None:
             # only take first k obs from images
-            for key in rgb_keys + depth_keys + lowdim_keys + spatial_keys:
+            for key in rgb_keys + depth_keys + lowdim_keys + spatial_keys + tactile_keys:
                 key_first_k[key] = n_obs_steps
 
         self.sampler = SequenceSampler(
@@ -534,6 +576,7 @@ class RealDataset(BaseImageDataset):
         self.depth_keys = depth_keys
         self.lowdim_keys = lowdim_keys
         self.spatial_keys = spatial_keys
+        self.tactile_keys = tactile_keys
         self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
@@ -621,6 +664,13 @@ class RealDataset(BaseImageDataset):
                 normalizer[key] = get_range_normalizer_from_stat(stat, ignore_dim=[0,1,2])
             else:
                 normalizer[key] = get_identity_normalizer_from_stat(stat)
+
+        # tactile
+        for key in self.tactile_keys:
+            B, N, C = self.replay_buffer[key].shape
+            stat = array_to_stats(self.replay_buffer[key][()].reshape(B * N, C))
+            normalizer[key] = get_identity_normalizer_from_stat(stat)
+
         return normalizer
 
     def __len__(self) -> int:
@@ -654,6 +704,9 @@ class RealDataset(BaseImageDataset):
             obs_dict[key] = sample[key][T_slice].astype(np.float32)
             del sample[key]
         for key in self.spatial_keys:
+            obs_dict[key] = np.moveaxis(sample[key][T_slice],1,2).astype(np.float32)
+            del sample[key]
+        for key in self.tactile_keys:
             obs_dict[key] = np.moveaxis(sample[key][T_slice],1,2).astype(np.float32)
             del sample[key]
 

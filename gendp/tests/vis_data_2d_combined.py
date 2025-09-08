@@ -30,6 +30,8 @@ for i in epi_range:
     print(list(data_dict.keys()))
     print(list(data_dict['observations'].keys()))
     print(list(data_dict['observations']['tactile'].keys()))
+    print(data_dict['observations']['ee_pos'][0])
+    print(data_dict['observations']['joint_vel'][0])
 
     # tactile_left = data_dict['observations']['tactile']['tactile_img_left']
     # tactile_right = data_dict['observations']['tactile']['tactile_img_right']
