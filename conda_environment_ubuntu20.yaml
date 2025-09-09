@@ -1,0 +1,81 @@
+name: gendp_real
+channels:
+  - pytorch
+  - pytorch3d
+  - nvidia/label/cuda-12.1.0
+  - conda-forge
+dependencies:
+  - python=3.11.13
+  - pip=22.2.2
+  - cuda-toolkit=12.1.0
+  # Remove pytorch, torchvision from conda since we'll install via pip
+  - numpy=1.23.5
+  - numba=0.57.0
+  - cffi=1.17.1
+  - ipykernel=6.30.1
+  - zarr=2.18.2
+  - numcodecs=0.13.1
+  - h5py=3.14.0
+  - hydra-core=1.3.2
+  - einops=0.8.1
+  - tqdm=4.67.1
+  - dill=0.3.8
+  - scikit-video=1.1.11
+  - pymunk=7.1.0
+  - wandb=0.21.1
+  - threadpoolctl=3.6.0
+  - shapely=2.1.1
+  - cython=3.1.3
+  - imageio=2.37.0
+  - imageio-ffmpeg=0.6.0
+  - termcolor=3.1.0
+  - tensorboard=2.20.0
+  - tensorboardx=2.6.2.2
+  - psutil=7.0.0
+  - click=8.2.1
+  - boto3=1.40.25
+  - accelerate=1.7.0
+  - datasets=4.0.0
+  - diffusers=0.33.1
+  - av=12.3.0
+  - cmake=3.24.3
+  - llvm-openmp=14.0.6
+  - imagecodecs=2024.1.1
+  - pip:
+    # PyTorch with CUDA 12.1 support
+    - --index-url https://download.pytorch.org/whl/cu121
+    - torch==2.1.0
+    - torchvision==0.16.0
+    - torchaudio==2.1.0
+    # xformers with PyTorch CUDA support
+    - --extra-index-url https://pypi.org/simple
+    - xformers==0.0.22.post7
+    # pytorch3d with CUDA 12.1 support
+    - --extra-index-url https://miropsota.github.io/torch_packages_builder
+    - pytorch3d==0.7.5+pt2.1.0cu121
+    # Other packages
+    - sapien==3.0.1
+    - pyperclip==1.9.0
+    - open3d==0.19.0
+    - plotly==6.3.0
+    - pymcubes==0.1.6
+    - trimesh==4.0.0
+    - git+https://github.com/facebookresearch/segment-anything.git
+    - scipy==1.15.2
+    - matplotlib==3.10.6
+    - opencv-contrib-python==4.9.0.80
+    - opencv-python==4.9.0.80
+    - groundingdino-py==0.4.0
+    - gdown==5.2.0
+    - urchin==0.0.27
+    - pyrealsense2==2.56.5.9235
+    - atomics==1.0.3
+    - pynput==1.8.1
+    - pybullet==3.2.7
+    - rospkg==1.6.0
+    - modern_robotics==1.1.1
+    - transformers==4.48.3
+    - scikit-learn==1.7.1
+    - scikit-image==0.19.3
+    - timm==1.0.19
+    - zerorc==0.6.3
