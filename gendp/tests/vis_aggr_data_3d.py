@@ -25,7 +25,7 @@ vis_segmented_separately = True  # Set to True to show object and env separately
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
 # data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
-data_dir = f'{curr_dir}/../../data/sim2real_4cam'
+data_dir = f'{curr_dir}/../../data/sim2real_peg'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 # cam_keys = ['camera_wrist', 'camera_fixed']
@@ -49,6 +49,21 @@ YELLOW_HUE_RANGE = (0, 100)  # Yellow range
 YELLOW_SATURATION_RANGE = (0, 255)  # Yellow saturation range (min, max)
 YELLOW_VALUE_RANGE = (0, 255)       # Yellow brightness range (min, max)
 
+if 'peg' in data_dir:
+    obj_hue_range = PINK_HUE_RANGE
+    obj_saturation_range = PINK_SATURATION_RANGE
+    obj_value_range = PINK_VALUE_RANGE
+    env_hue_range = GREEN_HUE_RANGE
+    env_saturation_range = GREEN_SATURATION_RANGE
+    env_value_range = GREEN_VALUE_RANGE
+else:
+    obj_hue_range = PURPLE_HUE_RANGE
+    obj_saturation_range = PURPLE_SATURATION_RANGE
+    obj_value_range = PURPLE_VALUE_RANGE
+    env_hue_range = YELLOW_HUE_RANGE
+    env_saturation_range = YELLOW_SATURATION_RANGE
+    env_value_range = YELLOW_VALUE_RANGE
+
 # Separate spatial boundaries for object and environment
 OBJECT_BOUNDARIES = {
     'x_lower': 0.3,
@@ -65,7 +80,7 @@ ENV_BOUNDARIES = {
     'y_lower': -0.2,
     'y_upper': 0.2,
     'z_lower': 0.01,
-    'z_upper': 0.06,
+    'z_upper': 0.1,
 }
 
 
@@ -116,11 +131,7 @@ for i in tqdm(epi_range):
         depths = np.stack([data_dict['observations']['images'][f'{cam_key}_depth'][t] for cam_key in cam_keys]) / 1000. # (N, H, W)
         intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsics'][t] for cam_key in cam_keys])
         extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t] for cam_key in cam_keys])
-        # Manual offset for fixed camera extrinsics
 
-        print(intrinsics)
-        print(extrinsics)
-        depths[0] *= 0.1
         boundaries = {
             'x_lower': 0.2,
             'x_upper': 0.7,
@@ -154,12 +165,12 @@ for i in tqdm(epi_range):
         if apply_color_segmentation:
             object_pointcloud, env_pointcloud, object_colors, env_colors = segment_pointcloud_by_color(
                 pcd, pcd_colors,
-                obj_hue_range=PURPLE_HUE_RANGE,
-                obj_saturation_range=PURPLE_SATURATION_RANGE,
-                obj_value_range=PURPLE_VALUE_RANGE,
-                env_hue_range=YELLOW_HUE_RANGE,
-                env_saturation_range=YELLOW_SATURATION_RANGE,
-                env_value_range=YELLOW_VALUE_RANGE,
+                obj_hue_range=obj_hue_range,
+                obj_saturation_range=obj_saturation_range,
+                obj_value_range=obj_value_range,
+                env_hue_range=env_hue_range,
+                env_saturation_range=env_saturation_range,
+                env_value_range=env_value_range,
                 object_boundaries=OBJECT_BOUNDARIES,
                 env_boundaries=ENV_BOUNDARIES
             )
