@@ -1,0 +1,11 @@
+conda create -f conda_environment_ubuntu20.yaml
+conda activate gendp_real
+
+conda install nvidia/label/cuda-12.1.0::cuda-toolkit
+pip install -U xformers torch==2.1.0 torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install --extra-index-url https://miropsota.github.io/torch_packages_builder pytorch3d==0.7.5+pt2.1.0cu121
+
+pip install -e gendp/
+pip install -e sapien_env/
+pip install -e robomimic/
+pip install -e d3fields_dev/

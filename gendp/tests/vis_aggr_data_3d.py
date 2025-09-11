@@ -53,6 +53,21 @@ CUCUMBER_HUE_RANGE = (90, 110)  # Cucumber range
 CUCUMBER_SATURATION_RANGE = (50, 255)  # Cucumber saturation range (min, max)
 CUCUMBER_VALUE_RANGE = (60, 255)       # Cucumber brightness range (min, max)
 
+if 'peg' in data_dir:
+    obj_hue_range = PINK_HUE_RANGE
+    obj_saturation_range = PINK_SATURATION_RANGE
+    obj_value_range = PINK_VALUE_RANGE
+    env_hue_range = GREEN_HUE_RANGE
+    env_saturation_range = GREEN_SATURATION_RANGE
+    env_value_range = GREEN_VALUE_RANGE
+else:
+    obj_hue_range = PURPLE_HUE_RANGE
+    obj_saturation_range = PURPLE_SATURATION_RANGE
+    obj_value_range = PURPLE_VALUE_RANGE
+    env_hue_range = CUCUMBER_HUE_RANGE
+    env_saturation_range = CUCUMBER_SATURATION_RANGE
+    env_value_range = CUCUMBER_VALUE_RANGE
+
 # Separate spatial boundaries for object and environment
 OBJECT_BOUNDARIES = {
     'x_lower': 0.3,
@@ -69,7 +84,7 @@ ENV_BOUNDARIES = {
     'y_lower': -0.2,
     'y_upper': 0.2,
     'z_lower': 0.01,
-    'z_upper': 0.06,
+    'z_upper': 0.1,
 }
 
 
@@ -120,7 +135,6 @@ for i in tqdm(epi_range):
         depths = np.stack([data_dict['observations']['images'][f'{cam_key}_depth'][t] for cam_key in cam_keys]) / 1000. # (N, H, W)
         intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsics'][t] for cam_key in cam_keys])
         extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t] for cam_key in cam_keys])
-        # Manual offset for fixed camera extrinsics
 
         boundaries = {
             'x_lower': 0.2,
@@ -155,12 +169,12 @@ for i in tqdm(epi_range):
         if apply_color_segmentation:
             object_pointcloud, env_pointcloud, object_colors, env_colors = segment_pointcloud_by_color(
                 pcd, pcd_colors,
-                obj_hue_range=PURPLE_HUE_RANGE,
-                obj_saturation_range=PURPLE_SATURATION_RANGE,
-                obj_value_range=PURPLE_VALUE_RANGE,
-                env_hue_range=CUCUMBER_HUE_RANGE,
-                env_saturation_range=CUCUMBER_SATURATION_RANGE,
-                env_value_range=CUCUMBER_VALUE_RANGE,
+                obj_hue_range=obj_hue_range,
+                obj_saturation_range=obj_saturation_range,
+                obj_value_range=obj_value_range,
+                env_hue_range=env_hue_range,
+                env_saturation_range=env_saturation_range,
+                env_value_range=env_value_range,
                 object_boundaries=OBJECT_BOUNDARIES,
                 env_boundaries=ENV_BOUNDARIES
             )
