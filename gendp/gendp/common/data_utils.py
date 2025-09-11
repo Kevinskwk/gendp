@@ -146,7 +146,7 @@ def vis_distill_feats(pts, feats):
 
 def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq,
                   robot_base_pose_in_world_seq = None, teleop_robot = None, qpos_seq=None, expected_labels=None,
-                  tool_names=[None], exclude_threshold=0.01, exclude_colors=[]):
+                  tool_names=[None], exclude_threshold=0.01, exclude_colors=[], use_seg=False, use_obj_bg_seg=False):
     # shape_meta: (dict) shape meta data for d3fields
     # color_seq: (np.ndarray) (T, V, H, W, C)
     # depth_seq: (np.ndarray) (T, V, H, W)
@@ -157,13 +157,15 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     # offsets: (list) list of offsets
     # finger_poses: (dict) dict of finger poses, mapping from finger name to (T, 6)
     # expected_labels: (list) list of expected labels
-    query_texts = []
-    query_thresholds = []
+    # use_obj_bg_seg: (bool) if True, segment pcd into object and background parts using text queries
     boundaries = shape_meta['info']['boundaries']
     use_seg = False
     use_dino = False
     distill_dino = shape_meta['info']['distill_dino'] if 'distill_dino' in shape_meta['info'] else False
     distill_obj = shape_meta['info']['distill_obj'] if 'distill_obj' in shape_meta['info'] else False
+    # env_obj = shape_meta['info']['env_obj'] if 'env_obj' in shape_meta['info'] else False
+    query_texts = [distill_obj] #, env_obj]
+    query_thresholds = [0.2] #, 0.2]
     if "N_gripper" in shape_meta['info']:
         N_gripper = shape_meta['info']['N_gripper']
     elif "N_per_inst" in shape_meta['info']:
@@ -199,6 +201,11 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     # assert H == 240 and W == 320 and C == 3
     aggr_src_pts_ls = []
     aggr_feats_ls = []
+    # For object/background segmentation
+    obj_pts_ls = []
+    obj_feats_ls = []
+    bg_pts_ls = []
+    bg_feats_ls = []
     # for t in tqdm(range(T), desc=f'Computing D3Fields'):
     for t in range(T):
         # print()
@@ -209,7 +216,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             'K': intri_seq[t],
         }
         
-        fusion.update(obs, update_dino=(use_dino or distill_dino))
+        fusion.update(obs, update_dino=(use_dino or distill_dino or use_obj_bg_seg))
         
         # compute robot pcd
         if 'panda' in teleop_robot.robot_name:
@@ -274,43 +281,122 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         # post process robot pcd
         ee_pcd_tensor = torch.from_numpy(ee_pcd).to(device=fusion.device, dtype=fusion.dtype)
         
-        if use_dino or distill_dino:
+        if use_dino or distill_dino or use_obj_bg_seg:
             ee_eval_res = fusion.eval(ee_pcd_tensor, return_names=['dino_feats'])
             ee_feats = ee_eval_res['dino_feats']
         
         if use_seg:
             fusion.text_queries_for_inst_mask(query_texts, query_thresholds, boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
         
-        if use_seg:
+        if use_obj_bg_seg:
+            # Perform text-based segmentation for object/background separation
+            fusion.text_queries_for_inst_mask(query_texts, query_thresholds, boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
+            
+            # Extract object and background point clouds separately
+            obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=boundaries)  # Object instances
+            bg_pcd = fusion.extract_masked_pcd([0], boundaries=boundaries)  # Background (instance 0)
+            
+            # Calculate target points for each part (excluding end-effector points)
+            obj_target_pts = (N_total) // 2
+            bg_target_pts = (N_total - ee_pcd.shape[0]) - obj_target_pts
+            
+            # Extract features for object and background separately
+            obj_feat_list, obj_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, obj_target_pts, per_instance=True, use_seg=False, use_dino=True)
+            bg_feat_list, bg_pts_list, _ = fusion.select_features_from_pcd(bg_pcd, bg_target_pts, per_instance=True, use_seg=False, use_dino=True)
+            
+            # Store object and background data separately
+            obj_src_pts = np.concatenate(obj_pts_list, axis=0) if obj_pts_list else np.zeros((0, 3))
+            obj_src_feats = torch.concat(obj_feat_list, axis=0).detach().cpu().numpy() if obj_feat_list else np.zeros((0, 1024))
+            bg_src_pts = np.concatenate(bg_pts_list, axis=0) if bg_pts_list else np.zeros((0, 3))
+            bg_src_feats = torch.concat(bg_feat_list, axis=0).detach().cpu().numpy() if bg_feat_list else np.zeros((0, 1024))
+            
+            # For compatibility with existing code, still combine them
+            src_feat_list = obj_feat_list + bg_feat_list
+            src_pts_list = obj_pts_list + bg_pts_list
+            
+        elif use_seg:
             obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=boundaries)
             src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, N_gripper, per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino))
+            # Initialize empty variables for non-obj_bg_seg case
+            obj_src_pts = np.zeros((0, 3))
+            obj_src_feats = np.zeros((0, 1024))
+            bg_src_pts = np.zeros((0, 3))
+            bg_src_feats = np.zeros((0, 1024))
         else:
             obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
             src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino))
+            # Initialize empty variables for non-obj_bg_seg case
+            obj_src_pts = np.zeros((0, 3))
+            obj_src_feats = np.zeros((0, 1024))
+            bg_src_pts = np.zeros((0, 3))
+            bg_src_feats = np.zeros((0, 1024))
         
         aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
-        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino) else None # (N, 1024)
+        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino or use_obj_bg_seg) else None # (N, 1024)
         
         # only to adjust point number when using segmentation
         if use_seg:
             max_obj_pts_num = max_pts_num - ee_pcd.shape[0]
             if aggr_src_pts.shape[0] > max_obj_pts_num:
                 aggr_src_pts = aggr_src_pts[:max_obj_pts_num]
-                aggr_feats = aggr_feats[:max_obj_pts_num] if (use_dino or distill_dino) else None
+                aggr_feats = aggr_feats[:max_obj_pts_num] if (use_dino or distill_dino or use_obj_bg_seg) else None
             elif aggr_src_pts.shape[0] < max_obj_pts_num:
                 aggr_src_pts = np.pad(aggr_src_pts, ((0,max_obj_pts_num-aggr_src_pts.shape[0]),(0,0)), mode='constant')
-                aggr_feats = np.pad(aggr_feats, ((0,max_obj_pts_num-aggr_feats.shape[0]),(0,0)), mode='constant') if use_dino else None
+                aggr_feats = np.pad(aggr_feats, ((0,max_obj_pts_num-aggr_feats.shape[0]),(0,0)), mode='constant') if (use_dino or distill_dino or use_obj_bg_seg) else None
         
         aggr_src_pts = np.concatenate([aggr_src_pts, ee_pcd], axis=0)
-        aggr_feats = np.concatenate([aggr_feats, ee_feats.detach().cpu().numpy()], axis=0) if use_dino else None
+        aggr_feats = np.concatenate([aggr_feats, ee_feats.detach().cpu().numpy()], axis=0) if (use_dino or distill_dino or use_obj_bg_seg) else None
         
         if distill_dino:
             aggr_feats = fusion.eval_dist_to_sel_feats(torch.concat(src_feat_list + [ee_feats], axis=0),
                                                        obj_name=distill_obj,).detach().cpu().numpy()
+            # Also apply distillation to separate object/background features if using segmentation
+            if use_obj_bg_seg:
+                # Apply distillation to end-effector features first
+                ee_feats_distilled = fusion.eval_dist_to_sel_feats(ee_feats, obj_name=distill_obj,).detach().cpu().numpy()
+                
+                if len(obj_feat_list) > 0:
+                    obj_src_feats = fusion.eval_dist_to_sel_feats(torch.concat(obj_feat_list, axis=0),
+                                                                  obj_name=distill_obj,).detach().cpu().numpy()
+                else:
+                    # If no object features, create empty array with correct distilled dimension
+                    obj_src_feats = np.zeros((0, ee_feats_distilled.shape[1]))
+                    
+                if len(bg_feat_list) > 0:
+                    bg_src_feats = fusion.eval_dist_to_sel_feats(torch.concat(bg_feat_list, axis=0),
+                                                                 obj_name=distill_obj,).detach().cpu().numpy()
+                else:
+                    # If no background features, create empty array with correct distilled dimension
+                    bg_src_feats = np.zeros((0, ee_feats_distilled.shape[1]))
+        
+        # Store object and background data for separate return
+        if use_obj_bg_seg:
+            # Determine which features to use (distilled or raw)
+            if distill_dino:
+                ee_feats_to_use = ee_feats_distilled
+            else:
+                ee_feats_to_use = ee_feats.detach().cpu().numpy()
+            
+            # Add end-effector features to both object and background
+            # obj_with_ee_pts = np.concatenate([obj_src_pts, ee_pcd], axis=0) if obj_src_pts.shape[0] > 0 else ee_pcd
+            obj_with_ee_pts = obj_src_pts if obj_src_pts.shape[0] > 0 else np.zeros((0, 3))
+            obj_with_ee_feats = np.concatenate([obj_src_feats, ee_feats_to_use], axis=0) if obj_src_feats.shape[0] > 0 else ee_feats_to_use
+            bg_with_ee_pts = np.concatenate([bg_src_pts, ee_pcd], axis=0) if bg_src_pts.shape[0] > 0 else ee_pcd
+            bg_with_ee_feats = np.concatenate([bg_src_feats, ee_feats_to_use], axis=0) if bg_src_feats.shape[0] > 0 else ee_feats_to_use
+            
+            # Transform to reference frame
+            if reference_frame == 'robot':
+                obj_with_ee_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([obj_with_ee_pts, np.ones((obj_with_ee_pts.shape[0], 1))], axis=-1).T).T[:, :3]
+                bg_with_ee_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([bg_with_ee_pts, np.ones((bg_with_ee_pts.shape[0], 1))], axis=-1).T).T[:, :3]
+            
+            obj_pts_ls.append(obj_with_ee_pts.astype(np.float32))
+            obj_feats_ls.append(obj_with_ee_feats.astype(np.float32))
+            bg_pts_ls.append(bg_with_ee_pts.astype(np.float32))
+            bg_feats_ls.append(bg_with_ee_feats.astype(np.float32))
         
         try:
             assert aggr_src_pts.shape[0] == N_total
-            assert aggr_feats.shape[0] == N_total if use_dino else True
+            assert aggr_feats.shape[0] == N_total if (use_dino or distill_dino or use_obj_bg_seg) else True
         except:
             raise RuntimeError('aggr_src_pts.shape[0] != N_total')
         
@@ -332,9 +418,12 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         
         # save to list
         aggr_src_pts_ls.append(aggr_src_pts.astype(np.float32))
-        aggr_feats_ls.append(aggr_feats.astype(np.float32) if (use_dino or distill_dino) else None)
+        aggr_feats_ls.append(aggr_feats.astype(np.float32) if (use_dino or distill_dino or use_obj_bg_seg) else None)
     
-    return aggr_src_pts_ls, aggr_feats_ls
+    if use_obj_bg_seg:
+        return aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls
+    else:
+        return aggr_src_pts_ls, aggr_feats_ls
 
 # basically the same as d3fields_proc, but to keep the original code clean, we create a new function
 def d3fields_proc_for_vis(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq,

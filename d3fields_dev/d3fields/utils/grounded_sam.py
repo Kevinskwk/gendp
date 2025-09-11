@@ -431,7 +431,8 @@ def grounded_instance_sam_new_ver(image,
     )
     labels = ['background']
     for query_i in detections.class_id.tolist():
-        labels.append(text_prompts[query_i])
+        if query_i is not None:
+            labels.append(text_prompts[query_i])
     
     # add detections mask for background
     if detections.mask.shape[0] == 0:
