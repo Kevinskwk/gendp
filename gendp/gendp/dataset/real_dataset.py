@@ -15,6 +15,7 @@ import concurrent.futures
 import h5py
 import cv2
 import open3d as o3d
+import scipy.spatial.transform as st
 from filelock import FileLock
 from threadpoolctl import threadpool_limits
 from omegaconf import OmegaConf
@@ -30,6 +31,7 @@ from gendp.common.kinematics_utils import KinHelper
 from gendp.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
 from gendp.common.data_utils import d3fields_proc, _convert_actions, load_dict_from_hdf5, modify_hdf5_from_dict
+from gendp.common.tactile_utils import TactileProcessor
 from gendp.dataset.base_dataset import BaseImageDataset
 from gendp.codecs.imagecodecs_numcodecs import register_codecs, Jpeg2k
 from gendp.common.normalize_util import (
@@ -43,6 +45,103 @@ from d3fields.fusion import Fusion
 from d3fields.utils.my_utils import get_current_YYYY_MM_DD_hh_mm_ss_ms
 
 register_codecs()
+
+def transform_ee_pose_for_contact_field(ee_pos, ee_rpy):
+    """
+    Transform real-world end-effector pose to contact field model format.
+    Applies z-translation of -0.14 and z-rotation of 45 degrees.
+    
+    Args:
+        ee_pos: End-effector position (3D array)
+        ee_rpy: End-effector roll-pitch-yaw (3D array)
+    
+    Returns:
+        Transformed pose as 7D array [x, y, z, qx, qy, qz, qw]
+    """
+    # Apply z-translation of -0.14
+    transformed_pos = ee_pos.copy()
+    transformed_pos[2] -= 0.14
+    
+    # Convert RPY to rotation
+    current_rot = st.Rotation.from_euler('xyz', ee_rpy)
+    
+    # Apply z-rotation of 45 degrees
+    z_rotation = st.Rotation.from_euler('z', np.pi/4)  # 45 degrees in radians
+    transformed_rot = z_rotation * current_rot
+    
+    # Convert back to quaternion in [x, y, z, w] format
+    transformed_quat = transformed_rot.as_quat()
+    
+    # Return as 7D pose [x, y, z, qx, qy, qz, qw]
+    return np.concatenate([transformed_pos, transformed_quat])
+
+
+def get_tactile_marker_coordinates(ee_pose_7d, gripper_pos):
+    """
+    Generate tactile marker coordinates based on end-effector pose.
+    
+    Args:
+        ee_pose_7d: 7D end-effector pose [x, y, z, qx, qy, qz, qw]
+        gripper_pos: Gripper position (scalar, represents gripper opening)
+    
+    Returns:
+        tuple: (tactile_coord_left, tactile_coord_right)
+            Each is a numpy array of shape (7, 9, 3) representing marker positions
+    """
+    # Extract position and rotation from ee_pose
+    ee_pos = ee_pose_7d[:3]
+    ee_quat = ee_pose_7d[3:7]  # [qx, qy, qz, qw]
+    
+    # Convert quaternion to rotation matrix
+    rotation = st.Rotation.from_quat(ee_quat)
+    
+    # Tactile sensor dimensions - NOTE: Model expects (7, 9, 3) format
+    rows = 9  # Along z-axis of end-effector frame  
+    cols = 7  # Along x-axis of end-effector frame
+    marker_spacing = 0.002  # 2mm between markers
+    
+    # Calculate gripper offset (left: negative y, right: positive y)
+    gripper_offset = gripper_pos / 2.0
+    
+    # Generate base marker grid in end-effector frame
+    # X-axis: cols markers centered around 0
+    x_positions = np.linspace(-(cols-1)*marker_spacing/2, (cols-1)*marker_spacing/2, cols)
+    # Z-axis: rows markers centered around 0  
+    z_positions = np.linspace(-(rows-1)*marker_spacing/2, (rows-1)*marker_spacing/2, rows)
+    
+    # Create meshgrid for marker positions - Note: X should be first dimension for (7, 9) format
+    X, Z = np.meshgrid(x_positions, z_positions, indexing='ij')  # Use 'ij' indexing for (7, 9) format
+    
+    # Left tactile sensor (negative y offset) - Shape: (7, 9, 3)
+    left_markers_local = np.zeros((cols, rows, 3))
+    left_markers_local[:, :, 0] = X  # x positions
+    left_markers_local[:, :, 1] = -gripper_offset  # y offset (negative for left)
+    left_markers_local[:, :, 2] = Z  # z positions
+    
+    # Right tactile sensor (positive y offset) - Shape: (7, 9, 3)
+    right_markers_local = np.zeros((cols, rows, 3))
+    right_markers_local[:, :, 0] = X  # x positions
+    right_markers_local[:, :, 1] = gripper_offset  # y offset (positive for right)
+    right_markers_local[:, :, 2] = Z  # z positions
+    
+    # Transform marker positions to world frame
+    left_markers_world = np.zeros_like(left_markers_local)
+    right_markers_world = np.zeros_like(right_markers_local)
+    
+    for i in range(cols):  # Now iterating over cols (7)
+        for j in range(rows):  # Now iterating over rows (9)
+            # Left sensor
+            local_pos_left = left_markers_local[i, j, :]
+            world_pos_left = rotation.apply(local_pos_left) + ee_pos
+            left_markers_world[i, j, :] = world_pos_left
+            
+            # Right sensor
+            local_pos_right = right_markers_local[i, j, :]
+            world_pos_right = rotation.apply(local_pos_right) + ee_pos
+            right_markers_world[i, j, :] = world_pos_right
+    
+    return left_markers_world, right_markers_world
+
 
 def normalizer_from_stat(stat):
     max_abs = np.maximum(stat['max'].max(), np.abs(stat['min']).max())
@@ -68,6 +167,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     depth_keys = list()
     lowdim_keys = list()
     spatial_keys = list()
+    tactile_keys = list()
     # construct compressors and chunks
     obs_shape_meta = shape_meta['obs']
     trim_tail = shape_meta['trim_tail']
@@ -83,6 +183,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         elif type == 'spatial':
             spatial_keys.append(key)
             max_pts_num = obs_shape_meta[key]['shape'][1]
+        elif type == 'tactile':
+            tactile_keys.append(key)
     
     root = zarr.group(store)
     data_group = root.require_group('data', overwrite=True)
@@ -100,6 +202,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     rgb_data_dict = dict()
     depth_data_dict = dict()
     spatial_data_dict = dict()
+    tactile_data_dict = dict()
+    tactile_coord_dict = dict()  # Store 3D marker coordinates for tactile sensors
+    tactile_processors = dict()  # Store TactileProcessor instances for each tactile key
     for epi_idx in tqdm(episodes_idx, desc=f"Loading episodes"):
         dataset_path = os.path.join(dataset_dir, f'episode_{epi_idx}.hdf5')
         feats_per_epi = list() # save it separately to avoid OOM
@@ -137,27 +242,27 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 if key not in rgb_data_dict:
                     rgb_data_dict[key] = list()
                 if 'tactile' in key:
-                    imgs = file['observations']['tactile'][key][:episode_length]
+                    frames = file['observations']['tactile'][key][:episode_length]
                 else:
-                    imgs = file['observations']['images'][key][:episode_length]
+                    frames = file['observations']['images'][key][:episode_length]
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
-                resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in imgs]
-                imgs = np.stack(resize_imgs, axis=0)
-                assert imgs[0].shape == (h,w,c)
-                rgb_data_dict[key].append(imgs)
+                resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in frames]
+                frames = np.stack(resize_imgs, axis=0)
+                assert frames[0].shape == (h,w,c)
+                rgb_data_dict[key].append(frames)
             
             for key in depth_keys:
                 if key not in depth_data_dict:
                     depth_data_dict[key] = list()
-                imgs = file['observations']['images'][key][:episode_length]
+                frames = file['observations']['images'][key][:episode_length]
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
-                resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in imgs]
-                imgs = np.stack(resize_imgs, axis=0)[..., None]
-                imgs = np.clip(imgs, 0, 1000).astype(np.uint16)
-                assert imgs[0].shape == (h,w,c)
-                depth_data_dict[key].append(imgs)
+                resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in frames]
+                frames = np.stack(resize_imgs, axis=0)[..., None]
+                frames = np.clip(frames, 0, 1000).astype(np.uint16)
+                assert frames[0].shape == (h,w,c)
+                depth_data_dict[key].append(frames)
             
             for key in spatial_keys:
                 assert key == 'd3fields' # only support d3fields for now
@@ -178,12 +283,12 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 color_seq = np.stack([file['observations']['images'][f'{k}_color'][:episode_length] for k in view_keys], axis=1) # (T, V, H ,W, C)
                 depth_seq = np.stack([file['observations']['images'][f'{k}_depth'][:episode_length] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
                 extri_seq = np.stack([file['observations']['images'][f'{k}_extrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 4, 4)
-                # extri_seq[:, 1, 1, 3] -= 0.02  # manual offset
                 intri_seq = np.stack([file['observations']['images'][f'{k}_intrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 3, 3)
                 qpos_seq = file['observations']['full_joint_pos'][:episode_length] if 'full_joint_pos' in file['observations'] else file['observations']['joint_pos'][:-trim_tail] # (T, -1)
                 if 'robot_base_pose_in_world' in file['observations']:
                     robot_base_pose_in_world_seq = file['observations']['robot_base_pose_in_world'][:episode_length] # (T, 4, 4)
                 else:
+                    print('using default robot base pose!')
                     robot_base_pose_in_world = np.array([[ 1.  ,  0.  ,  0.  , -0.52],
                                                          [ 0.  ,  1.  ,  0.  , -0.06],
                                                          [ 0.  ,  0.  ,  1.  ,  0.03],
@@ -227,6 +332,89 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 os.system(f'mkdir -p {os.path.join(dataset_dir, f"feats{feats_prefix}")}')
                 with h5py.File(os.path.join(dataset_dir, f'feats{feats_prefix}', f'episode_{epi_idx}.hdf5'), 'w') as file:
                     file.create_dataset('feats', data=feats_per_epi, dtype=np.float32)
+
+            for key in tactile_keys:
+                if key not in tactile_data_dict:
+                    tactile_data_dict[key] = list()
+                
+                frames = file['observations']['tactile'][key][:episode_length]
+                setting = shape_meta['obs'][key]['setting']
+                
+                # Get robot pose data for 3D marker coordinate computation
+                ee_poses = file['observations']['ee_pose'][:episode_length]  # (T, 8) [x,y,z,qx,qy,qz,qw,gripper]
+                
+                # Initialize TactileProcessor for this key if not already done
+                if key not in tactile_processors:
+                    tactile_processors[key] = TactileProcessor(
+                        width=320,
+                        height=240,
+                        marker_config=setting,
+                        use_gpu=True
+                    )
+                
+                # Process frames using TactileProcessor to get force field data
+                force_fields = []
+                tactile_coords = []
+                
+                for frame_idx, frame in enumerate(frames):
+                    # Get force field using TactileProcessor.process_frame
+                    # This returns force_field (N*M, 3) with [current_x, current_y, depth]
+                    # and initial_positions (N*M, 2) with [initial_x, initial_y]
+                    force_field = tactile_processors[key].process_frame(frame)  # (M, N, 3)
+                    force_fields.append(force_field)
+                    
+                    # Get 3D marker coordinates using robot pose
+                    ee_pose_8d = ee_poses[frame_idx]  # [x,y,z,qx,qy,qz,qw,gripper]
+                    ee_pos = ee_pose_8d[:3]  # [x, y, z]
+                    ee_quat = ee_pose_8d[3:7]  # [qx, qy, qz, qw]
+                    gripper_pos = ee_pose_8d[7] if len(ee_pose_8d) > 7 else 0.05  # Default gripper width
+                    
+                    # Transform the pose for contact field model
+                    # Apply z-translation of -0.14
+                    transformed_pos = ee_pos.copy()
+                    transformed_pos[2] -= 0.14
+                    
+                    # Apply z-rotation of 45 degrees
+                    current_rot = st.Rotation.from_quat(ee_quat)
+                    z_rotation = st.Rotation.from_euler('z', np.pi/4)  # 45 degrees in radians
+                    transformed_rot = z_rotation * current_rot
+                    transformed_quat = transformed_rot.as_quat()
+                    
+                    # Create 7D pose for marker coordinate calculation
+                    ee_pose_7d = np.concatenate([transformed_pos, transformed_quat])
+                    
+                    # Get 3D marker coordinates for left and right sensors
+                    if 'left' in key:
+                        tactile_coord_left, _ = get_tactile_marker_coordinates(ee_pose_7d, gripper_pos)
+                        tactile_coords.append(tactile_coord_left)  # (7, 9, 3)
+                    elif 'right' in key:
+                        _, tactile_coord_right = get_tactile_marker_coordinates(ee_pose_7d, gripper_pos)
+                        tactile_coords.append(tactile_coord_right)  # (7, 9, 3)
+                    else:
+                        # If not specified as left/right, assume it's left sensor
+                        tactile_coord_left, _ = get_tactile_marker_coordinates(ee_pose_7d, gripper_pos)
+                        tactile_coords.append(tactile_coord_left)  # (7, 9, 3)
+                
+                # Stack the processed data
+                force_field_data = np.stack(force_fields, axis=0)  # (T, M, N, 3)
+                tactile_coord_data = np.stack(tactile_coords, axis=0)  # (T, 7, 9, 3)
+                
+                print(f'{key} force field shape:', force_field_data.shape)
+                print(f'{key} tactile coord shape:', tactile_coord_data.shape)
+                
+                # Store force field data with "_force_field" suffix
+                force_field_key = f"{key}_force_field"
+                if force_field_key not in tactile_data_dict:
+                    tactile_data_dict[force_field_key] = list()
+                tactile_data_dict[force_field_key].append(force_field_data)
+                
+                # Store 3D marker coordinates with "_coord" suffix
+                coord_key = f"{key}_coord"
+                if coord_key not in tactile_coord_dict:
+                    tactile_coord_dict[coord_key] = list()
+                tactile_coord_dict[coord_key].append(tactile_coord_data)
+
+
         if fusion is not None:
             fusion.clear_xmem_memory()
     
@@ -331,6 +519,40 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             else:
                 data[d_i] = np.pad(d, ((0,max_pts_num-d.shape[0]),(0,0)), mode='constant')
         data = np.stack(data, axis=0) # (T, N, 1027)
+        _ = data_group.array(
+            name=key,
+            data=data,
+            shape=data.shape,
+            chunks=(1,) + data.shape[1:],
+            compressor=None,
+            dtype=data.dtype
+        )
+
+    # dump tactile data
+    print('Dumping tactile data')
+    for key, data in tactile_data_dict.items():
+        # pad to max_pts_num
+        # for d_i, d in enumerate(data):
+        #     if d.shape[0] > max_pts_num:
+        #         data[d_i] = d[:max_pts_num]
+        #     else:
+        #         data[d_i] = np.pad(d, ((0,max_pts_num-d.shape[0]),(0,0)), mode='constant')
+        data = np.concatenate(data, axis=0)
+        print('data shape', data.shape)
+        _ = data_group.array(
+            name=key,
+            data=data,
+            shape=data.shape,
+            chunks=(1,) + data.shape[1:],
+            compressor=None,
+            dtype=data.dtype
+        )
+
+    # dump tactile coordinate data
+    print('Dumping tactile coordinate data')
+    for key, data in tactile_coord_dict.items():
+        data = np.concatenate(data, axis=0)
+        print(f'{key} coordinate data shape', data.shape)
         _ = data_group.array(
             name=key,
             data=data,
@@ -483,6 +705,8 @@ class RealDataset(BaseImageDataset):
         depth_keys = list()
         lowdim_keys = list()
         spatial_keys = list()
+        tactile_keys = list()
+        tactile_coord_keys = list()  # For 3D tactile marker coordinates
         obs_shape_meta = shape_meta['obs']
         for key, attr in obs_shape_meta.items():
             type = attr.get('type', 'low_dim')
@@ -494,6 +718,17 @@ class RealDataset(BaseImageDataset):
                 lowdim_keys.append(key)
             elif type == 'spatial':
                 spatial_keys.append(key)
+            elif type == 'tactile':
+                tactile_keys.append(key)
+        
+        # Also detect dynamically created tactile coordinate keys
+        for key in self.replay_buffer.keys():
+            if key.endswith('_coord') and any(tkey in key for tkey in tactile_keys):
+                tactile_coord_keys.append(key)
+            # Also add force field keys to tactile_keys if they're not already there
+            elif key.endswith('_force_field') and any(tkey in key for tkey in tactile_keys):
+                if key not in tactile_keys:
+                    tactile_keys.append(key)
         
         # for key in rgb_keys:
         #     replay_buffer[key].compressor.numthreads=1
@@ -516,7 +751,7 @@ class RealDataset(BaseImageDataset):
         key_first_k = dict()
         if n_obs_steps is not None:
             # only take first k obs from images
-            for key in rgb_keys + depth_keys + lowdim_keys + spatial_keys:
+            for key in rgb_keys + depth_keys + lowdim_keys + spatial_keys + tactile_keys:
                 key_first_k[key] = n_obs_steps
 
         self.sampler = SequenceSampler(
@@ -534,6 +769,8 @@ class RealDataset(BaseImageDataset):
         self.depth_keys = depth_keys
         self.lowdim_keys = lowdim_keys
         self.spatial_keys = spatial_keys
+        self.tactile_keys = tactile_keys
+        self.tactile_coord_keys = tactile_coord_keys
         self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
@@ -621,6 +858,19 @@ class RealDataset(BaseImageDataset):
                 normalizer[key] = get_range_normalizer_from_stat(stat, ignore_dim=[0,1,2])
             else:
                 normalizer[key] = get_identity_normalizer_from_stat(stat)
+
+        # tactile
+        for key in self.tactile_keys:
+            B, N, C = self.replay_buffer[key].shape
+            stat = array_to_stats(self.replay_buffer[key][()].reshape(B * N, C))
+            normalizer[key] = get_identity_normalizer_from_stat(stat)
+
+        # tactile coordinates (3D marker positions)
+        for key in self.tactile_coord_keys:
+            B, H, W, C = self.replay_buffer[key].shape  # (T, 7, 9, 3)
+            stat = array_to_stats(self.replay_buffer[key][()].reshape(B * H * W, C))
+            normalizer[key] = get_identity_normalizer_from_stat(stat)
+
         return normalizer
 
     def __len__(self) -> int:
@@ -655,6 +905,15 @@ class RealDataset(BaseImageDataset):
             del sample[key]
         for key in self.spatial_keys:
             obs_dict[key] = np.moveaxis(sample[key][T_slice],1,2).astype(np.float32)
+            del sample[key]
+        for key in self.tactile_keys:
+            obs_dict[key] = np.moveaxis(sample[key][T_slice],1,2).astype(np.float32)
+            del sample[key]
+        for key in self.tactile_coord_keys:
+            # Tactile coordinates have shape (T, 7, 9, 3), reshape to (T, 7*9, 3) for consistency
+            coord_data = sample[key][T_slice].astype(np.float32)  # (T, 7, 9, 3)
+            T, H, W, C = coord_data.shape
+            obs_dict[key] = coord_data.reshape(T, H*W, C)  # (T, 63, 3)
             del sample[key]
 
         data = {

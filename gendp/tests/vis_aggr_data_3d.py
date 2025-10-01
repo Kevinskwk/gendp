@@ -17,7 +17,7 @@ from vis_utils import segment_pointcloud_by_color
 
 
 ### hyper param
-epi_range = [4]
+epi_range = [0]
 vis_robot = False
 vis_action = True
 apply_color_segmentation = True  # Set to True to apply color filtering
@@ -25,21 +25,21 @@ vis_segmented_separately = True  # Set to True to show object and env separately
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
 # data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
-data_dir = f'{curr_dir}/../../data/sim2real_peg'
+data_dir = f'{curr_dir}/../../data/peeler_3dp'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 # cam_keys = ['camera_wrist', 'camera_fixed']
 cam_keys = ['camera_front', 'camera_left', 'camera_right']
-# cam_keys = ['camera_left', 'camera_right']
+# cam_keys = ['camera_front', 'camera_right']
 
 # Color segmentation parameters
 PINK_HUE_RANGE = (0, 100)   # Pink/Magenta range (wraps around)
 PINK_SATURATION_RANGE = (50, 255)   # Pink saturation range (min, max)
 PINK_VALUE_RANGE = (110, 255)        # Pink brightness range (min, max)
 
-PURPLE_HUE_RANGE = (215, 230)  # Purple range
-PURPLE_SATURATION_RANGE = (100, 255)  # Purple saturation range (min, max)
-PURPLE_VALUE_RANGE = (120, 255)       # Purple brightness range (min, max)
+PURPLE_HUE_RANGE = (230, 240)  # Purple range
+PURPLE_SATURATION_RANGE = (50, 200)  # Purple saturation range (min, max)
+PURPLE_VALUE_RANGE = (100, 200)       # Purple brightness range (min, max)
 
 GREEN_HUE_RANGE = (120, 180)  # Green range
 GREEN_SATURATION_RANGE = (30, 255)  # Green saturation range (min, max)
@@ -48,6 +48,10 @@ GREEN_VALUE_RANGE = (100, 255)       # Green brightness range (min, max)
 YELLOW_HUE_RANGE = (0, 100)  # Yellow range
 YELLOW_SATURATION_RANGE = (0, 255)  # Yellow saturation range (min, max)
 YELLOW_VALUE_RANGE = (0, 255)       # Yellow brightness range (min, max)
+
+CUCUMBER_HUE_RANGE = (90, 110)  # Cucumber range
+CUCUMBER_SATURATION_RANGE = (50, 255)  # Cucumber saturation range (min, max)
+CUCUMBER_VALUE_RANGE = (60, 255)       # Cucumber brightness range (min, max)
 
 if 'peg' in data_dir:
     obj_hue_range = PINK_HUE_RANGE
@@ -60,9 +64,9 @@ else:
     obj_hue_range = PURPLE_HUE_RANGE
     obj_saturation_range = PURPLE_SATURATION_RANGE
     obj_value_range = PURPLE_VALUE_RANGE
-    env_hue_range = YELLOW_HUE_RANGE
-    env_saturation_range = YELLOW_SATURATION_RANGE
-    env_value_range = YELLOW_VALUE_RANGE
+    env_hue_range = CUCUMBER_HUE_RANGE
+    env_saturation_range = CUCUMBER_SATURATION_RANGE
+    env_value_range = CUCUMBER_VALUE_RANGE
 
 # Separate spatial boundaries for object and environment
 OBJECT_BOUNDARIES = {
@@ -106,7 +110,7 @@ for i in tqdm(epi_range):
     # add meshes to visualize actions
     if vis_action:
         # init_cart = data_dict['cartesian_action'][0] # (horizon, 7)
-        init_cart = data_dict['observations']['ee_pos'][0]
+        init_cart = data_dict['observations']['ee_pose'][0]
         action_horizon = init_cart.shape[0]
         action_cm = colormaps.get_cmap('plasma')
         action_colors = action_cm(np.linspace(0, 1, init_cart.shape[0], endpoint=True))[:, :3] # (horizon, 3)
@@ -205,7 +209,7 @@ for i in tqdm(epi_range):
             visualizer.update_pcd(pcd_o3d, 'pcd')
         visualizer.update_triangle_mesh('front', tf=np.linalg.inv(extrinsics[0]))
         visualizer.update_triangle_mesh('left', tf=np.linalg.inv(extrinsics[1]))
-        visualizer.update_triangle_mesh('right', tf=np.linalg.inv(extrinsics[2]))
+        visualizer.update_triangle_mesh('right', tf=np.linalg.inv(extrinsics[1]))
 
         # left_finger_pose, right_finger_pose = get_finger_poses(
         #     data_dict['observations']['left_finger_pos'][t],
@@ -225,7 +229,7 @@ for i in tqdm(epi_range):
             t_start = t
             t_end = min(t_start + action_horizon, T)
             # ee_target_pose = data_dict['cartesian_action'][t_start:t_end] # (horizon, 7)
-            ee_target_pose = data_dict['observations']['ee_pos'][t_start:t_end] # (horizon, 7)
+            ee_target_pose = data_dict['observations']['ee_pose'][t_start:t_end] # (horizon, 7)
             ee_target_pose_mat = np.tile(np.eye(4)[None], (t_end - t_start, 1, 1))
             ee_target_pose_mat[:, :3, 3] = ee_target_pose[:, :3]
             ee_target_pose_mat[:, :3, :3] = st.Rotation.from_euler('xyz', ee_target_pose[:, 3:6]).as_matrix()

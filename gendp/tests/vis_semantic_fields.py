@@ -89,8 +89,8 @@ for i in tqdm(epi_range):
         depths = np.stack([data_dict['observations']['images'][f'{cam_key}_depth'][t:t+1] for cam_key in cam_keys], axis=1) / 1000. # (N, H, W)
         intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsics'][t:t+1] for cam_key in cam_keys], axis=1)
         extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t:t+1] for cam_key in cam_keys], axis=1)
-        extrinsics[0, 1, 1, 3] -= 0.02
-        pcd, pcd_feats = d3fields_proc(
+        # extrinsics[0, 1, 1, 3] -= 0.02
+        result = d3fields_proc(
             fusion=fusion,
             shape_meta=shape_meta,
             color_seq=colors,
@@ -100,15 +100,49 @@ for i in tqdm(epi_range):
             robot_base_pose_in_world_seq=robot_base_in_world_seq,
             teleop_robot=kin_helper,
             qpos_seq=data_dict['observations']['full_joint_pos'][t:t+1],
+            exclude_threshold=0.1,
+            use_obj_bg_seg=True,
         )
-        pcd = pcd[0]
-        pcd_feats = pcd_feats[0]
-        pcd = np.linalg.inv(robot_base_in_world) @ np.concatenate([pcd, np.ones((pcd.shape[0], 1))], axis=-1).T
-        pcd = pcd.T[:, :3]
-        feats_cmap = colormaps.get_cmap('viridis')
-        pcd_colors = feats_cmap(pcd_feats[:, 0])[:, :3]
-        pcd = np2o3d(pcd, pcd_colors)
-        visualizer.update_pcd(pcd, 'pcd')
+        
+        # Unpack the returned values
+        if len(result) == 6:
+            pcd, pcd_feats, obj_pcd, obj_feats, bg_pcd, bg_feats = result
+            obj_pcd = obj_pcd[0]
+            obj_feats = obj_feats[0]
+            bg_pcd = bg_pcd[0]
+            bg_feats = bg_feats[0]
+            
+            # Transform object points to robot frame
+            obj_pcd = np.linalg.inv(robot_base_in_world) @ np.concatenate([obj_pcd, np.ones((obj_pcd.shape[0], 1))], axis=-1).T
+            obj_pcd = obj_pcd.T[:, :3]
+            
+            # Transform background points to robot frame
+            bg_pcd = np.linalg.inv(robot_base_in_world) @ np.concatenate([bg_pcd, np.ones((bg_pcd.shape[0], 1))], axis=-1).T
+            bg_pcd = bg_pcd.T[:, :3]
+            
+            # Use different colormaps for object and background
+            obj_cmap = colormaps.get_cmap('plasma')  # Red/Purple colormap for object
+            bg_cmap = colormaps.get_cmap('viridis')  # Blue/Green colormap for background
+            
+            obj_colors = obj_cmap(obj_feats[:, 0])[:, :3]
+            bg_colors = bg_cmap(bg_feats[:, 0])[:, :3]
+            
+            obj_pcd_o3d = np2o3d(obj_pcd, obj_colors)
+            bg_pcd_o3d = np2o3d(bg_pcd, bg_colors)
+            
+            visualizer.update_pcd(obj_pcd_o3d, 'obj_pcd')
+            # visualizer.update_pcd(bg_pcd_o3d, 'bg_pcd')
+        else:
+            # Fallback to original behavior if segmentation is not available
+            pcd, pcd_feats = result
+            pcd = pcd[0]
+            pcd_feats = pcd_feats[0]
+            pcd = np.linalg.inv(robot_base_in_world) @ np.concatenate([pcd, np.ones((pcd.shape[0], 1))], axis=-1).T
+            pcd = pcd.T[:, :3]
+            feats_cmap = colormaps.get_cmap('viridis')
+            pcd_colors = feats_cmap(pcd_feats[:, 0])[:, :3]
+            pcd = np2o3d(pcd, pcd_colors)
+            visualizer.update_pcd(pcd, 'pcd')
         
         # visualize robot
         if vis_robot:
