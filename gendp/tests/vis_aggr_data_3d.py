@@ -17,15 +17,15 @@ from vis_utils import segment_pointcloud_by_color
 
 
 ### hyper param
-epi_range = [0]
-vis_robot = False
+epi_range = [1]
+vis_robot = True
 vis_action = True
-apply_color_segmentation = True  # Set to True to apply color filtering
+apply_color_segmentation = False  # Set to True to apply color filtering
 vis_segmented_separately = True  # Set to True to show object and env separately
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
 # data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
-data_dir = f'{curr_dir}/../../data/peeler_3dp'
+data_dir = f'{curr_dir}/../../data/scrap_tool_10'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 # cam_keys = ['camera_wrist', 'camera_fixed']
@@ -83,7 +83,7 @@ ENV_BOUNDARIES = {
     'x_upper': 0.7,
     'y_lower': -0.2,
     'y_upper': 0.2,
-    'z_lower': 0.01,
+    'z_lower': -0.1,
     'z_upper': 0.1,
 }
 
@@ -141,7 +141,7 @@ for i in tqdm(epi_range):
             'x_upper': 0.7,
             'y_lower': -0.2,
             'y_upper': 0.2,
-            'z_lower': 0.01,
+            'z_lower': -0.03,
             'z_upper': 0.5,
         }
         # boundaries = {

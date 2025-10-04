@@ -51,22 +51,30 @@ def visualize_calibration_result(iterative=False, realtime=False):
             time.sleep(0.1)
 
         # Setup camera extrinsics
-        cam_front_extri = get_extrinsic([0.8489497156928908, -0.22562991111452887, 0.3314941131288296],
-                                    [-0.7504308292249032, -0.41235638789732665, 0.2876578890353489, 0.4290323050596778])
-        cam_left_extri = get_extrinsic(
-            [0.31669299363755186, -0.27395822263290947, 0.12707501874264605],
-            [-0.7435734326325784, 0.20794098553588683, -0.17857879530445217, 0.6098923763132142])
-        cam_right_extri = get_extrinsic([0.3281305272599807, 0.5200284215384193, 0.12379313280393066],
-                                    [-0.14095227077856376, 0.7139867190308669, -0.6725150321346475, 0.13445800073940598])
+        cam_front_extri = get_extrinsic([0.8425395551524414, -0.23980856223114248, 0.32430529343304803],
+                                    # [-0.7436835728382364, -0.42678910445821283, 0.2849678185522488, 0.42846137071605955])
+                                    [-0.7510188, -0.41374503, 0.27744673, 0.43336949])
+        cam_left_extri = get_extrinsic([0.3015062294276259, -0.2731493583749173, 0.12464828611110033],
+                                    # [-0.7461453297553833, 0.22962820091980163, -0.20344921784453623, 0.5908861582276331])
+                                    [-0.75190061, 0.21001771, -0.1879119, 0.59600936])
+        cam_right_extri = get_extrinsic([0.33561416964601004, 0.5235239893129717, 0.1137736727084544],
+                                    [-0.14008225307645683, 0.7060390316876065, -0.6806702770786354, 0.13628581000362547])
         extrinsics = np.stack([cam_front_extri, cam_left_extri, cam_right_extri])
 
         # Setup static geometries
         origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-        ee_pose = ([0.421625, 0.012471, 0.287905-0.14-0.14], [0.00, 0.00, 0.0])
+        ee_pose = ([0.392823, 0.015103, 0.3365602-0.14], [3.14159, 0.00, 0.00])
         ee_rot = st.Rotation.from_euler('xyz', ee_pose[1]).as_matrix()
         ee = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
         ee.rotate(ee_rot, center=(0, 0, 0))
         ee.translate(ee_pose[0])
+        ee_1 = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        ee_1_rot = st.Rotation.from_euler('xyz', [0.00, 0.00, 1.5708]).as_matrix()
+        ee_1.rotate(ee_1_rot, center=(0, 0, 0))
+        ee_1.translate(ee_pose[0])
+        floor = o3d.geometry.TriangleMesh.create_box(width=2.0, height=2.0, depth=0.01)
+        floor.translate([-1.0, -1.0, -0.01])
+        floor.paint_uniform_color([0.8, 0.8, 0.8])
 
         if realtime:
             # Setup visualizer for real-time display
@@ -76,7 +84,8 @@ def visualize_calibration_result(iterative=False, realtime=False):
             # Add static geometries
             vis.add_geometry(origin)
             vis.add_geometry(ee)
-            
+            vis.add_geometry(ee_1)
+
             # Initialize point cloud geometry
             pcd = o3d.geometry.PointCloud()
             vis.add_geometry(pcd)
@@ -93,7 +102,8 @@ def visualize_calibration_result(iterative=False, realtime=False):
                     intrinsics = np.stack(value['intrinsics'] for value in out.values())
                     
                     # Generate new point cloud
-                    new_pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=False, boundaries=boundaries)
+                    new_pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=True, boundaries=boundaries)
+                    print(f"Current point cloud has {len(new_pcd.points)} points after downsampling.")
                     
                     # Update point cloud geometry
                     pcd.points = new_pcd.points
@@ -120,10 +130,11 @@ def visualize_calibration_result(iterative=False, realtime=False):
             if iterative:
                 for i in range(colors.shape[0]):
                     pcd = aggr_point_cloud_from_data(colors=colors[i:i+1], depths=depths[i:i+1], Ks=intrinsics[i:i+1], poses=extrinsics[i:i+1], downsample=False, boundaries=boundaries)
-                    o3d.visualization.draw_geometries([pcd, origin, ee])
+                    o3d.visualization.draw_geometries([pcd, origin, ee, ee_1, floor])
 
-            pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=False, boundaries=boundaries)
-            o3d.visualization.draw_geometries([pcd, origin, ee])
+            pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=True, boundaries=boundaries)
+            print(f"Final point cloud has {len(pcd.points)} points after downsampling.")
+            o3d.visualization.draw_geometries([pcd, origin, ee, ee_1, floor])
 
             # print(np.asarray(pcd.points).shape)
             # np.save('obj_pcd/toilet_paper.npy', arr=np.asarray(pcd.points))

@@ -19,7 +19,7 @@ vis_robot = True
 vis_action = True
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
-data_dir = f'{curr_dir}/../../data/peeler_3dp'
+data_dir = f'{curr_dir}/../../data/scrap_tool_10'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 cam_keys = ['camera_front', 'camera_left', 'camera_right']
@@ -32,7 +32,9 @@ shape_meta = {
         'reference_frame': 'world',
         'distill_dino': True,
         # 'distill_obj': 'pencil',
-        'distill_obj': 'peeler',
+        'distill_obj': 'scraper',
+        # TODO: fix query text
+        # 'query_text': 'a 3D printed scraper tool',
         # 'view_keys': ['left_bottom_view', 'right_bottom_view', 'left_top_view', 'right_top_view'],
         'view_keys': ['front', 'left', 'right'],
         'N_gripper': 400,
@@ -43,12 +45,12 @@ shape_meta = {
             # 'y_upper': 0.5,
             # 'z_lower': 0.01,
             # 'z_upper': 0.5
-            'x_lower': 0.3,
-            'x_upper': 0.8,
-            'y_lower': -0.3,
-            'y_upper': 0.3,
-            'z_lower': 0.03,
-            'z_upper': 0.7,
+            'x_lower': 0.4,
+            'x_upper': 0.7,
+            'y_lower': -0.2,
+            'y_upper': 0.2,
+            'z_lower': -0.03,
+            'z_upper': 0.5,
         },
         'resize_ratio': 0.5
     }
@@ -89,7 +91,6 @@ for i in tqdm(epi_range):
         depths = np.stack([data_dict['observations']['images'][f'{cam_key}_depth'][t:t+1] for cam_key in cam_keys], axis=1) / 1000. # (N, H, W)
         intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsics'][t:t+1] for cam_key in cam_keys], axis=1)
         extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t:t+1] for cam_key in cam_keys], axis=1)
-        # extrinsics[0, 1, 1, 3] -= 0.02
         result = d3fields_proc(
             fusion=fusion,
             shape_meta=shape_meta,
@@ -100,7 +101,7 @@ for i in tqdm(epi_range):
             robot_base_pose_in_world_seq=robot_base_in_world_seq,
             teleop_robot=kin_helper,
             qpos_seq=data_dict['observations']['full_joint_pos'][t:t+1],
-            exclude_threshold=0.1,
+            exclude_threshold=0.01,
             use_obj_bg_seg=True,
         )
         
@@ -121,17 +122,17 @@ for i in tqdm(epi_range):
             bg_pcd = bg_pcd.T[:, :3]
             
             # Use different colormaps for object and background
-            obj_cmap = colormaps.get_cmap('plasma')  # Red/Purple colormap for object
-            bg_cmap = colormaps.get_cmap('viridis')  # Blue/Green colormap for background
+            obj_cmap = colormaps.get_cmap('viridis')  # Red/Purple colormap for object
+            bg_cmap = colormaps.get_cmap('Reds')  # Blue/Green colormap for background
             
-            obj_colors = obj_cmap(obj_feats[:, 0])[:, :3]
-            bg_colors = bg_cmap(bg_feats[:, 0])[:, :3]
+            obj_colors = obj_cmap(obj_feats[:, 1])[:, :3]
+            bg_colors = bg_cmap(bg_feats[:, 1])[:, :3]
             
             obj_pcd_o3d = np2o3d(obj_pcd, obj_colors)
             bg_pcd_o3d = np2o3d(bg_pcd, bg_colors)
             
             visualizer.update_pcd(obj_pcd_o3d, 'obj_pcd')
-            # visualizer.update_pcd(bg_pcd_o3d, 'bg_pcd')
+            visualizer.update_pcd(bg_pcd_o3d, 'bg_pcd')
         else:
             # Fallback to original behavior if segmentation is not available
             pcd, pcd_feats = result

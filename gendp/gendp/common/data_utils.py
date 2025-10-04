@@ -164,7 +164,8 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     distill_dino = shape_meta['info']['distill_dino'] if 'distill_dino' in shape_meta['info'] else False
     distill_obj = shape_meta['info']['distill_obj'] if 'distill_obj' in shape_meta['info'] else False
     # env_obj = shape_meta['info']['env_obj'] if 'env_obj' in shape_meta['info'] else False
-    query_texts = [distill_obj] #, env_obj]
+    # query_texts = [distill_obj] #, env_obj]
+    query_texts = [shape_meta['info']['query_text'] if 'query_text' in shape_meta['info'] else distill_obj]
     query_thresholds = [0.2] #, 0.2]
     if "N_gripper" in shape_meta['info']:
         N_gripper = shape_meta['info']['N_gripper']
@@ -379,18 +380,19 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             
             # Add end-effector features to both object and background
             # obj_with_ee_pts = np.concatenate([obj_src_pts, ee_pcd], axis=0) if obj_src_pts.shape[0] > 0 else ee_pcd
-            obj_with_ee_pts = obj_src_pts if obj_src_pts.shape[0] > 0 else np.zeros((0, 3))
-            obj_with_ee_feats = np.concatenate([obj_src_feats, ee_feats_to_use], axis=0) if obj_src_feats.shape[0] > 0 else ee_feats_to_use
+            # obj_with_ee_feats = np.concatenate([obj_src_feats, ee_feats_to_use], axis=0) if obj_src_feats.shape[0] > 0 else ee_feats_to_use
+            obj_pts = obj_src_pts if obj_src_pts.shape[0] > 0 else np.zeros((0, 3))
+            obj_feats = obj_src_feats if obj_src_feats.shape[0] > 0 else np.zeros((0, ee_feats_to_use.shape[1]))
             bg_with_ee_pts = np.concatenate([bg_src_pts, ee_pcd], axis=0) if bg_src_pts.shape[0] > 0 else ee_pcd
             bg_with_ee_feats = np.concatenate([bg_src_feats, ee_feats_to_use], axis=0) if bg_src_feats.shape[0] > 0 else ee_feats_to_use
             
             # Transform to reference frame
             if reference_frame == 'robot':
-                obj_with_ee_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([obj_with_ee_pts, np.ones((obj_with_ee_pts.shape[0], 1))], axis=-1).T).T[:, :3]
+                obj_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([obj_pts, np.ones((obj_pts.shape[0], 1))], axis=-1).T).T[:, :3]
                 bg_with_ee_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([bg_with_ee_pts, np.ones((bg_with_ee_pts.shape[0], 1))], axis=-1).T).T[:, :3]
             
-            obj_pts_ls.append(obj_with_ee_pts.astype(np.float32))
-            obj_feats_ls.append(obj_with_ee_feats.astype(np.float32))
+            obj_pts_ls.append(obj_pts.astype(np.float32))
+            obj_feats_ls.append(obj_feats.astype(np.float32))
             bg_pts_ls.append(bg_with_ee_pts.astype(np.float32))
             bg_feats_ls.append(bg_with_ee_feats.astype(np.float32))
         

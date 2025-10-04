@@ -2,11 +2,11 @@ import sys
 import cv2
 import numpy as np
 
-sys.path.append('/home/showlab/gendp/GelsightKCL')
+sys.path.append('/home/kevin/gendp/GelsightKCL')
 from A_utility import marker_center #, process_frame
 import find_marker
 
-sys.path.append("/home/showlab/gendp/gsrobotics")
+sys.path.append("/home/kevin/gendp/gsrobotics")
 from utilities.reconstruction import Reconstruction3D
 
 """ example setting:
