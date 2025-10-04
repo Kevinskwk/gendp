@@ -10,7 +10,7 @@ asciitree==0.3.3
 asttokens==3.0.0
 atomics==1.0.3
 attrs==25.3.0
-av==14.4.0
+av #==14.4.0  # use latest version to avoid conflict with opencv
 beautifulsoup4==4.13.4
 blinker==1.9.0
 boto3==1.38.21

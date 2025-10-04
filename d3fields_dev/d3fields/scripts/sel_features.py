@@ -3,9 +3,6 @@ import os
 from typing import Dict, List
 
 import cv2
-# starting named window before importing torchvision else it may freeze on some systems
-# https://discuss.pytorch.org/t/compatibility-issues-between-opencv-and-torchvision/209375
-cv2.namedWindow("test", cv2.WINDOW_NORMAL)
 import numpy as np
 import torch
 import torch.nn.functional as F

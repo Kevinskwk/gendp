@@ -1,4 +1,4 @@
-conda create -f conda_environment.yaml
+mamba env create -f conda_environment_5090.yaml
 conda activate gendp
 
 conda install nvidia/label/cuda-12.8.0::cuda-toolkit
