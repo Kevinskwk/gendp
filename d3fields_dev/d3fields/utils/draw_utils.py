@@ -114,15 +114,15 @@ def draw_correspondence(img0, img1, kps0, kps1, matches=None, colors=None, max_d
 
     return out_img
 
-def draw_keypoints(img,kps,colors=None,radius=2,thickness=-1):
-    out_img=img.copy()
+def draw_keypoints(img, kps, colors=None, radius=2, thickness=-1):
+    out_img = img.copy()
     for pi, pt in enumerate(kps):
         pt = np.round(pt).astype(np.int32)
         if colors is not None:
-            color=[int(c) for c in colors[pi]]
-            cv2.circle(out_img, tuple(pt), radius, color, thickness, cv2.FILLED)
+            color = [int(c) for c in colors[pi]]
+            cv2.circle(out_img, tuple(pt), radius, color, thickness)  # Remove cv2.FILLED
         else:
-            cv2.circle(out_img, tuple(pt), radius, (0,255,0), thickness)
+            cv2.circle(out_img, tuple(pt), radius, (0, 255, 0), thickness)
     return out_img
 
 def draw_epipolar_line(F, img0, img1, pt0, color):

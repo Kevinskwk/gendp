@@ -1354,6 +1354,11 @@ class Fusion():
             src_pts_list = []
             masked_pts = pcd_tensor[dist_mask & out['valid_mask']]
             
+            # Check if there are any valid points to sample from
+            if masked_pts.shape[0] == 0:
+                # Create a single dummy point to maintain shape
+                masked_pts = torch.zeros((1, 3), device=self.device, dtype=self.dtype)
+            
             # sample_pts, sample_idx, _ = fps_np(masked_pts.detach().cpu().numpy(), N, init_idx=init_idx)
             
             # batch = torch.zeros((masked_pts.shape[0],), dtype=torch.long, device=self.device)
