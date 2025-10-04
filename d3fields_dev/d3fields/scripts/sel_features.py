@@ -3,6 +3,9 @@ import os
 from typing import Dict, List
 
 import cv2
+# starting named window before importing torchvision else it may freeze on some systems
+# https://discuss.pytorch.org/t/compatibility-issues-between-opencv-and-torchvision/209375
+cv2.namedWindow("test", cv2.WINDOW_NORMAL)
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -20,8 +23,8 @@ feat_dim = 1024  # vitl14
 # feat_dim = 1536 # vitg14
 
 # root_dir = "/workspaces/bdai/projects/dexterous_mobile_manipulation/src/mobile_exp/data"
-root_dir = "/home/manipulation/gendp/d3fields_dev/d3fields"
-obj_type = "peeler"
+root_dir = "/home/kevin/gendp/d3fields_dev/d3fields"
+obj_type = "scraper"
 os.system(f"mkdir -p {root_dir}/sel_feats/{obj_type}")
 
 device = "cuda"
