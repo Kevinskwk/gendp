@@ -73,10 +73,10 @@ def get_real_obs_dict(
                 tool_names[0] = attr['info']['right_tool']
             if 'left_tool' in attr['info']:
                 tool_names[1] = attr['info']['left_tool']
-            color_seq = np.stack([env_obs[f'camera_{k}_color'] for k in view_keys], axis=1) # (T, V, H ,W, C)
-            depth_seq = np.stack([env_obs[f'camera_{k}_depth'] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
-            extri_seq = np.stack([env_obs[f'camera_{k}_extrinsics'] for k in view_keys], axis=1) # (T, V, 4, 4)
-            intri_seq = np.stack([env_obs[f'camera_{k}_intrinsics'] for k in view_keys], axis=1) # (T, V, 3, 3)
+            color_seq = np.stack([env_obs[f'{k}_color'] for k in view_keys], axis=1) # (T, V, H ,W, C)
+            depth_seq = np.stack([env_obs[f'{k}_depth'] for k in view_keys], axis=1) / 1000. # (T, V, H ,W)
+            extri_seq = np.stack([env_obs[f'{k}_extrinsics'] for k in view_keys], axis=1) # (T, V, 4, 4)
+            intri_seq = np.stack([env_obs[f'{k}_intrinsics'] for k in view_keys], axis=1) # (T, V, 3, 3)
             qpos_seq = env_obs['full_joint_pos'] if 'full_joint_pos' in env_obs else env_obs['joint_pos'] # (T, -1)
             if 'robot_base_pose_in_world' in env_obs:
                 robot_base_pose_in_world_seq = env_obs['robot_base_pose_in_world'] # (T, 4, 4)

@@ -56,7 +56,7 @@ GELSIGHT_NAMES = {
     0: 'right'
 }
 
-GELSIGHT_IDS = [20, 22]
+GELSIGHT_IDS = [14, 12]
 
 class RealEnvFranka:
     def __init__(self,
@@ -205,17 +205,28 @@ class RealEnvFranka:
         )
 
         multi_cam_vis = None
+        multi_gs_vis = None
         if enable_multi_cam_vis:
             multi_cam_vis = MultiCameraVisualizer(
                 realsense=realsense,
+                window_name='Multi Cam Vis',
                 row=row,
                 col=col,
                 rgb_to_bgr=False
             )
+            multi_gs_vis = MultiCameraVisualizer(
+                realsense=gelsight,
+                window_name='Multi GS Vis',
+                row=1,
+                col=len(gelsight_ids),
+                rgb_to_bgr=False,
+                # vis_fps=5
+            )
 
         # cube_diag = np.linalg.norm([1, 1, 1])
-        j_init = np.array([0.0702805, -0.90773028, -0.09513126, -2.67802477, -0.0919309, 1.82060218, 0.16051947])
         # j_init = np.array([-0.03173639, -0.24618988, -0.2356476 , -2.3970356 , -0.07736383, 2.19674683, -0.01091733])
+        # j_init = np.array([0.0702805, -0.90773028, -0.09513126, -2.67802477, -0.0919309, 1.82060218, 0.16051947])
+        j_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 1.6146283149719238])
         if not init_joints:
             j_init = None
 
@@ -244,15 +255,18 @@ class RealEnvFranka:
         #     if link.name == 'right_gelsight':
         #         self.right_gs_idx = link_idx
         # self.fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
-        self.cam_front_extri = get_extrinsic([0.8408891228960659, -0.2306640654217388, 0.32780918960803124],
-                                        [-0.7493846612312357, -0.41228123056776256, 0.28491736181125427, 0.4327457837707866])
-        self.cam_left_extri = get_extrinsic([0.27804807679768973, -0.23545503302949033, 0.13971720258705824],
-                                        [-0.6954162447452916, 0.16984997468823826, -0.2334766373619014, 0.6580546272528907])
-        self.cam_right_extri = get_extrinsic([0.3281305272599807, 0.5090284215384193, 0.12379313280393066],
-                                        [-0.14095227077856376, 0.7139867190308669, -0.6725150321346475, 0.13445800073940598])
+        self.cam_front_extri = get_extrinsic([0.8425395551524414, -0.23980856223114248, 0.32430529343304803],
+                                    # [-0.7436835728382364, -0.42678910445821283, 0.2849678185522488, 0.42846137071605955])
+                                    [-0.7510188, -0.41374503, 0.27744673, 0.43336949])
+        self.cam_left_extri = get_extrinsic([0.3015062294276259, -0.2731493583749173, 0.12464828611110033],
+                                    # [-0.7461453297553833, 0.22962820091980163, -0.20344921784453623, 0.5908861582276331])
+                                    [-0.75190061, 0.21001771, -0.1879119, 0.59600936])
+        self.cam_right_extri = get_extrinsic([0.33561416964601004, 0.5235239893129717, 0.1137736727084544],
+                                    [-0.14008225307645683, 0.7060390316876065, -0.6806702770786354, 0.13628581000362547])
 
         # self.gripper = gripper
         self.multi_cam_vis = multi_cam_vis
+        self.multi_gs_vis = multi_gs_vis
         self.video_capture_fps = video_capture_fps
         self.frequency = frequency
         self.n_obs_steps = n_obs_steps
@@ -286,6 +300,8 @@ class RealEnvFranka:
         self.robot.start(wait=False)
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.start(wait=False)
+        if self.multi_gs_vis is not None:
+            self.multi_gs_vis.start(wait=False)
         if wait:
             self.start_wait()
 
@@ -293,6 +309,8 @@ class RealEnvFranka:
         self.end_episode()
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.stop(wait=False)
+        if self.multi_gs_vis is not None:
+            self.multi_gs_vis.stop(wait=False)
         self.robot.stop(wait=False)
         self.realsense.stop(wait=False)
         self.gelsight.stop(wait=False)
@@ -305,6 +323,8 @@ class RealEnvFranka:
         self.robot.start_wait()
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.start_wait()
+        if self.multi_gs_vis is not None:
+            self.multi_gs_vis.start_wait()
 
     def stop_wait(self):
         self.robot.stop_wait()
@@ -312,6 +332,8 @@ class RealEnvFranka:
         self.gelsight.stop_wait()
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.stop_wait()
+        if self.multi_gs_vis is not None:
+            self.multi_gs_vis.stop_wait()
 
     # ========= context manager ===========
     def __enter__(self):

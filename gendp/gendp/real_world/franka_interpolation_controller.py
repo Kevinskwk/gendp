@@ -3,8 +3,6 @@ import time
 import enum
 import multiprocessing as mp
 from multiprocessing.managers import SharedMemoryManager
-import cv2
-import scipy.interpolate as si
 import scipy.spatial.transform as st
 import numpy as np
 
@@ -15,9 +13,21 @@ from gendp.common.pose_trajectory_interpolator import PoseTrajectoryInterpolator
 from gendp.common.linear_interpolator import LinearInterpolator
 from gendp.common.precise_sleep import precise_wait
 from gendp.common.cv2_util import get_extrinsic
-# import torch
 # from gendp.common.pose_util import pose_to_mat, mat_to_pose
 import zerorpc
+
+
+def euler_to_rotvec(euler_pose):
+    """Convert pose with Euler angles to pose with rotation vector"""
+    pose_rotvec = euler_pose.copy()
+    pose_rotvec[3:6] = st.Rotation.from_euler('xyz', euler_pose[3:6]).as_rotvec()
+    return pose_rotvec
+
+def rotvec_to_euler(rotvec_pose):
+    """Convert pose with rotation vector to pose with Euler angles"""
+    pose_euler = rotvec_pose.copy()
+    pose_euler[3:6] = st.Rotation.from_rotvec(rotvec_pose[3:6]).as_euler('xyz')
+    return pose_euler
 
 
 # GELSIGHT_NAMES = {
@@ -189,7 +199,7 @@ class FrankaInterpolationController(mp.Process):
                  verbose=False,
                  get_max_k=None,
                  receive_latency=0.0,
-                 ctrl_mode='joint',
+                 ctrl_mode='eef',
                  ):
         """
         robot_ip: the ip of the middle-layer controller (NUC)
@@ -338,7 +348,7 @@ class FrankaInterpolationController(mp.Process):
     def schedule_ee_waypoint(self, pose, target_time):
         pose = np.array(pose)
         assert pose.shape == (6,) or pose.shape == (7,)
-        #print(pose)
+        # print("Scheduled EE Waypoint:", pose)
 
         message = {
             'cmd': Command.SCHEDULE_EE_WAYPOINT.value,
@@ -406,9 +416,11 @@ class FrankaInterpolationController(mp.Process):
             curr_t = time.monotonic()
             last_waypoint_time = curr_t
             if self.ctrl_mode == 'eef':
+                # Convert curr_pose from Euler angles to rotation vector for pose_interp
+                curr_pose_rotvec = euler_to_rotvec(curr_pose)
                 pose_interp = PoseTrajectoryInterpolator(
                     times=[curr_t],
-                    poses=[curr_pose]
+                    poses=[curr_pose_rotvec]
                 )
                 # start franka cartesian impedance policy
                 robot.start_cartesian_impedance(
@@ -440,7 +452,10 @@ class FrankaInterpolationController(mp.Process):
                 #     print('extrapolate', diff)
                 # send command to robot
                 if self.ctrl_mode == 'eef':
-                    tip_pose = pose_interp(t_now)
+                    tip_pose_rotvec = pose_interp(t_now)
+                    # Convert back from rotation vector to Euler angles for robot
+                    tip_pose = rotvec_to_euler(tip_pose_rotvec)
+                    # print("tip pose:", tip_pose)
                     robot.update_desired_ee_pose(tip_pose)
                 elif self.ctrl_mode == 'joint':
                     joint_pos = joint_pos_interp(t_now)
@@ -488,11 +503,13 @@ class FrankaInterpolationController(mp.Process):
                         # the command robot receive will have discontinouity
                         # and cause jittery robot behavior.
                         target_pose = command['target_pose'][:6]
+                        # Convert target_pose from Euler to rotvec for pose_interp
+                        target_pose_rotvec = euler_to_rotvec(target_pose)
                         duration = float(command['duration'])
                         curr_time = t_now + dt
                         t_insert = curr_time + duration
                         pose_interp = pose_interp.drive_to_waypoint(
-                            pose=target_pose,
+                            pose=target_pose_rotvec,
                             time=t_insert,
                             curr_time=curr_time,
                         )
@@ -506,10 +523,15 @@ class FrankaInterpolationController(mp.Process):
                         target_time = time.monotonic() - time.time() + target_time
                         curr_time = t_now + dt
                         target_pose = command['target_pose'][:6]
+                        # Convert target_pose from Euler to rotvec for pose_interp
+                        target_pose_rotvec = euler_to_rotvec(target_pose)
+                        # print("target_pose:", target_pose)
+                        # print("target_pose_rotvec:", target_pose_rotvec)
                         if command['target_pose'].shape== (7,):
                             gripper_new=command['target_pose'][-1]
+
                         pose_interp = pose_interp.schedule_waypoint(
-                            pose=target_pose,
+                            pose=target_pose_rotvec,
                             time=target_time,
                             curr_time=curr_time,
                             last_waypoint_time=last_waypoint_time
