@@ -14,19 +14,20 @@ from d3fields.fusion import Fusion
 import scipy.spatial.transform as st
 
 ### hyper param
-epi_range = [1]
+epi_range = [2]
 vis_robot = True
 vis_action = True
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
-data_dir = f'{curr_dir}/../../data/scrap_tool_10'
+data_dir = f'{curr_dir}/../../data/scrap_tool_8'
+# data_dir = f'{curr_dir}/../../data/outputs/2025.10.02/19.47.25_train_diffusion_unet_hybrid_scraper_real'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 cam_keys = ['camera_front', 'camera_left', 'camera_right']
 
 ### set up shape_meta
 shape_meta = {
-    'shape': [6, 4000],
+    'shape': [6, 2000],
     'type': 'spatial',
     'info': {
         'reference_frame': 'world',
@@ -34,10 +35,10 @@ shape_meta = {
         # 'distill_obj': 'pencil',
         'distill_obj': 'scraper',
         # TODO: fix query text
-        # 'query_text': 'a 3D printed scraper tool',
+        'query_text': 'dark green plastic scraper tool',
         # 'view_keys': ['left_bottom_view', 'right_bottom_view', 'left_top_view', 'right_top_view'],
         'view_keys': ['front', 'left', 'right'],
-        'N_gripper': 400,
+        'N_gripper': 100,
         'boundaries': {
             # 'x_lower': -0.35,
             # 'x_upper': 0.35,
@@ -64,7 +65,7 @@ visualizer.start()
 kin_helper = KinHelper(robot_name='panda')
 
 ### create fusion
-fusion = Fusion(num_cam=len(cam_keys), dtype=torch.float16)
+fusion = Fusion(num_cam=len(cam_keys), dtype=torch.float16, device='cuda:1')
 
 for i in tqdm(epi_range):
     data_path = f'{data_dir}/episode_{i}.hdf5'
@@ -91,6 +92,7 @@ for i in tqdm(epi_range):
         depths = np.stack([data_dict['observations']['images'][f'{cam_key}_depth'][t:t+1] for cam_key in cam_keys], axis=1) / 1000. # (N, H, W)
         intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsics'][t:t+1] for cam_key in cam_keys], axis=1)
         extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t:t+1] for cam_key in cam_keys], axis=1)
+        ee_poses = data_dict['observations']['ee_pose'][t:t+1]
         result = d3fields_proc(
             fusion=fusion,
             shape_meta=shape_meta,
@@ -103,6 +105,8 @@ for i in tqdm(epi_range):
             qpos_seq=data_dict['observations']['full_joint_pos'][t:t+1],
             exclude_threshold=0.01,
             use_obj_bg_seg=True,
+            gripper_pose_seq=ee_poses,
+            use_gripper_crop=True,
         )
         
         # Unpack the returned values

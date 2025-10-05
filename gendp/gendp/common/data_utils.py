@@ -146,7 +146,8 @@ def vis_distill_feats(pts, feats):
 
 def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq,
                   robot_base_pose_in_world_seq = None, teleop_robot = None, qpos_seq=None, expected_labels=None,
-                  tool_names=[None], exclude_threshold=0.01, exclude_colors=[], use_seg=False, use_obj_bg_seg=False):
+                  tool_names=[None], exclude_threshold=0.01, exclude_colors=[], use_seg=False, use_obj_bg_seg=False,
+                  gripper_pose_seq=None, use_gripper_crop=False, gripper_crop_params=None):
     # shape_meta: (dict) shape meta data for d3fields
     # color_seq: (np.ndarray) (T, V, H, W, C)
     # depth_seq: (np.ndarray) (T, V, H, W)
@@ -158,6 +159,9 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     # finger_poses: (dict) dict of finger poses, mapping from finger name to (T, 6)
     # expected_labels: (list) list of expected labels
     # use_obj_bg_seg: (bool) if True, segment pcd into object and background parts using text queries
+    # gripper_pose_seq: (np.ndarray) gripper poses of shape (T, 7) or (T, 6) for gripper-based cropping
+    # use_gripper_crop: (bool) if True, further crop object points using gripper pose when use_obj_bg_seg is True
+    # gripper_crop_params: (dict) parameters for gripper cropping (tool_length, tool_width, etc.)
     boundaries = shape_meta['info']['boundaries']
     use_seg = False
     use_dino = False
@@ -178,6 +182,16 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     
     resize_ratio = shape_meta['info']['resize_ratio']
     reference_frame = shape_meta['info']['reference_frame'] if 'reference_frame' in shape_meta['info'] else 'world'
+    
+    # Set default gripper cropping parameters
+    if gripper_crop_params is None:
+        gripper_crop_params = {
+            'tool_length': 0.2,
+            'tool_width': 0.2,
+            'gripper_finger_length': 0.1,
+            'safety_margin': 0.002,
+            'global_z_threshold': 0.005
+        }
     
     num_bots = robot_base_pose_in_world_seq.shape[1] if len(robot_base_pose_in_world_seq.shape) == 4 else 1
     robot_base_pose_in_world_seq = robot_base_pose_in_world_seq.reshape(robot_base_pose_in_world_seq.shape[0], num_bots, 4, 4)
@@ -290,17 +304,62 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             fusion.text_queries_for_inst_mask(query_texts, query_thresholds, boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
         
         if use_obj_bg_seg:
-            # Perform text-based segmentation for object/background separation
-            fusion.text_queries_for_inst_mask(query_texts, query_thresholds, boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
-            
-            # Extract object and background point clouds separately
-            obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=boundaries)  # Object instances
-            bg_pcd = fusion.extract_masked_pcd([0], boundaries=boundaries)  # Background (instance 0)
-            
             # Calculate target points for each part (excluding end-effector points)
             obj_target_pts = (N_total) // 2
             bg_target_pts = (N_total - ee_pcd.shape[0]) - obj_target_pts
-            
+
+            # Apply gripper-based cropping to object points if requested
+            if use_gripper_crop and gripper_pose_seq is not None:
+                all_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
+                # Get gripper pose for current timestep
+                gripper_pose = gripper_pose_seq[t]
+                
+                # Extract gripper width from the pose (assuming it's the 7th element, or use a default)
+                if len(gripper_pose) >= 7:
+                    gripper_width = gripper_pose[6]
+                    gripper_pose_6d = gripper_pose[:6]
+                else:
+                    gripper_width = 0.05  # Default gripper width
+                    gripper_pose_6d = gripper_pose
+                
+                # Transform gripper pose to world frame if needed
+                if reference_frame == 'robot':
+                    # If gripper pose is in robot frame, transform to world frame for cropping
+                    gripper_pose_world = gripper_pose_6d.copy()
+                else:
+                    # Gripper pose is already in world frame
+                    gripper_pose_world = gripper_pose_6d.copy()
+                
+                # Apply gripper-based cropping to object points
+                obj_pcd, obj_mask = extract_gripper_tool_pcd(
+                    all_pcd, gripper_pose_world, gripper_width,
+                    tool_length=gripper_crop_params['tool_length'],
+                    tool_width=gripper_crop_params['tool_width'], 
+                    gripper_finger_length=gripper_crop_params['gripper_finger_length'],
+                    safety_margin=gripper_crop_params['safety_margin'],
+                    global_z_threshold=gripper_crop_params['global_z_threshold']
+                )
+
+                # Update object points and features to only include tool points
+                # if len(obj_tool_pcd) > 0:
+                bg_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=np.concatenate([robot_pcd, obj_pcd], axis=0), exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
+
+            else:
+                # Perform text-based segmentation for object/background separation
+                fusion.text_queries_for_inst_mask(query_texts, query_thresholds, boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
+                
+                # Extract object and background point clouds separately
+                obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=boundaries)  # Object instances
+                bg_pcd = fusion.extract_masked_pcd([0], boundaries=boundaries)  # Background (instance 0)
+
+            # bg_pcd is all pcd within bounding box excluding obj pcd
+            # print('obj_pcd:', obj_pcd.shape)
+            # print('bg_pcd:', bg_pcd.shape)
+            if obj_pcd.shape[0] == 0:
+                # print('Warning: no object points found')
+                # obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
+                obj_pcd = np.zeros((obj_target_pts, 3))
+
             # Extract features for object and background separately
             obj_feat_list, obj_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, obj_target_pts, per_instance=True, use_seg=False, use_dino=True)
             bg_feat_list, bg_pts_list, _ = fusion.select_features_from_pcd(bg_pcd, bg_target_pts, per_instance=True, use_seg=False, use_dino=True)
@@ -884,3 +943,105 @@ def get_contact_field(pcd, contact_points,
     pcd_contact_feats[:, 1:4] = contact_forces
     
     return pcd_contact_feats
+
+def extract_gripper_tool_pcd(pcd, gripper_pose, gripper_width, 
+                            tool_length=0.1, tool_width=0.02, 
+                            gripper_finger_length=0.03, safety_margin=0.005,
+                            global_z_threshold=None):
+    """
+    Extract point cloud of the tool held between gripper tips based on gripper pose and opening width.
+    
+    Args:
+        pcd (np.ndarray): Input point cloud of shape (N, 3)
+        gripper_pose (np.ndarray): Gripper pose [x, y, z, qx, qy, qz, qw] or [x, y, z, rx, ry, rz] 
+                                  where position is gripper center and orientation defines gripper coordinate frame
+        gripper_width (float): Current opening width between gripper fingers (distance between finger tips)
+        tool_length (float): Expected tool length along gripper forward axis (default: 0.1m)
+        tool_width (float): Expected tool width perpendicular to gripper opening direction (default: 0.02m)  
+        gripper_finger_length (float): Length of gripper fingers from center to tips (default: 0.03m)
+        safety_margin (float): Additional margin around the bounding box (default: 0.005m)
+        global_z_threshold (float): Minimum global Z coordinate for points to be considered (default: None, no filtering)
+        
+    Returns:
+        np.ndarray: Filtered point cloud containing only points between gripper tips (M, 3)
+        np.ndarray: Boolean mask indicating which points were selected (N,)
+    """
+    
+    if pcd.shape[0] == 0:
+        return np.zeros((0, 3)), np.zeros(pcd.shape[0], dtype=bool)
+    
+    # Apply global Z threshold filter first if specified
+    if global_z_threshold is not None:
+        global_z_mask = pcd[:, 2] >= global_z_threshold
+        if not np.any(global_z_mask):
+            # No points pass the global Z threshold
+            return np.zeros((0, 3)), np.zeros(pcd.shape[0], dtype=bool)
+        pcd_filtered = pcd[global_z_mask]
+    else:
+        global_z_mask = np.ones(pcd.shape[0], dtype=bool)
+        pcd_filtered = pcd
+    
+    # Extract position and orientation from gripper pose
+    gripper_pos = gripper_pose[:3]
+    
+    # Handle different rotation representations
+    if len(gripper_pose) == 7:
+        # Quaternion [x, y, z, qx, qy, qz, qw]
+        from scipy.spatial.transform import Rotation as R
+        gripper_quat = gripper_pose[3:]  # [qx, qy, qz, qw]
+        rotation = R.from_quat(gripper_quat)
+        gripper_rot_matrix = rotation.as_matrix()
+    elif len(gripper_pose) == 6:
+        # Euler angles [x, y, z, rx, ry, rz]
+        import transforms3d.euler
+        gripper_euler = gripper_pose[3:6]
+        gripper_rot_matrix = transforms3d.euler.euler2mat(gripper_euler[0], gripper_euler[1], gripper_euler[2])
+    else:
+        raise ValueError("gripper_pose must be length 6 (position + euler) or 7 (position + quaternion)")
+    
+    # Apply 45-degree rotation around Z axis to get tip pose orientation
+    from scipy.spatial.transform import Rotation as R
+    tip_rotation = R.from_euler('z', 45, degrees=True)
+    gripper_rot_matrix = gripper_rot_matrix @ tip_rotation.as_matrix()
+    
+    # Transform point cloud to gripper coordinate frame
+    # Gripper frame: X-perpendicular to gripper plane, Y-left/right (finger opening), Z-tool extension (forward)
+    pcd_centered = pcd_filtered - gripper_pos  # Center on gripper
+    pcd_gripper_frame = (np.linalg.inv(gripper_rot_matrix) @ pcd_centered.T).T
+    
+    # Define bounding box in gripper coordinate frame
+    # X-axis: perpendicular to gripper plane (height around gripper centerline)
+    y_min = -tool_width / 2 - safety_margin
+    y_max = tool_width / 2 + safety_margin
+
+    # Y-axis: tool is constrained between gripper fingers
+    x_min = -gripper_width / 2 - safety_margin
+    x_max = gripper_width / 2 + safety_margin
+    
+    # Z-axis: tool extends from finger tips forward
+    z_min = gripper_finger_length  # Start from finger tips
+    z_max = gripper_finger_length + tool_length
+    
+    # Apply bounding box filter
+    mask_x = (pcd_gripper_frame[:, 0] >= x_min) & (pcd_gripper_frame[:, 0] <= x_max)
+    mask_y = (pcd_gripper_frame[:, 1] >= y_min) & (pcd_gripper_frame[:, 1] <= y_max)  
+    mask_z = (pcd_gripper_frame[:, 2] >= z_min) & (pcd_gripper_frame[:, 2] <= z_max)
+    
+    # Combine all constraints
+    tool_mask_filtered = mask_x & mask_y & mask_z
+    
+    # Map the filtered mask back to the original point cloud indices
+    tool_mask_original = np.zeros(pcd.shape[0], dtype=bool)
+    if global_z_threshold is not None:
+        # Map indices from filtered pcd back to original pcd
+        filtered_indices = np.where(global_z_mask)[0]
+        selected_filtered_indices = filtered_indices[tool_mask_filtered]
+        tool_mask_original[selected_filtered_indices] = True
+    else:
+        tool_mask_original = tool_mask_filtered
+    
+    # Extract tool point cloud
+    tool_pcd = pcd[tool_mask_original]
+    
+    return tool_pcd, tool_mask_original
+

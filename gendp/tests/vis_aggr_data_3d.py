@@ -8,7 +8,7 @@ from matplotlib import colormaps
 # add path for importing
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from gendp.common.data_utils import load_dict_from_hdf5
+from gendp.common.data_utils import load_dict_from_hdf5, extract_gripper_tool_pcd
 from gendp.common.kinematics_utils import KinHelper
 from d3fields.utils.draw_utils import aggr_point_cloud_from_data, np2o3d, o3dVisualizer, ImgEncoding, ExtriConvention
 import scipy.spatial.transform as st
@@ -21,7 +21,9 @@ epi_range = [1]
 vis_robot = True
 vis_action = True
 apply_color_segmentation = False  # Set to True to apply color filtering
+use_gripper_segmentation = True   # Set to True to use gripper-based tool segmentation
 vis_segmented_separately = True  # Set to True to show object and env separately
+vis_only_object = True            # Set to True to visualize only object/tool points (when segmentation is enabled)
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
 # data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
@@ -121,6 +123,7 @@ for i in tqdm(epi_range):
     visualizer.add_triangle_mesh('origin', 'front')
     visualizer.add_triangle_mesh('origin', 'left')
     visualizer.add_triangle_mesh('origin', 'right')
+    visualizer.add_triangle_mesh('origin', 'ee_pose', size=0.05)  # End-effector pose coordinate frame
     # visualizer.add_triangle_mesh('origin', 'left_finger', size=0.05)
     # visualizer.add_triangle_mesh('origin', 'right_finger', size=0.05)
     visualizer.update_triangle_mesh('base', tf=np.eye(4))
@@ -165,6 +168,47 @@ for i in tqdm(epi_range):
         pcd = np.linalg.inv(robot_base_in_world) @ np.concatenate([pcd, np.ones((pcd.shape[0], 1))], axis=-1).T
         pcd = pcd.T[:, :3]
         
+        # Extract end-effector pose for visualization and segmentation
+        ee_pose = data_dict['observations']['ee_pose'][t]  # [x, y, z, rx, ry, rz, gripper_width]
+        gripper_pose = ee_pose[:6]  # [x, y, z, rx, ry, rz]
+        gripper_width = ee_pose[6]   # gripper width
+        
+        # Create transformation matrix for end-effector pose visualization
+        ee_pose_mat = np.eye(4)
+        ee_pose_mat[:3, 3] = gripper_pose[:3]  # position
+        ee_pose_mat[:3, :3] = st.Rotation.from_euler('xyz', gripper_pose[3:6]).as_matrix()  # orientation
+
+        # Transform to robot base frame (since visualization is in robot base frame)
+        ee_pose_robot_base = np.linalg.inv(robot_base_in_world) @ ee_pose_mat
+        
+        # Update end-effector pose coordinate frame visualizations
+        visualizer.update_triangle_mesh('ee_pose', tf=ee_pose_robot_base)
+        
+        # Extract gripper tool point cloud using original gripper pose (rotation is applied internally)
+        if use_gripper_segmentation:
+            # Transform gripper pose to robot base frame for segmentation
+            gripper_pose_robot_base_translation = ee_pose_robot_base[:3, 3]
+            gripper_pose_robot_base_rotation = st.Rotation.from_matrix(ee_pose_robot_base[:3, :3]).as_euler('xyz')
+            gripper_pose_robot_base_6d = np.concatenate([gripper_pose_robot_base_translation, gripper_pose_robot_base_rotation])
+            
+            # Extract tool point cloud using original gripper pose (45-degree rotation applied internally)
+            tool_pcd, tool_mask = extract_gripper_tool_pcd(
+                pcd, gripper_pose_robot_base_6d, gripper_width,
+                tool_length=0.2,  # Expected tool length (adjust as needed)
+                tool_width=0.2,   # Expected tool width  
+                gripper_finger_length=0.1,  # Gripper finger length (adjust for your robot)
+                safety_margin=0.002,  # Safety margin
+                global_z_threshold=0.005  # Global Z threshold (adjust as needed)
+            )
+            
+            # Get tool colors
+            tool_colors = pcd_colors[tool_mask] if len(tool_pcd) > 0 else np.zeros((0, 3))
+            
+            # Get environment points (everything not in tool)
+            env_mask = ~tool_mask
+            env_pcd = pcd[env_mask]
+            env_colors = pcd_colors[env_mask]
+        
         # Apply color segmentation if enabled
         if apply_color_segmentation:
             object_pointcloud, env_pointcloud, object_colors, env_colors = segment_pointcloud_by_color(
@@ -179,7 +223,12 @@ for i in tqdm(epi_range):
                 env_boundaries=ENV_BOUNDARIES
             )
             
-            if vis_segmented_separately:
+            if vis_only_object:
+                # Show only object points
+                if len(object_pointcloud) > 0:
+                    object_pcd_o3d = np2o3d(object_pointcloud, object_colors)
+                    visualizer.update_pcd(object_pcd_o3d, 'pcd')
+            elif vis_segmented_separately:
                 # Show object and environment points separately
                 if len(object_pointcloud) > 0:
                     object_pcd_o3d = np2o3d(object_pointcloud, object_colors)
@@ -203,6 +252,42 @@ for i in tqdm(epi_range):
             object_ratio = len(object_pointcloud) / total_points if total_points > 0 else 0
             env_ratio = len(env_pointcloud) / total_points if total_points > 0 else 0
             print(f"Frame {t}: Total: {total_points}, Object: {len(object_pointcloud)} ({object_ratio:.1%}), Environment: {len(env_pointcloud)} ({env_ratio:.1%})")
+        elif use_gripper_segmentation:
+            # Use gripper-based segmentation to visualize tool vs environment
+            if vis_only_object:
+                # Show only tool points
+                if len(tool_pcd) > 0:
+                    tool_pcd_o3d = np2o3d(tool_pcd, tool_colors)
+                    visualizer.update_pcd(tool_pcd_o3d, 'pcd')
+            elif vis_segmented_separately:
+                # Show tool and environment points separately
+                if len(tool_pcd) > 0:
+                    tool_pcd_o3d = np2o3d(tool_pcd, tool_colors)
+                    visualizer.update_pcd(tool_pcd_o3d, 'tool_pcd')
+                
+                if len(env_pcd) > 0:
+                    env_pcd_o3d = np2o3d(env_pcd, env_colors)
+                    visualizer.update_pcd(env_pcd_o3d, 'env_pcd')
+            else:
+                # Show all points with different colors for tool vs environment
+                if len(tool_pcd) > 0 and len(env_pcd) > 0:
+                    # Color tool points in red, environment in original colors
+                    tool_colors_highlight = np.ones((len(tool_pcd), 3)) * [1.0, 0.0, 0.0]  # Red for tool
+                    all_points = np.concatenate([tool_pcd, env_pcd], axis=0)
+                    all_colors = np.concatenate([tool_colors_highlight, env_colors], axis=0)
+                    combined_pcd_o3d = np2o3d(all_points, all_colors)
+                    visualizer.update_pcd(combined_pcd_o3d, 'pcd')
+                else:
+                    pcd_o3d = np2o3d(pcd, pcd_colors)
+                    visualizer.update_pcd(pcd_o3d, 'pcd')
+            
+            # Print gripper-based segmentation statistics
+            total_points = len(pcd)
+            tool_ratio = len(tool_pcd) / total_points if total_points > 0 else 0
+            env_ratio = len(env_pcd) / total_points if total_points > 0 else 0
+            ee_pose = data_dict['observations']['ee_pose'][t]
+            gripper_width = ee_pose[6]
+            print(f"Frame {t}: Total: {total_points}, Tool: {len(tool_pcd)} ({tool_ratio:.1%}), Environment: {len(env_pcd)} ({env_ratio:.1%}), Gripper width: {gripper_width:.3f}")
         else:
             # Original visualization without segmentation
             pcd_o3d = np2o3d(pcd, pcd_colors)
