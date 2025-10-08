@@ -355,20 +355,33 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             # bg_pcd is all pcd within bounding box excluding obj pcd
             # print('obj_pcd:', obj_pcd.shape)
             # print('bg_pcd:', bg_pcd.shape)
+            
+            # Handle empty object point cloud gracefully
             if obj_pcd.shape[0] == 0:
-                # print('Warning: no object points found')
-                # obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
-                obj_pcd = np.zeros((obj_target_pts, 3))
-
-            # Extract features for object and background separately
-            obj_feat_list, obj_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, obj_target_pts, per_instance=True, use_seg=False, use_dino=True)
-            bg_feat_list, bg_pts_list, _ = fusion.select_features_from_pcd(bg_pcd, bg_target_pts, per_instance=True, use_seg=False, use_dino=True)
+                print(f'Warning: no object points found, using zero-padded point cloud')
+                # Create empty feature lists directly without calling select_features_from_pcd
+                # Match the dtype of fusion (typically float16)
+                obj_feat_list = [torch.zeros((obj_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                obj_pts_list = [np.zeros((obj_target_pts, 3), dtype=np.float32)]
+            else:
+                # Extract features for object normally
+                obj_feat_list, obj_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, obj_target_pts, per_instance=True, use_seg=False, use_dino=True)
+            
+            # Handle empty background point cloud gracefully
+            if bg_pcd.shape[0] == 0:
+                print(f'Warning: no background points found, using zero-padded point cloud')
+                # Match the dtype of fusion (typically float16)
+                bg_feat_list = [torch.zeros((bg_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                bg_pts_list = [np.zeros((bg_target_pts, 3), dtype=np.float32)]
+            else:
+                # Extract features for background normally
+                bg_feat_list, bg_pts_list, _ = fusion.select_features_from_pcd(bg_pcd, bg_target_pts, per_instance=True, use_seg=False, use_dino=True)
             
             # Store object and background data separately
-            obj_src_pts = np.concatenate(obj_pts_list, axis=0) if obj_pts_list else np.zeros((0, 3))
-            obj_src_feats = torch.concat(obj_feat_list, axis=0).detach().cpu().numpy() if obj_feat_list else np.zeros((0, 1024))
-            bg_src_pts = np.concatenate(bg_pts_list, axis=0) if bg_pts_list else np.zeros((0, 3))
-            bg_src_feats = torch.concat(bg_feat_list, axis=0).detach().cpu().numpy() if bg_feat_list else np.zeros((0, 1024))
+            obj_src_pts = np.concatenate(obj_pts_list, axis=0) if obj_pts_list else np.zeros((0, 3), dtype=np.float32)
+            obj_src_feats = torch.concat(obj_feat_list, axis=0).detach().cpu().numpy() if obj_feat_list else np.zeros((0, 1024), dtype=np.float32)
+            bg_src_pts = np.concatenate(bg_pts_list, axis=0) if bg_pts_list else np.zeros((0, 3), dtype=np.float32)
+            bg_src_feats = torch.concat(bg_feat_list, axis=0).detach().cpu().numpy() if bg_feat_list else np.zeros((0, 1024), dtype=np.float32)
             
             # For compatibility with existing code, still combine them
             src_feat_list = obj_feat_list + bg_feat_list
@@ -378,18 +391,18 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=boundaries)
             src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, N_gripper, per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino))
             # Initialize empty variables for non-obj_bg_seg case
-            obj_src_pts = np.zeros((0, 3))
-            obj_src_feats = np.zeros((0, 1024))
-            bg_src_pts = np.zeros((0, 3))
-            bg_src_feats = np.zeros((0, 1024))
+            obj_src_pts = np.zeros((0, 3), dtype=np.float32)
+            obj_src_feats = np.zeros((0, 1024), dtype=np.float32)
+            bg_src_pts = np.zeros((0, 3), dtype=np.float32)
+            bg_src_feats = np.zeros((0, 1024), dtype=np.float32)
         else:
             obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
             src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino))
             # Initialize empty variables for non-obj_bg_seg case
-            obj_src_pts = np.zeros((0, 3))
-            obj_src_feats = np.zeros((0, 1024))
-            bg_src_pts = np.zeros((0, 3))
-            bg_src_feats = np.zeros((0, 1024))
+            obj_src_pts = np.zeros((0, 3), dtype=np.float32)
+            obj_src_feats = np.zeros((0, 1024), dtype=np.float32)
+            bg_src_pts = np.zeros((0, 3), dtype=np.float32)
+            bg_src_feats = np.zeros((0, 1024), dtype=np.float32)
         
         aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
         aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino or use_obj_bg_seg) else None # (N, 1024)

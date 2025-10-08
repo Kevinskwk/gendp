@@ -18,9 +18,10 @@ import open3d as o3d
 import scipy.spatial.transform as st
 from filelock import FileLock
 from threadpoolctl import threadpool_limits
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 import transforms3d
 import scipy.spatial.transform as st
+import yaml
 
 from gendp.common.pytorch_util import dict_apply
 from gendp.common.replay_buffer import ReplayBuffer
@@ -156,7 +157,7 @@ def normalizer_from_stat(stat):
 # convert raw hdf5 data to replay buffer, which is used for diffusion policy training
 def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transformer, 
         n_workers=None, max_inflight_tasks=None, fusion : Optional[Fusion]=None, robot_name='panda', expected_labels=None,
-        exclude_colors=[]):
+        exclude_colors=[], contact_field_model=None, contact_field_device='cuda'):
     if n_workers is None:
         n_workers = multiprocessing.cpu_count()
     if max_inflight_tasks is None:
@@ -168,6 +169,11 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     lowdim_keys = list()
     spatial_keys = list()
     tactile_keys = list()
+    
+    # Check if contact field is enabled
+    use_contact_field = contact_field_model is not None
+    if use_contact_field:
+        print("✅ Contact field model enabled - will add 4 contact channels to d3fields")
     # construct compressors and chunks
     obs_shape_meta = shape_meta['obs']
     trim_tail = shape_meta['trim_tail']
@@ -295,25 +301,187 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                                                          [ 0.  ,  0.  ,  0.  ,  1.  ]])
                     robot_base_pose_in_world_seq = np.stack([robot_base_pose_in_world] * qpos_seq.shape[0], axis=0)
                 
-                aggr_src_pts_ls, aggr_feats_ls = d3fields_proc(
-                    fusion=fusion,
-                    shape_meta=shape_meta['obs'][key],
-                    color_seq=color_seq,
-                    depth_seq=depth_seq,
-                    extri_seq=extri_seq,
-                    intri_seq=intri_seq,
-                    robot_base_pose_in_world_seq=robot_base_pose_in_world_seq,
-                    teleop_robot=kin_helper,
-                    qpos_seq=qpos_seq,
-                    expected_labels=expected_labels,
-                    tool_names=tool_names,
-                    exclude_colors=exclude_colors,
-                )
+                # Add contact field prediction if enabled
+                if use_contact_field:
+                    print(f"Processing contact field for episode {epi_idx}...")
+                    
+                    # Run d3fields_proc once with object/background segmentation enabled
+                    obj_bg_result = d3fields_proc(
+                        fusion=fusion,
+                        shape_meta=shape_meta['obs'][key],
+                        color_seq=color_seq,
+                        depth_seq=depth_seq,
+                        extri_seq=extri_seq,
+                        intri_seq=intri_seq,
+                        robot_base_pose_in_world_seq=robot_base_pose_in_world_seq,
+                        teleop_robot=kin_helper,
+                        qpos_seq=qpos_seq,
+                        exclude_threshold=0.01,
+                        use_obj_bg_seg=True,
+                        gripper_pose_seq=file['observations']['ee_pose'][:episode_length],
+                        use_gripper_crop=True,
+                    )
+                    
+                    # Unpack object and background point clouds
+                    aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls = obj_bg_result
+                    print(f"✅ Successfully processed episode {epi_idx} with object/background segmentation")
+                    # else:
+                    #     print("Warning: Could not segment object/background, using standard d3fields_proc")
+                    #     aggr_src_pts_ls, aggr_feats_ls = d3fields_proc(
+                    #         fusion=fusion,
+                    #         shape_meta=shape_meta['obs'][key],
+                    #         color_seq=color_seq,
+                    #         depth_seq=depth_seq,
+                    #         extri_seq=extri_seq,
+                    #         intri_seq=intri_seq,
+                    #         robot_base_pose_in_world_seq=robot_base_pose_in_world_seq,
+                    #         teleop_robot=kin_helper,
+                    #         qpos_seq=qpos_seq,
+                    #         expected_labels=expected_labels,
+                    #         tool_names=tool_names,
+                    #         exclude_colors=exclude_colors,
+                    #     )
+                    #     obj_pts_ls = aggr_src_pts_ls
+                    #     obj_feats_ls = aggr_feats_ls
+                else:
+                    # Standard d3fields_proc without object/background segmentation
+                    aggr_src_pts_ls, aggr_feats_ls = d3fields_proc(
+                        fusion=fusion,
+                        shape_meta=shape_meta['obs'][key],
+                        color_seq=color_seq,
+                        depth_seq=depth_seq,
+                        extri_seq=extri_seq,
+                        intri_seq=intri_seq,
+                        robot_base_pose_in_world_seq=robot_base_pose_in_world_seq,
+                        teleop_robot=kin_helper,
+                        qpos_seq=qpos_seq,
+                        expected_labels=expected_labels,
+                        tool_names=tool_names,
+                        exclude_colors=exclude_colors,
+                    )
                 
+                # Process contact field if enabled
+                if use_contact_field:
+                    # Process each timestep to add contact field data
+                    contact_field_pts_ls = []
+                    for t_idx in range(len(aggr_src_pts_ls)):
+                        # Get object point cloud for this timestep
+                        obj_pcd = obj_pts_ls[t_idx] if t_idx < len(obj_pts_ls) else np.zeros((0, 3))
+                        full_pcd = aggr_src_pts_ls[t_idx]  # Full point cloud (N_total, 3 or 3+C)
+                        
+                        if obj_pcd.shape[0] > 0:
+                            # Get tactile data for this timestep (will be processed below in tactile_keys loop)
+                            # For now, check if tactile data is available
+                            if 'tactile_left' in shape_meta['obs'] and 'tactile_right' in shape_meta['obs']:
+                                # Get tactile frames
+                                tactile_left_frame = file['observations']['tactile']['tactile_left'][t_idx] if t_idx < episode_length else None
+                                tactile_right_frame = file['observations']['tactile']['tactile_right'][t_idx] if t_idx < episode_length else None
+                                
+                                if tactile_left_frame is not None and tactile_right_frame is not None:
+                                    # Process tactile frames to get force field data
+                                    if 'tactile_left' not in tactile_processors:
+                                        setting_left = shape_meta['obs']['tactile_left']['setting']
+                                        tactile_processors['tactile_left'] = TactileProcessor(
+                                            width=320, height=240, marker_config=setting_left, use_gpu=True
+                                        )
+                                    if 'tactile_right' not in tactile_processors:
+                                        setting_right = shape_meta['obs']['tactile_right']['setting']
+                                        tactile_processors['tactile_right'] = TactileProcessor(
+                                            width=320, height=240, marker_config=setting_right, use_gpu=True
+                                        )
+                                    
+                                    tactile_ff_left = tactile_processors['tactile_left'].process_frame(tactile_left_frame)
+                                    tactile_ff_right = tactile_processors['tactile_right'].process_frame(tactile_right_frame)
+                                    
+                                    # Get ee_pose and transform for contact field model
+                                    ee_pose_8d = file['observations']['ee_pose'][t_idx]
+                                    ee_pos = ee_pose_8d[:3]
+                                    ee_quat = ee_pose_8d[3:7]
+                                    gripper_pos = ee_pose_8d[7] if len(ee_pose_8d) > 7 else 0.05
+                                    
+                                    # Transform the pose for contact field model (z-translation + z-rotation)
+                                    transformed_pos = ee_pos.copy()
+                                    transformed_pos[2] -= 0.14
+                                    current_rot = st.Rotation.from_quat(ee_quat)
+                                    z_rotation = st.Rotation.from_euler('z', np.pi/4)
+                                    transformed_rot = z_rotation * current_rot
+                                    transformed_quat = transformed_rot.as_quat()
+                                    ee_pose_7d = np.concatenate([transformed_pos, transformed_quat])
+                                    
+                                    # Get 3D marker coordinates
+                                    tactile_coord_left, tactile_coord_right = get_tactile_marker_coordinates_for_contact_field(
+                                        ee_pose_7d, gripper_pos
+                                    )
+                                    
+                                    # Predict contact field on object point cloud
+                                    contact_prob, contact_force = predict_contact_field(
+                                        model=contact_field_model,
+                                        obj_pointcloud=obj_pcd[:, :3],  # Only xyz coordinates
+                                        tactile_data_left=tactile_ff_left,
+                                        tactile_data_right=tactile_ff_right,
+                                        tactile_coord_left=tactile_coord_left,
+                                        tactile_coord_right=tactile_coord_right,
+                                        ee_pose=ee_pose_7d,
+                                        device=contact_field_device
+                                    )
+                                    
+                                    # Create contact field data (N_obj, 4): [contact_prob, fx, fy, fz]
+                                    contact_field_data = np.concatenate([contact_prob, contact_force], axis=-1).astype(np.float32)  # (N_obj, 4)
+                                    
+                                    # Since full_pcd = [obj_pcd, bg_pcd], we can directly assign contact field
+                                    # Object points are first N_obj points, background points are the rest
+                                    N_obj = obj_pcd.shape[0]
+                                    N_bg = full_pcd.shape[0] - N_obj
+                                    
+                                    # Create contact field for object points (N_obj, 4)
+                                    obj_contact_field = contact_field_data
+                                    
+                                    # Create zeros for background points (N_bg, 4) - explicitly float32
+                                    bg_contact_field = np.zeros((N_bg, 4), dtype=np.float32)
+                                    
+                                    # Concatenate: [obj_contact_field, bg_contact_field]
+                                    full_contact_field = np.concatenate([obj_contact_field, bg_contact_field], axis=0)
+                                    
+                                    # Concatenate contact field to point cloud features
+                                    pcd_with_contact = np.concatenate([full_pcd, full_contact_field], axis=-1).astype(np.float32)
+                                    contact_field_pts_ls.append(pcd_with_contact)
+                                else:
+                                    # No tactile data, pad with zeros (explicitly float32)
+                                    zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                                    pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
+                                    contact_field_pts_ls.append(pcd_with_contact)
+                            else:
+                                # No tactile keys defined, pad with zeros (explicitly float32)
+                                zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                                pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
+                                contact_field_pts_ls.append(pcd_with_contact)
+                        else:
+                            # No object point cloud, pad with zeros (explicitly float32)
+                            zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                            pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
+                            contact_field_pts_ls.append(pcd_with_contact)
+                    
+                    # Replace aggr_src_pts_ls with contact field enhanced version
+                    aggr_src_pts_ls = contact_field_pts_ls
+
                 if distill_dino:
                     for pts_idx, aggr_src_pts in enumerate(aggr_src_pts_ls):
-                        aggr_src_pts_ls[pts_idx] = np.concatenate([aggr_src_pts, aggr_feats_ls[pts_idx]], axis=-1)
-                
+                        if use_contact_field:
+                            # Extract contact field channels (last 4 channels)
+                            contact_channels = aggr_src_pts[:, -4:]
+                            # Concatenate: [xyz, dino_feats, contact_field]
+                            aggr_src_pts_ls[pts_idx] = np.concatenate([
+                                aggr_src_pts[:, :3],  # xyz
+                                aggr_feats_ls[pts_idx],  # dino features
+                                contact_channels  # contact field
+                            ], axis=-1)
+                        else:
+                            aggr_src_pts_ls[pts_idx] = np.concatenate([aggr_src_pts, aggr_feats_ls[pts_idx]], axis=-1)
+                elif use_contact_field:
+                    # distill_dino=False but contact_field=True
+                    # aggr_src_pts_ls already contains [xyz, contact_field] from contact field processing
+                    pass  # Keep as is
+
                 if key not in spatial_data_dict:
                     spatial_data_dict[key] = list()
                 
@@ -583,7 +751,9 @@ class RealDataset(BaseImageDataset):
             n_obs_steps=None,
             robot_name='panda',
             expected_labels=None,
-            exclude_colors=[]
+            exclude_colors=[],
+            contact_field_checkpoint_path=None,
+            contact_field_device='cuda'
             ):
         
         super().__init__()
@@ -591,9 +761,23 @@ class RealDataset(BaseImageDataset):
         rotation_transformer = RotationTransformer(
             from_rep='euler_angles', to_rep=rotation_rep, from_convention='xyz')
         
+        # Load contact field model if checkpoint path is provided
+        contact_field_model = None
+        if contact_field_checkpoint_path is not None:
+            print(f"Loading contact field model from {contact_field_checkpoint_path}")
+            contact_field_model, contact_field_config = load_contact_field_model_and_config(
+                contact_field_checkpoint_path, device=contact_field_device
+            )
+            print("✅ Contact field model loaded successfully")
+        
         replay_buffer = None
         fusion = None
         cache_info_str = ''
+        
+        # Add contact field to cache string if enabled
+        if contact_field_model is not None:
+            cache_info_str += '_contact_field'
+        
         for key, attr in shape_meta['obs'].items():
             if ('type' in attr) and (attr['type'] == 'depth'):
                 cache_info_str += '_rgbd'
@@ -656,6 +840,8 @@ class RealDataset(BaseImageDataset):
                             robot_name=robot_name,
                             expected_labels=expected_labels,
                             exclude_colors=exclude_colors,
+                            contact_field_model=contact_field_model,
+                            contact_field_device=contact_field_device,
                             )
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:
@@ -689,6 +875,9 @@ class RealDataset(BaseImageDataset):
                 fusion=fusion,
                 robot_name=robot_name,
                 expected_labels=expected_labels,
+                exclude_colors=exclude_colors,
+                contact_field_model=contact_field_model,
+                contact_field_device=contact_field_device,
             )
         self.replay_buffer = replay_buffer
         if fusion is not None:
@@ -1030,5 +1219,240 @@ def update_ee_pose():
         fn.close()
         modify_hdf5_from_dict(epi_fn, new_epi_data)
 
-if __name__ == '__main__':
-    update_ee_pose()
+def get_tactile_marker_coordinates_for_contact_field(ee_pose_7d, gripper_pos):
+    """
+    Generate tactile marker coordinates based on end-effector pose for contact field model.
+    
+    Args:
+        ee_pose_7d: 7D end-effector pose [x, y, z, qx, qy, qz, qw]
+        gripper_pos: Gripper position (scalar, represents gripper opening)
+    
+    Returns:
+        tuple: (tactile_coord_left, tactile_coord_right)
+            Each is a numpy array of shape (7, 9, 3) representing marker positions
+    """
+    # Extract position and rotation from ee_pose
+    ee_pos = ee_pose_7d[:3]
+    ee_quat = ee_pose_7d[3:7]  # [qx, qy, qz, qw]
+    
+    # Convert quaternion to rotation matrix
+    rotation = st.Rotation.from_quat(ee_quat)
+    rotation_matrix = rotation.as_matrix()
+    
+    # Tactile sensor dimensions - NOTE: Model expects (7, 9, 3) format
+    rows = 9  # Along z-axis of end-effector frame  
+    cols = 7  # Along x-axis of end-effector frame
+    marker_spacing = 0.002  # 2mm between markers
+    
+    # Calculate gripper offset (left: negative y, right: positive y)
+    gripper_offset = gripper_pos / 2.0
+    
+    # Generate base marker grid in end-effector frame
+    # X-axis: cols markers centered around 0
+    x_positions = np.linspace(-(cols-1)*marker_spacing/2, (cols-1)*marker_spacing/2, cols)
+    # Z-axis: rows markers centered around 0  
+    z_positions = np.linspace(-(rows-1)*marker_spacing/2, (rows-1)*marker_spacing/2, rows)
+    
+    # Create meshgrid for marker positions - Note: X should be first dimension for (7, 9) format
+    X, Z = np.meshgrid(x_positions, z_positions, indexing='ij')  # Use 'ij' indexing for (7, 9) format
+    
+    # Left tactile sensor (negative y offset) - Shape: (7, 9, 3)
+    left_markers_local = np.zeros((cols, rows, 3))
+    left_markers_local[:, :, 0] = X  # x positions
+    left_markers_local[:, :, 1] = -gripper_offset  # y offset (negative for left)
+    left_markers_local[:, :, 2] = Z  # z positions
+    
+    # Right tactile sensor (positive y offset) - Shape: (7, 9, 3)
+    right_markers_local = np.zeros((cols, rows, 3))
+    right_markers_local[:, :, 0] = X  # x positions
+    right_markers_local[:, :, 1] = gripper_offset  # y offset (positive for right)
+    right_markers_local[:, :, 2] = Z  # z positions
+    
+    # Transform to world frame
+    left_markers_world = np.zeros_like(left_markers_local)
+    right_markers_world = np.zeros_like(right_markers_local)
+    
+    for i in range(cols):
+        for j in range(rows):
+            # Transform left marker
+            left_local = left_markers_local[i, j, :]
+            left_world = rotation_matrix @ left_local + ee_pos
+            left_markers_world[i, j, :] = left_world
+            
+            # Transform right marker
+            right_local = right_markers_local[i, j, :]
+            right_world = rotation_matrix @ right_local + ee_pos
+            right_markers_world[i, j, :] = right_world
+    
+    return left_markers_world, right_markers_world
+
+
+def load_contact_field_model_and_config(contact_field_checkpoint_path, device='cuda'):
+    """
+    Load contact field model and configuration from checkpoint.
+    
+    Args:
+        contact_field_checkpoint_path: Path to contact field model checkpoint
+        device: Device to load model on
+        
+    Returns:
+        tuple: (model, config) - loaded model and its configuration
+    """
+    import sys
+    from omegaconf import DictConfig, OmegaConf
+    from omegaconf.listconfig import ListConfig
+    from omegaconf.base import ContainerMetadata
+    
+    # Add contact_field to Python path for importing models
+    contact_field_dir = Path(__file__).parent.parent.parent.parent / 'contact_field'
+    if contact_field_dir.exists():
+        sys.path.insert(0, str(contact_field_dir))
+    
+    # Add safe globals for torch.load - include all omegaconf types
+    try:
+        torch.serialization.add_safe_globals([
+            DictConfig, 
+            OmegaConf, 
+            ListConfig,
+            ContainerMetadata
+        ])
+    except (AttributeError, ImportError):
+        pass
+    
+    checkpoint_path = Path(contact_field_checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Contact field checkpoint not found: {contact_field_checkpoint_path}")
+    
+    # Load checkpoint with weights_only=False to handle omegaconf objects
+    try:
+        checkpoint = torch.load(contact_field_checkpoint_path, map_location=device, weights_only=False)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load checkpoint: {e}")
+    
+    # Load config from checkpoint or find it in checkpoint directory
+    config = None
+    if 'hyper_parameters' in checkpoint and 'cfg' in checkpoint['hyper_parameters']:
+        config = checkpoint['hyper_parameters']['cfg']
+        if isinstance(config, DictConfig):
+            config = OmegaConf.to_object(config)
+    elif 'config' in checkpoint:
+        config = checkpoint['config']
+        if isinstance(config, DictConfig):
+            config = OmegaConf.to_object(config)
+    else:
+        # Try to find config in checkpoint directory
+        for config_name in ['config.yaml', 'config.yml']:
+            config_path_candidate = checkpoint_path.parent / config_name
+            if config_path_candidate.exists():
+                with open(config_path_candidate, 'r') as f:
+                    config = yaml.safe_load(f)
+                break
+    
+    if config is None:
+        raise FileNotFoundError(f"Could not find configuration for contact field model at {contact_field_checkpoint_path}")
+    
+    # Import contact field model creation function
+    try:
+        from models import create_model
+    except ImportError:
+        # If direct import fails, the path should already be in sys.path from above
+        raise ImportError(
+            "Failed to import 'models' module. Ensure contact_field directory is accessible. "
+            f"Attempted to add {contact_field_dir} to sys.path."
+        )
+    
+    # Create model
+    model = create_model(config)
+    
+    # Load state dict
+    if 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    elif 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+    
+    # Remove module prefixes if present
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith('network.'):
+            new_key = key[8:]
+        elif key.startswith('model.'):
+            new_key = key[6:]
+        elif key.startswith('module.'):
+            new_key = key[7:]
+        else:
+            new_key = key
+        new_state_dict[new_key] = value
+    
+    # Load weights
+    model.load_state_dict(new_state_dict, strict=True)
+    model.to(device)
+    model.eval()
+    
+    print(f"✅ Contact field model loaded from {contact_field_checkpoint_path}")
+    
+    return model, config
+
+
+def predict_contact_field(model, obj_pointcloud, tactile_data_left, tactile_data_right, 
+                          tactile_coord_left, tactile_coord_right, ee_pose, device='cuda'):
+    """
+    Predict contact field (contact probability + contact force vector) for object point cloud.
+    
+    Args:
+        model: Contact field model
+        obj_pointcloud: Object point cloud (N, 3) numpy array
+        tactile_data_left: Left tactile force field data (7, 9, 3) numpy array
+        tactile_data_right: Right tactile force field data (7, 9, 3) numpy array
+        tactile_coord_left: Left tactile marker coordinates (7, 9, 3) numpy array
+        tactile_coord_right: Right tactile marker coordinates (7, 9, 3) numpy array
+        ee_pose: End-effector pose (7,) numpy array [x, y, z, qx, qy, qz, qw]
+        device: Device for inference
+        
+    Returns:
+        tuple: (contact_prob, contact_force)
+            contact_prob: (N, 1) contact probabilities for each point
+            contact_force: (N, 3) contact force vectors for each point
+    """
+    if obj_pointcloud.shape[0] == 0:
+        return np.zeros((0, 1)), np.zeros((0, 3))
+    
+    # Prepare batch data for model
+    batch_data = {
+        'object_point_cloud': torch.from_numpy(obj_pointcloud).float().unsqueeze(0).to(device),  # (1, N, 3)
+        'tactile_data_left': torch.from_numpy(tactile_data_left).float().unsqueeze(0).to(device),  # (1, 7, 9, 3)
+        'tactile_data_right': torch.from_numpy(tactile_data_right).float().unsqueeze(0).to(device),  # (1, 7, 9, 3)
+        'tactile_coord_left': torch.from_numpy(tactile_coord_left).float().unsqueeze(0).to(device),  # (1, 7, 9, 3)
+        'tactile_coord_right': torch.from_numpy(tactile_coord_right).float().unsqueeze(0).to(device),  # (1, 7, 9, 3)
+        'ee_pose': torch.from_numpy(ee_pose).float().unsqueeze(0).to(device),  # (1, 7)
+    }
+    
+    # Run inference
+    with torch.no_grad():
+        output = model(batch_data)
+        
+        if isinstance(output, dict):
+            pred_prob = output.get('contact_prob', output.get('prob', None))
+            pred_force = output.get('contact_force', output.get('force', None))
+        elif isinstance(output, (tuple, list)):
+            pred_prob = output[0]
+            pred_force = output[1] if len(output) > 1 else None
+        else:
+            pred_prob = output
+            pred_force = None
+        
+        # Convert to numpy
+        if pred_prob is not None:
+            contact_prob = pred_prob.squeeze(0).cpu().numpy()  # (N, 1) or (N,)
+            if contact_prob.ndim == 1:
+                contact_prob = contact_prob[:, None]  # (N, 1)
+        else:
+            contact_prob = np.zeros((obj_pointcloud.shape[0], 1))
+        
+        if pred_force is not None:
+            contact_force = pred_force.squeeze(0).cpu().numpy()  # (N, 3)
+        else:
+            contact_force = np.zeros((obj_pointcloud.shape[0], 3))
+    
+    return contact_prob, contact_force
