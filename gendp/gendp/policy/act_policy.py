@@ -135,7 +135,9 @@ class ACTPolicy(BaseImagePolicy):
                 is_spatial = True
                 break
         qpos = nobs['joint_pos'][:,0]
-        is_pad = batch['is_pad']
+        # TODO: handle padding correctly
+        # is_pad = batch['is_pad']
+        is_pad = torch.zeros((batch_size, horizon), dtype=torch.bool, device=nactions.device)
         if not is_spatial:
             image = [nobs[k][:,0:1] for k in self.camera_names]
             image = torch.concat(image, dim=1)

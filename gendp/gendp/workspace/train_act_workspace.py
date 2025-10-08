@@ -53,9 +53,9 @@ class TrainACTWorkspace(BaseWorkspace):
         # configure model
         self.model: ACTPolicy = hydra.utils.instantiate(cfg.policy)
 
-        # self.ema_model: ACTPolicy = None
-        # if cfg.training.use_ema:
-        #     self.ema_model = copy.deepcopy(self.model)
+        self.ema_model: ACTPolicy = None
+        if cfg.training.use_ema:
+            self.ema_model = copy.deepcopy(self.model)
 
         # configure training state
         # self.optimizer = hydra.utils.instantiate(
@@ -268,7 +268,7 @@ class TrainACTWorkspace(BaseWorkspace):
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
-                                print('get data')
+                                # print('get data')
                                 # if 'd3fields' in batch['obs']:
                                 #     d3fields = batch['obs']['d3fields']
                                 #     d3fields_mask = torch.any(d3fields[:, :, :3, :] == 0, dim=-1) # (B, T, 3)
@@ -279,17 +279,17 @@ class TrainACTWorkspace(BaseWorkspace):
                                 #     for key in batch['obs']:
                                 #         batch['obs'][key] = batch['obs'][key][~d3fields_mask]
                                 #     batch['action'] = batch['action'][~d3fields_mask]
-                                print('batch fliter')
+                                # print('batch fliter')
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                print('batch to device done')
+                                # print('batch to device done')
                                 loss = self.model.compute_loss(batch)
-                                print('loss compute done')
+                                # print('loss compute done')
                                 val_losses.append(loss)
-                                print('append done')
+                                # print('append done')
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
-                                print('break done')
+                                # print('break done')
                                 
                                 result = policy.predict_action(batch['obs'])
                                 pred_action = result['action_pred']
@@ -301,7 +301,7 @@ class TrainACTWorkspace(BaseWorkspace):
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
                             step_log['val_action_mse_error'] = np.mean(val_action_mse_errors)
-                    print('finish validation')
+                    # print('finish validation')
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
@@ -310,7 +310,8 @@ class TrainACTWorkspace(BaseWorkspace):
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
                         obs_dict = batch['obs']
                         gt_action = batch['action']
-                        is_pad = batch['is_pad']
+                        # is_pad = batch['is_pad']
+                        is_pad = torch.zeros((gt_action.shape[0], gt_action.shape[1]), dtype=torch.bool, device=gt_action.device)
                         
                         result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']
@@ -323,7 +324,7 @@ class TrainACTWorkspace(BaseWorkspace):
                         del result
                         del pred_action
                         del mse
-                    print('sampling done')
+                    # print('sampling done')
 
                 
                 # checkpoint
