@@ -31,7 +31,7 @@ from gendp.common.sampler import (
 from gendp.common.kinematics_utils import KinHelper
 from gendp.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
-from gendp.common.data_utils import d3fields_proc, _convert_actions, load_dict_from_hdf5, modify_hdf5_from_dict
+from gendp.common.data_utils import d3fields_proc, _convert_actions, _convert_ee_pose_obs, load_dict_from_hdf5, modify_hdf5_from_dict
 from gendp.common.tactile_utils import TactileProcessor
 from gendp.dataset.base_dataset import BaseImageDataset
 from gendp.codecs.imagecodecs_numcodecs import register_codecs, Jpeg2k
@@ -234,14 +234,25 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 else:
                     this_data = file[data_key][:episode_length]
                 if key == 'action':
+                    delta_action = shape_meta['action'].get('delta', False)
                     this_data = _convert_actions(
                         raw_actions=this_data,
                         rotation_transformer=rotation_transformer,
                         action_key=data_key,
+                        delta_action=delta_action,
                     )
-                    assert this_data.shape == (episode_length,) + tuple(shape_meta['action']['shape'])
+                    assert this_data.shape == (episode_length,) + tuple(shape_meta['action']['shape']), \
+                        f"Action shape mismatch: {this_data.shape} vs expected {(episode_length,) + tuple(shape_meta['action']['shape'])}"
+                elif key == 'ee_pose':
+                    # Convert ee_pose from [pos(3), euler(3), gripper(1)] to [pos(3), rot6d(6)]
+                    # print(f"Converting ee_pose: input shape {this_data.shape}, expected output shape {(episode_length,) + tuple(shape_meta['obs'][key]['shape'])}")
+                    this_data = _convert_ee_pose_obs(this_data, rotation_transformer)
+                    # print(f"After conversion: {this_data.shape}")
+                    assert this_data.shape == (episode_length,) + tuple(shape_meta['obs'][key]['shape']), \
+                        f"EE pose shape mismatch: {this_data.shape} vs expected {(episode_length,) + tuple(shape_meta['obs'][key]['shape'])}"
                 else:
-                    assert this_data.shape == (episode_length,) + tuple(shape_meta['obs'][key]['shape'])
+                    assert this_data.shape == (episode_length,) + tuple(shape_meta['obs'][key]['shape']), \
+                        f"Obs {key} shape mismatch: {this_data.shape} vs expected {(episode_length,) + tuple(shape_meta['obs'][key]['shape'])}"
                 lowdim_data_dict[key].append(this_data)
             
             for key in rgb_keys:
@@ -323,7 +334,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     )
                     
                     # Unpack object and background point clouds
-                    aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls = obj_bg_result
+                    aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls, aggr_colors_ls = obj_bg_result
                     print(f"✅ Successfully processed episode {epi_idx} with object/background segmentation")
                     # else:
                     #     print("Warning: Could not segment object/background, using standard d3fields_proc")
@@ -345,7 +356,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     #     obj_feats_ls = aggr_feats_ls
                 else:
                     # Standard d3fields_proc without object/background segmentation
-                    aggr_src_pts_ls, aggr_feats_ls = d3fields_proc(
+                    aggr_src_pts_ls, aggr_feats_ls, aggr_colors_ls = d3fields_proc(
                         fusion=fusion,
                         shape_meta=shape_meta['obs'][key],
                         color_seq=color_seq,
@@ -362,6 +373,63 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 
                 # Process contact field if enabled
                 if use_contact_field:
+                    # Compute reference tactile from first 5 frames (like in viz script)
+                    reference_tactile_left = None
+                    reference_tactile_right = None
+                    reference_tactile_steps = 5
+                    
+                    # Check if tactile settings are available
+                    has_tactile_left = 'tactile_left' in shape_meta['obs'] or ('tactile_settings' in shape_meta and 'tactile_left' in shape_meta['tactile_settings'])
+                    has_tactile_right = 'tactile_right' in shape_meta['obs'] or ('tactile_settings' in shape_meta and 'tactile_right' in shape_meta['tactile_settings'])
+                    
+                    if has_tactile_left and has_tactile_right and 'tactile' in file['observations']:
+                        if 'tactile_img_left' in file['observations']['tactile'] and 'tactile_img_right' in file['observations']['tactile']:
+                            # Initialize tactile processors if needed (with scaling enabled for contact field)
+                            if 'tactile_left' not in tactile_processors:
+                                if 'tactile_left' in shape_meta['obs']:
+                                    setting_left = shape_meta['obs']['tactile_left']['setting']
+                                else:
+                                    setting_left = shape_meta['tactile_settings']['tactile_left']
+                                tactile_processors['tactile_left'] = TactileProcessor(
+                                    width=320, height=240, marker_config=setting_left, use_gpu=True,
+                                    apply_scaling=True,   # Enable scaling for contact field inference
+                                    scale_factor=0.15,    # Scale DOWN real-world data to match pre-training
+                                    clip_range=(-10.0, 10.0)
+                                )
+                            if 'tactile_right' not in tactile_processors:
+                                if 'tactile_right' in shape_meta['obs']:
+                                    setting_right = shape_meta['obs']['tactile_right']['setting']
+                                else:
+                                    setting_right = shape_meta['tactile_settings']['tactile_right']
+                                tactile_processors['tactile_right'] = TactileProcessor(
+                                    width=320, height=240, marker_config=setting_right, use_gpu=True,
+                                    apply_scaling=True,   # Enable scaling for contact field inference
+                                    scale_factor=0.15,    # Scale DOWN real-world data to match pre-training
+                                    clip_range=(-10.0, 10.0)
+                                )
+                            
+                            # Process first N frames to compute reference
+                            print(f"Computing reference tactile from first {reference_tactile_steps} frames...")
+                            left_ref_frames = []
+                            right_ref_frames = []
+                            n_ref_steps = min(reference_tactile_steps, episode_length)
+                            
+                            for ref_idx in range(n_ref_steps):
+                                tactile_img_left = file['observations']['tactile']['tactile_img_left'][ref_idx]
+                                tactile_img_right = file['observations']['tactile']['tactile_img_right'][ref_idx]
+                                
+                                tactile_ff_left = tactile_processors['tactile_left'].process_frame(tactile_img_left)
+                                tactile_ff_right = tactile_processors['tactile_right'].process_frame(tactile_img_right)
+                                
+                                left_ref_frames.append(tactile_ff_left)
+                                right_ref_frames.append(tactile_ff_right)
+                            
+                            # Compute median as reference
+                            if left_ref_frames and right_ref_frames:
+                                reference_tactile_left = np.median(np.stack(left_ref_frames, axis=0), axis=0)  # (7, 9, 3)
+                                reference_tactile_right = np.median(np.stack(right_ref_frames, axis=0), axis=0)  # (7, 9, 3)
+                                print(f"✅ Reference tactile computed from {n_ref_steps} frames")
+                    
                     # Process each timestep to add contact field data
                     contact_field_pts_ls = []
                     for t_idx in range(len(aggr_src_pts_ls)):
@@ -369,29 +437,61 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         obj_pcd = obj_pts_ls[t_idx] if t_idx < len(obj_pts_ls) else np.zeros((0, 3))
                         full_pcd = aggr_src_pts_ls[t_idx]  # Full point cloud (N_total, 3 or 3+C)
                         
-                        if obj_pcd.shape[0] > 0:
-                            # Get tactile data for this timestep (will be processed below in tactile_keys loop)
-                            # For now, check if tactile data is available
-                            if 'tactile_left' in shape_meta['obs'] and 'tactile_right' in shape_meta['obs']:
-                                # Get tactile frames
-                                tactile_left_frame = file['observations']['tactile']['tactile_left'][t_idx] if t_idx < episode_length else None
-                                tactile_right_frame = file['observations']['tactile']['tactile_right'][t_idx] if t_idx < episode_length else None
+                        if obj_pcd.shape[0] > 0 and has_tactile_left and has_tactile_right:
+                            
+                            if has_tactile_left and has_tactile_right:
+                                # Get tactile image frames (raw images, not force fields)
+                                tactile_img_left = None
+                                tactile_img_right = None
                                 
-                                if tactile_left_frame is not None and tactile_right_frame is not None:
-                                    # Process tactile frames to get force field data
+                                # Try to get tactile images from observations
+                                if 'tactile' in file['observations']:
+                                    if 'tactile_img_left' in file['observations']['tactile'] and t_idx < episode_length:
+                                        tactile_img_left = file['observations']['tactile']['tactile_img_left'][t_idx]
+                                    if 'tactile_img_right' in file['observations']['tactile'] and t_idx < episode_length:
+                                        tactile_img_right = file['observations']['tactile']['tactile_img_right'][t_idx]
+                                
+                                if tactile_img_left is not None and tactile_img_right is not None:
+                                    # Initialize tactile processors if not already done (with scaling for contact field)
                                     if 'tactile_left' not in tactile_processors:
-                                        setting_left = shape_meta['obs']['tactile_left']['setting']
+                                        # Get settings from either obs or tactile_settings
+                                        if 'tactile_left' in shape_meta['obs']:
+                                            setting_left = shape_meta['obs']['tactile_left']['setting']
+                                        else:
+                                            setting_left = shape_meta['tactile_settings']['tactile_left']
                                         tactile_processors['tactile_left'] = TactileProcessor(
-                                            width=320, height=240, marker_config=setting_left, use_gpu=True
+                                            width=320, height=240, marker_config=setting_left, use_gpu=True,
+                                            apply_scaling=True,   # Enable scaling for contact field inference
+                                            scale_factor=0.15,    # Scale DOWN real-world data to match pre-training
+                                            clip_range=(-10.0, 10.0)
                                         )
                                     if 'tactile_right' not in tactile_processors:
-                                        setting_right = shape_meta['obs']['tactile_right']['setting']
+                                        # Get settings from either obs or tactile_settings
+                                        if 'tactile_right' in shape_meta['obs']:
+                                            setting_right = shape_meta['obs']['tactile_right']['setting']
+                                        else:
+                                            setting_right = shape_meta['tactile_settings']['tactile_right']
                                         tactile_processors['tactile_right'] = TactileProcessor(
-                                            width=320, height=240, marker_config=setting_right, use_gpu=True
+                                            width=320, height=240, marker_config=setting_right, use_gpu=True,
+                                            apply_scaling=True,   # Enable scaling for contact field inference
+                                            scale_factor=0.15,    # Scale DOWN real-world data to match pre-training
+                                            clip_range=(-10.0, 10.0)
                                         )
                                     
-                                    tactile_ff_left = tactile_processors['tactile_left'].process_frame(tactile_left_frame)
-                                    tactile_ff_right = tactile_processors['tactile_right'].process_frame(tactile_right_frame)
+                                    # Process raw tactile images to get force field data
+                                    tactile_ff_left = tactile_processors['tactile_left'].process_frame(tactile_img_left)
+                                    tactile_ff_right = tactile_processors['tactile_right'].process_frame(tactile_img_right)
+                                    
+                                    # Contact field model expects 6 channels (current + reference)
+                                    # Concatenate current with pre-computed reference
+                                    if reference_tactile_left is not None and reference_tactile_right is not None:
+                                        tactile_ff_left = np.concatenate([tactile_ff_left, reference_tactile_left], axis=-1)  # (7, 9, 6)
+                                        tactile_ff_right = np.concatenate([tactile_ff_right, reference_tactile_right], axis=-1)  # (7, 9, 6)
+                                    else:
+                                        # Fallback: use current tactile as reference if reference not available
+                                        print("⚠️ Warning: Reference tactile not computed, using current twice")
+                                        tactile_ff_left = np.concatenate([tactile_ff_left, tactile_ff_left], axis=-1)  # (7, 9, 6)
+                                        tactile_ff_right = np.concatenate([tactile_ff_right, tactile_ff_right], axis=-1)  # (7, 9, 6)
                                     
                                     # Get ee_pose and transform for contact field model
                                     ee_pose_8d = file['observations']['ee_pose'][t_idx]
@@ -412,7 +512,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                                     tactile_coord_left, tactile_coord_right = get_tactile_marker_coordinates_for_contact_field(
                                         ee_pose_7d, gripper_pos
                                     )
-                                    
+
                                     # Predict contact field on object point cloud
                                     contact_prob, contact_force = predict_contact_field(
                                         model=contact_field_model,
@@ -469,14 +569,22 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         if use_contact_field:
                             # Extract contact field channels (last 4 channels)
                             contact_channels = aggr_src_pts[:, -4:]
-                            # Concatenate: [xyz, dino_feats, contact_field]
-                            aggr_src_pts_ls[pts_idx] = np.concatenate([
+                            # Concatenate: [xyz, dino_feats, rgb (if enabled), contact_field]
+                            parts_to_concat = [
                                 aggr_src_pts[:, :3],  # xyz
                                 aggr_feats_ls[pts_idx],  # dino features
-                                contact_channels  # contact field
-                            ], axis=-1)
+                            ]
+                            # Add RGB channels if enabled
+                            if aggr_colors_ls[pts_idx] is not None:
+                                parts_to_concat.append(aggr_colors_ls[pts_idx])  # RGB channels
+                            parts_to_concat.append(contact_channels)  # contact field
+                            aggr_src_pts_ls[pts_idx] = np.concatenate(parts_to_concat, axis=-1)
                         else:
-                            aggr_src_pts_ls[pts_idx] = np.concatenate([aggr_src_pts, aggr_feats_ls[pts_idx]], axis=-1)
+                            # Concatenate: [xyz, dino_feats, rgb (if enabled)]
+                            parts_to_concat = [aggr_src_pts, aggr_feats_ls[pts_idx]]
+                            if aggr_colors_ls[pts_idx] is not None:
+                                parts_to_concat.append(aggr_colors_ls[pts_idx])  # RGB channels
+                            aggr_src_pts_ls[pts_idx] = np.concatenate(parts_to_concat, axis=-1)
                 elif use_contact_field:
                     # distill_dino=False but contact_field=True
                     # aggr_src_pts_ls already contains [xyz, contact_field] from contact field processing
@@ -502,23 +610,57 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     file.create_dataset('feats', data=feats_per_epi, dtype=np.float32)
 
             for key in tactile_keys:
-                if key not in tactile_data_dict:
-                    tactile_data_dict[key] = list()
+                # key is like "tactile_left_force_field" or "tactile_right_force_field"
+                # Extract base name: "tactile_left_force_field" -> "tactile_left"
+                base_key = key.replace('_force_field', '')
+                # Map to image key: "tactile_left" -> "tactile_img_left"
+                tactile_img_key = base_key.replace('tactile_', 'tactile_img_')
                 
-                frames = file['observations']['tactile'][key][:episode_length]
-                setting = shape_meta['obs'][key]['setting']
+                # Check if the key exists in observations
+                if 'tactile' not in file['observations'] or tactile_img_key not in file['observations']['tactile']:
+                    print(f"Warning: {tactile_img_key} not found in observations, skipping...")
+                    continue
+                
+                frames = file['observations']['tactile'][tactile_img_key][:episode_length]
+                
+                # Get settings from either obs or tactile_settings
+                if base_key in shape_meta.get('tactile_settings', {}):
+                    setting = shape_meta['tactile_settings'][base_key]
+                elif key in shape_meta['obs']:
+                    setting = shape_meta['obs'][key].get('setting', None)
+                else:
+                    print(f"Warning: Settings for {base_key} not found in shape_meta, skipping...")
+                    continue
                 
                 # Get robot pose data for 3D marker coordinate computation
                 ee_poses = file['observations']['ee_pose'][:episode_length]  # (T, 8) [x,y,z,qx,qy,qz,qw,gripper]
                 
                 # Initialize TactileProcessor for this key if not already done
+                # IMPORTANT: Use same preprocessing as contact field prediction for consistency
                 if key not in tactile_processors:
                     tactile_processors[key] = TactileProcessor(
                         width=320,
                         height=240,
                         marker_config=setting,
-                        use_gpu=True
+                        use_gpu=True,
+                        apply_scaling=True,       # Match contact field preprocessing
+                        scale_factor=0.15,        # Scale DOWN real-world data to match pre-training
+                        clip_range=(-10.0, 10.0)  # Final clip range after scaling
                     )
+                
+                # Compute reference tactile from first 5 frames
+                reference_tactile = None
+                reference_tactile_steps = 5
+                n_ref_steps = min(reference_tactile_steps, len(frames))
+                
+                if n_ref_steps > 0:
+                    print(f"Computing reference tactile for {key} from first {n_ref_steps} frames...")
+                    ref_frames = []
+                    for ref_idx in range(n_ref_steps):
+                        ref_ff = tactile_processors[key].process_frame(frames[ref_idx])
+                        ref_frames.append(ref_ff)
+                    reference_tactile = np.median(np.stack(ref_frames, axis=0), axis=0)  # (7, 9, 3)
+                    print(f"✅ Reference tactile computed with shape {reference_tactile.shape}")
                 
                 # Process frames using TactileProcessor to get force field data
                 force_fields = []
@@ -526,9 +668,16 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 
                 for frame_idx, frame in enumerate(frames):
                     # Get force field using TactileProcessor.process_frame
-                    # This returns force_field (N*M, 3) with [current_x, current_y, depth]
-                    # and initial_positions (N*M, 2) with [initial_x, initial_y]
-                    force_field = tactile_processors[key].process_frame(frame)  # (M, N, 3)
+                    # This returns force_field (7, 9, 3) with [depth, dy, dx]
+                    force_field = tactile_processors[key].process_frame(frame)  # (7, 9, 3)
+                    
+                    # Concatenate with reference to get 6D data
+                    if reference_tactile is not None:
+                        force_field = np.concatenate([force_field, reference_tactile], axis=-1)  # (7, 9, 6)
+                    else:
+                        # Fallback: duplicate current if no reference available
+                        force_field = np.concatenate([force_field, force_field], axis=-1)  # (7, 9, 6)
+                    
                     force_fields.append(force_field)
                     
                     # Get 3D marker coordinates using robot pose
@@ -564,20 +713,19 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         tactile_coords.append(tactile_coord_left)  # (7, 9, 3)
                 
                 # Stack the processed data
-                force_field_data = np.stack(force_fields, axis=0)  # (T, M, N, 3)
+                force_field_data = np.stack(force_fields, axis=0)  # (T, 7, 9, 6) - 6D with reference
                 tactile_coord_data = np.stack(tactile_coords, axis=0)  # (T, 7, 9, 3)
                 
                 print(f'{key} force field shape:', force_field_data.shape)
                 print(f'{key} tactile coord shape:', tactile_coord_data.shape)
                 
-                # Store force field data with "_force_field" suffix
-                force_field_key = f"{key}_force_field"
-                if force_field_key not in tactile_data_dict:
-                    tactile_data_dict[force_field_key] = list()
-                tactile_data_dict[force_field_key].append(force_field_data)
+                # Store force field data - key already has "_force_field" suffix
+                if key not in tactile_data_dict:
+                    tactile_data_dict[key] = list()
+                tactile_data_dict[key].append(force_field_data)
                 
-                # Store 3D marker coordinates with "_coord" suffix
-                coord_key = f"{key}_coord"
+                # Store 3D marker coordinates with "_coord" suffix (use base_key)
+                coord_key = f"{base_key}_coord"
                 if coord_key not in tactile_coord_dict:
                     tactile_coord_dict[coord_key] = list()
                 tactile_coord_dict[coord_key].append(tactile_coord_data)
@@ -585,6 +733,17 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
 
         if fusion is not None:
             fusion.clear_xmem_memory()
+    
+    # Update tactile_keys to only contain the actual force_field keys that were created
+    # This removes confusion with empty base keys (tactile_left/tactile_right)
+    if len(tactile_keys) > 0:
+        actual_tactile_keys = [key for key in tactile_data_dict.keys() if key.endswith('_force_field')]
+        if len(actual_tactile_keys) > 0:
+            print(f"Replacing tactile_keys {tactile_keys} with actual force_field keys {actual_tactile_keys}")
+            tactile_keys = actual_tactile_keys
+        else:
+            print(f"Warning: No tactile force field data was processed, clearing tactile_keys")
+            tactile_keys = []
     
     def img_copy(zarr_arr, zarr_idx, hdf5_arr, hdf5_idx):
         try:
@@ -699,6 +858,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     # dump tactile data
     print('Dumping tactile data')
     for key, data in tactile_data_dict.items():
+        if len(data) == 0:
+            print(f'Warning: No data for tactile key {key}, skipping...')
+            continue
         # pad to max_pts_num
         # for d_i, d in enumerate(data):
         #     if d.shape[0] > max_pts_num:
@@ -719,6 +881,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     # dump tactile coordinate data
     print('Dumping tactile coordinate data')
     for key, data in tactile_coord_dict.items():
+        if len(data) == 0:
+            print(f'Warning: No data for tactile coordinate key {key}, skipping...')
+            continue
         data = np.concatenate(data, axis=0)
         print(f'{key} coordinate data shape', data.shape)
         _ = data_group.array(
@@ -795,7 +960,8 @@ class RealDataset(BaseImageDataset):
         if 'd3fields' in shape_meta['obs']:
             use_seg = False
             use_dino = False
-            distill_dino = shape_meta['obs']['d3fields']['info']['distill_dino'] if 'distill_dino' in shape_meta['obs']['d3fields']['info'] else False
+            distill_dino = shape_meta['obs']['d3fields']['info'].get('distill_dino', False)
+            include_rgb = shape_meta['obs']['d3fields']['info'].get('add_rgb_channels', False)
             if use_seg:
                 cache_info_str += '_seg'
             else:
@@ -806,12 +972,18 @@ class RealDataset(BaseImageDataset):
                 cache_info_str += '_distill_dino'
             else:
                 cache_info_str += '_dino'
+            if include_rgb:
+                cache_info_str += '_w_rgb'
             if 'key' in shape_meta['action'] and shape_meta['action']['key'] == 'joint_action':
                 cache_info_str += '_joint'
             else:
                 cache_info_str += '_eef'
             if 'trim_tail' in shape_meta and shape_meta['trim_tail'] > 0:
                 cache_info_str += '_trim'
+            # Add delta action info to cache string
+            if 'delta' in shape_meta['action'] and shape_meta['action']['delta']:
+                cache_info_str += '_delta'
+                cache_info_str += f"_act{shape_meta['action']['shape'][0]}"
         if use_cache:
             cache_zarr_path = os.path.join(dataset_dir, f'cache{cache_info_str}.zarr.zip')
             cache_lock_path = cache_zarr_path + '.lock'
@@ -849,7 +1021,8 @@ class RealDataset(BaseImageDataset):
                                 store=zip_store
                             )
                     except Exception as e:
-                        shutil.rmtree(cache_zarr_path)
+                        if os.path.exists(cache_zarr_path):
+                            shutil.rmtree(cache_zarr_path)
                         raise e
                 else:
                     print('Loading cached ReplayBuffer from Disk.')
@@ -897,6 +1070,9 @@ class RealDataset(BaseImageDataset):
         tactile_keys = list()
         tactile_coord_keys = list()  # For 3D tactile marker coordinates
         obs_shape_meta = shape_meta['obs']
+        
+        # First pass: collect base keys from shape_meta
+        base_tactile_keys = list()
         for key, attr in obs_shape_meta.items():
             type = attr.get('type', 'low_dim')
             if type == 'rgb':
@@ -908,16 +1084,17 @@ class RealDataset(BaseImageDataset):
             elif type == 'spatial':
                 spatial_keys.append(key)
             elif type == 'tactile':
-                tactile_keys.append(key)
+                base_tactile_keys.append(key)
         
-        # Also detect dynamically created tactile coordinate keys
+        # Second pass: detect actual tactile keys in replay buffer
+        # We use _force_field suffixed keys as the actual tactile data
         for key in self.replay_buffer.keys():
-            if key.endswith('_coord') and any(tkey in key for tkey in tactile_keys):
+            # Add force field keys - these are the actual tactile observations
+            if key.endswith('_force_field') and any(tkey in key for tkey in base_tactile_keys):
+                tactile_keys.append(key)
+            # Add coordinate keys separately
+            elif key.endswith('_coord') and any(tkey in key for tkey in base_tactile_keys):
                 tactile_coord_keys.append(key)
-            # Also add force field keys to tactile_keys if they're not already there
-            elif key.endswith('_force_field') and any(tkey in key for tkey in tactile_keys):
-                if key not in tactile_keys:
-                    tactile_keys.append(key)
         
         # for key in rgb_keys:
         #     replay_buffer[key].compressor.numthreads=1
@@ -1048,10 +1225,10 @@ class RealDataset(BaseImageDataset):
             else:
                 normalizer[key] = get_identity_normalizer_from_stat(stat)
 
-        # tactile
+        # tactile (force field data has shape (T, 7, 9, 6) - 6D with reference)
         for key in self.tactile_keys:
-            B, N, C = self.replay_buffer[key].shape
-            stat = array_to_stats(self.replay_buffer[key][()].reshape(B * N, C))
+            B, H, W, C = self.replay_buffer[key].shape  # (T, 7, 9, 6)
+            stat = array_to_stats(self.replay_buffer[key][()].reshape(B * H * W, C))
             normalizer[key] = get_identity_normalizer_from_stat(stat)
 
         # tactile coordinates (3D marker positions)
@@ -1095,15 +1272,58 @@ class RealDataset(BaseImageDataset):
         for key in self.spatial_keys:
             obs_dict[key] = np.moveaxis(sample[key][T_slice],1,2).astype(np.float32)
             del sample[key]
+        
+        # Process tactile data: combine force_field and coord into single tensor
         for key in self.tactile_keys:
-            obs_dict[key] = np.moveaxis(sample[key][T_slice],1,2).astype(np.float32)
-            del sample[key]
-        for key in self.tactile_coord_keys:
-            # Tactile coordinates have shape (T, 7, 9, 3), reshape to (T, 7*9, 3) for consistency
-            coord_data = sample[key][T_slice].astype(np.float32)  # (T, 7, 9, 3)
-            T, H, W, C = coord_data.shape
-            obs_dict[key] = coord_data.reshape(T, H*W, C)  # (T, 63, 3)
-            del sample[key]
+            # key is like "tactile_left_force_field" or "tactile_right_force_field"
+            # Get corresponding coord key
+            coord_key = key.replace('_force_field', '_coord')
+            
+            # Check if we should use 2D format (based on shape_meta)
+            expected_shape = self.shape_meta['obs'][key]['shape']
+            use_2d_format = len(expected_shape) == 3  # (C, H, W) for 2D, (C, N) for 1D
+            
+            if coord_key in sample:
+                # Force field: (T, 7, 9, 6) with 6D = [current(3), reference(3)]
+                force_field = sample[key][T_slice].astype(np.float32)  # (T, 7, 9, 6)
+                T, H, W, C_ff = force_field.shape
+                
+                # Coordinates: (T, 7, 9, 3)
+                coord_data = sample[coord_key][T_slice].astype(np.float32)  # (T, 7, 9, 3)
+                
+                if use_2d_format:
+                    # Keep 2D spatial structure: (T, 7, 9, 6) + (T, 7, 9, 3) -> (T, 9, 7, 9)
+                    # Move channel dimension to front: (T, H, W, C) -> (T, C, H, W)
+                    force_field = np.moveaxis(force_field, -1, 1)  # (T, 6, 7, 9)
+                    coord_data = np.moveaxis(coord_data, -1, 1)  # (T, 3, 7, 9)
+                    # Combine: [force_field(6), coordinates(3)] -> (T, 9, 7, 9)
+                    obs_dict[key] = np.concatenate([force_field, coord_data], axis=1)  # (T, 9, 7, 9)
+                else:
+                    # Flatten spatial dimensions: (T, 7, 9, 6) -> (T, 6, 63)
+                    force_field = force_field.reshape(T, H*W, C_ff)  # (T, 63, 6)
+                    force_field = np.moveaxis(force_field, 1, 2)  # (T, 6, 63)
+                    
+                    # Coordinates: (T, 7, 9, 3) -> (T, 3, 63)
+                    coord_data = coord_data.reshape(T, H*W, 3)  # (T, 63, 3)
+                    coord_data = np.moveaxis(coord_data, 1, 2)  # (T, 3, 63)
+                    
+                    # Combine: [force_field(6), coordinates(3)] -> (T, 9, 63)
+                    obs_dict[key] = np.concatenate([force_field, coord_data], axis=1)  # (T, 9, 63)
+                
+                del sample[key]
+                del sample[coord_key]
+            else:
+                # Fallback: just use force field if coord not available
+                force_field = sample[key][T_slice].astype(np.float32)  # (T, 7, 9, 6)
+                T, H, W, C_ff = force_field.shape
+                
+                if use_2d_format:
+                    # Keep 2D format: (T, 7, 9, 6) -> (T, 6, 7, 9)
+                    obs_dict[key] = np.moveaxis(force_field, -1, 1)  # (T, 6, 7, 9)
+                else:
+                    # Flatten: (T, 7, 9, 6) -> (T, 6, 63)
+                    obs_dict[key] = force_field.reshape(T, C_ff, H*W)  # (T, 6, 63)
+                del sample[key]
 
         data = {
             'obs': dict_apply(obs_dict, torch.from_numpy),
@@ -1419,13 +1639,20 @@ def predict_contact_field(model, obj_pointcloud, tactile_data_left, tactile_data
         return np.zeros((0, 1)), np.zeros((0, 3))
     
     # Prepare batch data for model
+    # Note: Model expects 'point_cloud' not 'object_point_cloud'
+    # Tactile data format: Model stacks left/right to get (B, 2, H, W, C) where H=7, W=9, C=6
+    # So we need to keep channels LAST, not channels first!
+    # Input: (7, 9, 6) -> keep as (7, 9, 6) for (H, W, C) format
+    
     batch_data = {
-        'object_point_cloud': torch.from_numpy(obj_pointcloud).float().unsqueeze(0).to(device),  # (1, N, 3)
-        'tactile_data_left': torch.from_numpy(tactile_data_left).float().unsqueeze(0).to(device),  # (1, 7, 9, 3)
-        'tactile_data_right': torch.from_numpy(tactile_data_right).float().unsqueeze(0).to(device),  # (1, 7, 9, 3)
+        'point_cloud': torch.from_numpy(obj_pointcloud).float().unsqueeze(0).to(device),  # (1, N, 3)
+        'env_point_cloud': None,  # No environment points for contact prediction
+        'tactile_data_left': torch.from_numpy(tactile_data_left).float().unsqueeze(0).to(device),  # (1, 7, 9, 6)
+        'tactile_data_right': torch.from_numpy(tactile_data_right).float().unsqueeze(0).to(device),  # (1, 7, 9, 6)
         'tactile_coord_left': torch.from_numpy(tactile_coord_left).float().unsqueeze(0).to(device),  # (1, 7, 9, 3)
         'tactile_coord_right': torch.from_numpy(tactile_coord_right).float().unsqueeze(0).to(device),  # (1, 7, 9, 3)
-        'ee_pose': torch.from_numpy(ee_pose).float().unsqueeze(0).to(device),  # (1, 7)
+        'ee_pose': torch.from_numpy(ee_pose).float().unsqueeze(0).unsqueeze(0).to(device),  # (1, 1, 7) - add time dimension
+        'ee_vel': torch.zeros(1, 1, 6, device=device),  # (1, 1, 6) - zero velocity as placeholder
     }
     
     # Run inference

@@ -1,8 +1,9 @@
 """
-Terminal-based evaluation for real Franka robot that uses policy inference and avoids OpenCV display issues.
+Terminal-based evaluation for real Franka robot with tactile force field support.
+This script evaluates policies that use tactile force field observations.
 
 Usage:
-python eval_real_franka_terminal.py -i <ckpt_path> -o <save_dir> --robot_ip <ip_of_franka>
+python eval_real_franka_terminal_tactile.py -i <ckpt_path> -o <save_dir> --robot_ip <ip_of_franka>
 
 ================ Human in control ==============
 Commands (type and press Enter):
@@ -41,14 +42,14 @@ from omegaconf import open_dict
 import scipy.spatial.transform as st
 import diffusers
 from d3fields.utils.draw_utils import np2o3d
-from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
-# from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
+from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
 from gendp.common.precise_sleep import precise_wait
 from gendp.real_world.real_inference_util import (
     get_real_obs_resolution, 
     get_real_obs_dict)
 from gendp.common.pytorch_util import dict_apply
 from gendp.common.kinematics_utils import KinHelper
+from gendp.common.tactile_utils import TactileProcessor
 from gendp.workspace.base_workspace import BaseWorkspace
 from gendp.policy.base_image_policy import BaseImagePolicy
 from gendp.common.cv2_util import get_image_transform
@@ -104,7 +105,6 @@ def policy_action_to_env_action(policy_action, action_mode, num_bots, delta_acti
         delta_action: If True, policy outputs delta actions
         current_ee_pose: Current EE pose (7,) [x,y,z,rx,ry,rz,gripper] needed for delta actions
     """
-    # policy_action: (T, Da), Da=10 * num_bots (3 dof translation, 6 dof rotation, 1 gripper)
     if action_mode == 'eef':
         T = policy_action.shape[0]
         action_reshape = policy_action.reshape((T * num_bots, -1))
@@ -163,7 +163,7 @@ def policy_action_to_env_action(policy_action, action_mode, num_bots, delta_acti
 def terminal_input_thread():
     """Handle terminal input in separate thread"""
     print("\n" + "="*60)
-    print("FRANKA ROBOT EVALUATION - TERMINAL CONTROL")
+    print("FRANKA ROBOT EVALUATION - TACTILE - TERMINAL CONTROL")
     print("="*60)
     print("Commands:")
     print("  c       - Start evaluation (policy takes control)")
@@ -381,6 +381,37 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
     print("steps_per_inference:", steps_per_inference)
     print("action_offset:", action_offset)
 
+    # Initialize tactile processors for tactile force field
+    tactile_processors = {}
+    
+    # Check for tactile_left settings
+    has_tactile_left = 'tactile_left_force_field' in cfg.task.shape_meta['obs'] or ('tactile_settings' in cfg.task.shape_meta and 'tactile_left' in cfg.task.shape_meta['tactile_settings'])
+    if has_tactile_left:
+        if 'tactile_settings' in cfg.task.shape_meta and 'tactile_left' in cfg.task.shape_meta['tactile_settings']:
+            setting_left = cfg.task.shape_meta['tactile_settings']['tactile_left']
+        elif 'tactile_left_force_field' in cfg.task.shape_meta['obs']:
+            setting_left = cfg.task.shape_meta['obs']['tactile_left_force_field'].get('setting', None)
+        else:
+            setting_left = None
+        tactile_processors['tactile_left'] = TactileProcessor(
+            width=320, height=240, marker_config=setting_left, use_gpu=True
+        )
+        print("✅ Initialized left tactile processor")
+    
+    # Check for tactile_right settings
+    has_tactile_right = 'tactile_right_force_field' in cfg.task.shape_meta['obs'] or ('tactile_settings' in cfg.task.shape_meta and 'tactile_right' in cfg.task.shape_meta['tactile_settings'])
+    if has_tactile_right:
+        if 'tactile_settings' in cfg.task.shape_meta and 'tactile_right' in cfg.task.shape_meta['tactile_settings']:
+            setting_right = cfg.task.shape_meta['tactile_settings']['tactile_right']
+        elif 'tactile_right_force_field' in cfg.task.shape_meta['obs']:
+            setting_right = cfg.task.shape_meta['obs']['tactile_right_force_field'].get('setting', None)
+        else:
+            setting_right = None
+        tactile_processors['tactile_right'] = TactileProcessor(
+            width=320, height=240, marker_config=setting_right, use_gpu=True
+        )
+        print("✅ Initialized right tactile processor")
+
     # Start terminal input thread
     input_thread = threading.Thread(target=terminal_input_thread, daemon=True)
     input_thread.start()
@@ -413,7 +444,8 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                     exclude_colors = cfg.task.dataset.exclude_colors if 'exclude_colors' in cfg.task.dataset else []
                     obs_dict_np = get_real_obs_dict(
                         env_obs=obs, shape_meta=cfg.task.shape_meta, 
-                        fusion=fusion, expected_labels=expected_labels, teleop=kin_helper, exclude_colors=exclude_colors)
+                        fusion=fusion, expected_labels=expected_labels, teleop=kin_helper, exclude_colors=exclude_colors,
+                        tactile_processors=tactile_processors)
 
                     obs_dict = dict_apply(obs_dict_np, 
                         lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
@@ -455,11 +487,11 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             stage = robot_state['stage']
                             robot_state['iteration'] = iter_idx
                             
-                            # Create visualization similar to demo_real_franka_terminal
+                            # Create visualization
                             if vis_camera_idx == 0:
                                 vis_img = obs[f'camera_{CAMERA_NAMES[vis_camera_idx]}_color'][-1]
                             else:
-                                # Use front and right cameras like in demo
+                                # Use front and right cameras
                                 rs_front = obs['camera_front_color'][-1,:,:,::-1].copy() if 'camera_front_color' in obs else obs[f'camera_{CAMERA_NAMES[0]}_color'][-1]
                                 rs_right = obs['camera_right_color'][-1,:,:,::-1].copy() if 'camera_right_color' in obs else obs[f'camera_{CAMERA_NAMES[1]}_color'][-1]
                                 
@@ -501,7 +533,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             # Check if we need to move to initial pose
                             if robot_state['move_to_init']:
                                 if action_mode == 'joint':
-                                    # Initial joint configuration from real_env_franka_gripper_gelsight.py
+                                    # Initial joint configuration
                                     j_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, 
                                                        -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 
                                                        1.6146283149719238, robot_state['gripper_pos']])
@@ -510,7 +542,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                         timestamps=[t_command_target-time.monotonic()+time.time()],
                                         mode='joint')
                                 elif action_mode == 'eef':
-                                    # Home end-effector pose: [x, y, z, rx, ry, rz, gripper]
+                                    # Home end-effector pose
                                     ee_init = np.array([0.5, 0.242, 0.2517, 2.702, -0.458, -0.614, robot_state['gripper_pos']])
                                     env.exec_actions(
                                         actions=[ee_init],
@@ -527,8 +559,8 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                     mode='joint')
                             elif action_mode == 'eef':
                                 # For EEF mode, maintain current EEF position and gripper
-                                curr_ee_pose = obs['ee_pose'][-1].copy()  # [x, y, z, rx, ry, rz, gripper]
-                                curr_ee_pose[-1] = robot_state['gripper_pos']  # Update gripper position
+                                curr_ee_pose = obs['ee_pose'][-1].copy()
+                                curr_ee_pose[-1] = robot_state['gripper_pos']
                                 env.exec_actions(
                                     actions=[curr_ee_pose],
                                     timestamps=[t_command_target-time.monotonic()+time.time()],
@@ -553,7 +585,6 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             start_delay = 1.0
                             eval_t_start = time.time() + start_delay
                             t_start = time.monotonic() + start_delay
-                            # env.start_episode(eval_t_start, save_episode=False)
                             env.start_episode(eval_t_start, save_video=True, save_episode=False)
                             # wait for 1/15 sec to get the closest frame actually
                             frame_latency = 1/15
@@ -583,9 +614,10 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                     t_obs_dict_start = time.perf_counter()
                                     obs_dict_np = get_real_obs_dict(
                                         env_obs=obs, shape_meta=cfg.task.shape_meta, 
-                                        fusion=fusion, expected_labels=expected_labels, teleop=kin_helper, exclude_colors=exclude_colors)
+                                        fusion=fusion, expected_labels=expected_labels, teleop=kin_helper, exclude_colors=exclude_colors,
+                                        tactile_processors=tactile_processors)
                                     t_obs_dict_end = time.perf_counter()
-                                    # print(f"⏱️  [Timing] Get obs dict (fusion): {(t_obs_dict_end - t_obs_dict_start)*1000:.2f}ms")
+                                    # print(f"⏱️  [Timing] Get obs dict (fusion + tactile): {(t_obs_dict_end - t_obs_dict_start)*1000:.2f}ms")
                                     
                                     t_to_device_start = time.perf_counter()
                                     obs_dict = dict_apply(obs_dict_np, 
@@ -600,21 +632,19 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                     
                                     action = result['action'][0].detach().to('cpu').numpy()
                                     
-                                    t_inference_end = time.perf_counter()
-                                    # print(f"⏱️  [Timing] Total inference: {(t_inference_end - t_inference_start)*1000:.2f}ms")
+                                t_inference_end = time.perf_counter()
+                                # print(f"⏱️  [Timing] Total inference: {(t_inference_end - t_inference_start)*1000:.2f}ms")
 
                                 t_action_convert_start = time.perf_counter()
-                                # Get current ee_pose for delta action conversion
+                                # Get current end-effector pose for delta action conversion
                                 current_ee_pose = obs['ee_pose'][-1] if delta_action else None
-                                print("Action:", action)
-                                env_actions = policy_action_to_env_action(
-                                    action, action_mode, num_bots, 
-                                    delta_action=delta_action,
-                                    current_ee_pose=current_ee_pose
-                                )
+                                print("action:", action)
+                                env_actions = policy_action_to_env_action(action, action_mode, num_bots, 
+                                                                          delta_action=delta_action, 
+                                                                          current_ee_pose=current_ee_pose)
                                 t_action_convert_end = time.perf_counter()
                                 # print(f"⏱️  [Timing] Action conversion: {(t_action_convert_end - t_action_convert_start)*1000:.2f}ms")
-
+                                
                                 # deal with timing
                                 t_timing_start = time.perf_counter()
                                 action_timestamps = (np.arange(len(action), dtype=np.float64) + action_offset
@@ -659,7 +689,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                 
                                 vis_camera_name = CAMERA_NAMES[vis_camera_idx]
                                 vis_img = obs[f'camera_{vis_camera_name}_color'][-1]
-                                text = 'Episode: {}, Time: {:.1f} [POLICY]'.format(
+                                text = 'Episode: {}, Time: {:.1f} [POLICY+TACTILE]'.format(
                                     episode_id, time.monotonic() - t_start
                                 )
                                 cv2.putText(

@@ -147,7 +147,7 @@ def vis_distill_feats(pts, feats):
 def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq,
                   robot_base_pose_in_world_seq = None, teleop_robot = None, qpos_seq=None, expected_labels=None,
                   tool_names=[None], exclude_threshold=0.01, exclude_colors=[], use_seg=False, use_obj_bg_seg=False,
-                  gripper_pose_seq=None, use_gripper_crop=False, gripper_crop_params=None):
+                  gripper_pose_seq=None, use_gripper_crop=False, gripper_crop_params=None, include_rgb=False):
     # shape_meta: (dict) shape meta data for d3fields
     # color_seq: (np.ndarray) (T, V, H, W, C)
     # depth_seq: (np.ndarray) (T, V, H, W)
@@ -167,8 +167,8 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     use_dino = False
     distill_dino = shape_meta['info']['distill_dino'] if 'distill_dino' in shape_meta['info'] else False
     distill_obj = shape_meta['info']['distill_obj'] if 'distill_obj' in shape_meta['info'] else False
-    # env_obj = shape_meta['info']['env_obj'] if 'env_obj' in shape_meta['info'] else False
-    # query_texts = [distill_obj] #, env_obj]
+    include_rgb = shape_meta['info'].get('add_rgb_channels', False)
+
     query_texts = [shape_meta['info']['query_text'] if 'query_text' in shape_meta['info'] else distill_obj]
     query_thresholds = [0.2] #, 0.2]
     if "N_gripper" in shape_meta['info']:
@@ -216,6 +216,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     # assert H == 240 and W == 320 and C == 3
     aggr_src_pts_ls = []
     aggr_feats_ls = []
+    aggr_colors_ls = []
     # For object/background segmentation
     obj_pts_ls = []
     obj_feats_ls = []
@@ -297,8 +298,13 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         ee_pcd_tensor = torch.from_numpy(ee_pcd).to(device=fusion.device, dtype=fusion.dtype)
         
         if use_dino or distill_dino or use_obj_bg_seg:
-            ee_eval_res = fusion.eval(ee_pcd_tensor, return_names=['dino_feats'])
+            return_names = ['dino_feats']
+            if include_rgb:
+                return_names.append('color')
+            ee_eval_res = fusion.eval(ee_pcd_tensor, return_names=return_names)
             ee_feats = ee_eval_res['dino_feats']
+            if include_rgb:
+                ee_colors = ee_eval_res['color']
         
         if use_seg:
             fusion.text_queries_for_inst_mask(query_texts, query_thresholds, boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
@@ -363,9 +369,10 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 # Match the dtype of fusion (typically float16)
                 obj_feat_list = [torch.zeros((obj_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
                 obj_pts_list = [np.zeros((obj_target_pts, 3), dtype=np.float32)]
+                obj_colors_list = [torch.zeros((obj_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
             else:
-                # Extract features for object normally
-                obj_feat_list, obj_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, obj_target_pts, per_instance=True, use_seg=False, use_dino=True)
+                # Extract features for object normally, including RGB
+                obj_feat_list, obj_pts_list, _, obj_colors_list = fusion.select_features_from_pcd(obj_pcd, obj_target_pts, per_instance=True, use_seg=False, use_dino=True, include_rgb=include_rgb)
             
             # Handle empty background point cloud gracefully
             if bg_pcd.shape[0] == 0:
@@ -373,9 +380,10 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 # Match the dtype of fusion (typically float16)
                 bg_feat_list = [torch.zeros((bg_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
                 bg_pts_list = [np.zeros((bg_target_pts, 3), dtype=np.float32)]
+                bg_colors_list = [torch.zeros((bg_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
             else:
                 # Extract features for background normally
-                bg_feat_list, bg_pts_list, _ = fusion.select_features_from_pcd(bg_pcd, bg_target_pts, per_instance=True, use_seg=False, use_dino=True)
+                bg_feat_list, bg_pts_list, _, bg_colors_list = fusion.select_features_from_pcd(bg_pcd, bg_target_pts, per_instance=True, use_seg=False, use_dino=True, include_rgb=include_rgb)
             
             # Store object and background data separately
             obj_src_pts = np.concatenate(obj_pts_list, axis=0) if obj_pts_list else np.zeros((0, 3), dtype=np.float32)
@@ -383,13 +391,24 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             bg_src_pts = np.concatenate(bg_pts_list, axis=0) if bg_pts_list else np.zeros((0, 3), dtype=np.float32)
             bg_src_feats = torch.concat(bg_feat_list, axis=0).detach().cpu().numpy() if bg_feat_list else np.zeros((0, 1024), dtype=np.float32)
             
+            # Process RGB colors if enabled
+            if include_rgb:
+                # Object colors: actual RGB values from images (N_obj, 3)
+                obj_src_colors = torch.concat(obj_colors_list, axis=0).detach().cpu().numpy() if obj_colors_list else np.zeros((0, 3), dtype=np.float32)
+                # Background colors: actual RGB values (N_bg, 3)
+                bg_src_colors = torch.concat(bg_colors_list, axis=0).detach().cpu().numpy() if bg_colors_list else np.zeros((0, 3), dtype=np.float32)
+            
             # For compatibility with existing code, still combine them
             src_feat_list = obj_feat_list + bg_feat_list
             src_pts_list = obj_pts_list + bg_pts_list
-            
+            if include_rgb:
+                # For combined processing: both obj and bg get actual RGB
+                src_colors_list = obj_colors_list + bg_colors_list
+            else:
+                src_colors_list = []
         elif use_seg:
             obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=boundaries)
-            src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, N_gripper, per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino))
+            src_feat_list, src_pts_list, _, src_colors_list = fusion.select_features_from_pcd(obj_pcd, N_gripper, per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino), include_rgb=include_rgb)
             # Initialize empty variables for non-obj_bg_seg case
             obj_src_pts = np.zeros((0, 3), dtype=np.float32)
             obj_src_feats = np.zeros((0, 1024), dtype=np.float32)
@@ -397,7 +416,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             bg_src_feats = np.zeros((0, 1024), dtype=np.float32)
         else:
             obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
-            src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino))
+            src_feat_list, src_pts_list, _, src_colors_list = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino), include_rgb=include_rgb)
             # Initialize empty variables for non-obj_bg_seg case
             obj_src_pts = np.zeros((0, 3), dtype=np.float32)
             obj_src_feats = np.zeros((0, 1024), dtype=np.float32)
@@ -407,18 +426,29 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
         aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino or use_obj_bg_seg) else None # (N, 1024)
         
+        # Process RGB colors if enabled
+        if include_rgb and len(src_colors_list) > 0:
+            aggr_colors = torch.concat(src_colors_list, axis=0).detach().cpu().numpy()  # (N, 3)
+        else:
+            aggr_colors = None
+        
         # only to adjust point number when using segmentation
         if use_seg:
             max_obj_pts_num = max_pts_num - ee_pcd.shape[0]
             if aggr_src_pts.shape[0] > max_obj_pts_num:
                 aggr_src_pts = aggr_src_pts[:max_obj_pts_num]
                 aggr_feats = aggr_feats[:max_obj_pts_num] if (use_dino or distill_dino or use_obj_bg_seg) else None
+                aggr_colors = aggr_colors[:max_obj_pts_num] if aggr_colors is not None else None
             elif aggr_src_pts.shape[0] < max_obj_pts_num:
                 aggr_src_pts = np.pad(aggr_src_pts, ((0,max_obj_pts_num-aggr_src_pts.shape[0]),(0,0)), mode='constant')
                 aggr_feats = np.pad(aggr_feats, ((0,max_obj_pts_num-aggr_feats.shape[0]),(0,0)), mode='constant') if (use_dino or distill_dino or use_obj_bg_seg) else None
+                aggr_colors = np.pad(aggr_colors, ((0,max_obj_pts_num-aggr_colors.shape[0]),(0,0)), mode='constant') if aggr_colors is not None else None
         
         aggr_src_pts = np.concatenate([aggr_src_pts, ee_pcd], axis=0)
         aggr_feats = np.concatenate([aggr_feats, ee_feats.detach().cpu().numpy()], axis=0) if (use_dino or distill_dino or use_obj_bg_seg) else None
+        # Concatenate RGB colors with ee colors (ee gets actual RGB from images)
+        if aggr_colors is not None:
+            aggr_colors = np.concatenate([aggr_colors, ee_colors.detach().cpu().numpy()], axis=0)
         
         if distill_dino:
             aggr_feats = fusion.eval_dist_to_sel_feats(torch.concat(src_feat_list + [ee_feats], axis=0),
@@ -493,11 +523,12 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         # save to list
         aggr_src_pts_ls.append(aggr_src_pts.astype(np.float32))
         aggr_feats_ls.append(aggr_feats.astype(np.float32) if (use_dino or distill_dino or use_obj_bg_seg) else None)
+        aggr_colors_ls.append(aggr_colors.astype(np.float32) if aggr_colors is not None else None)
     
     if use_obj_bg_seg:
-        return aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls
+        return aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls, aggr_colors_ls
     else:
-        return aggr_src_pts_ls, aggr_feats_ls
+        return aggr_src_pts_ls, aggr_feats_ls, aggr_colors_ls
 
 # basically the same as d3fields_proc, but to keep the original code clean, we create a new function
 def d3fields_proc_for_vis(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq,
@@ -785,7 +816,17 @@ def vis_post_actions(actions):
         time.sleep(0.03)
     visualizer.destroy_window()
 
-def _convert_actions(raw_actions, rotation_transformer, action_key):
+def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action=False):
+    """
+    Convert raw actions to the desired format.
+    
+    Args:
+        raw_actions: Raw action array with shape (T, D)
+        rotation_transformer: Rotation transformer for converting rotations
+        action_key: Type of action ('cartesian_action' or 'joint_action')
+        delta_action: If True, convert to delta ee_pose format [delta_pos(3), delta_rotvec(3), gripper_open_close(1)]
+                     If False, keep as absolute ee_pose format [pos(3), rot6d(6), gripper(1)]
+    """
     act_num, act_dim = raw_actions.shape
     is_bimanual = (act_dim == 14)
     # vis_actions(raw_actions[:,:7])
@@ -794,13 +835,45 @@ def _convert_actions(raw_actions, rotation_transformer, action_key):
         raw_actions = raw_actions.reshape(act_num * 2, act_dim // 2)
     
     if action_key == 'cartesian_action':
-        pos = raw_actions[...,:3]
-        rot = raw_actions[...,3:6]
-        gripper = raw_actions[...,6:]
-        rot = rotation_transformer.forward(rot)
-        raw_actions = np.concatenate([
-            pos, rot, gripper
-        ], axis=-1).astype(np.float32)
+        if delta_action:
+            # Convert to delta format: [delta_pos(3), delta_rotvec(3), gripper_open_close(1)]
+            pos = raw_actions[...,:3]  # (T, 3)
+            rot_euler = raw_actions[...,3:6]  # (T, 3) euler angles
+            gripper = raw_actions[...,6:]  # (T, 1)
+            
+            # Compute delta positions
+            delta_pos = np.zeros_like(pos)
+            delta_pos[1:] = pos[1:] - pos[:-1]
+            delta_pos[0] = 0  # First delta is zero
+            
+            # Convert euler to rotation matrices
+            import scipy.spatial.transform as st
+            rot_mats = st.Rotation.from_euler('xyz', rot_euler).as_matrix()  # (T, 3, 3)
+            
+            # Compute delta rotations as rotvec (axis-angle)
+            delta_rotvec = np.zeros_like(pos)  # (T, 3)
+            for t in range(1, act_num):
+                # R_delta = R_t * R_{t-1}^T
+                delta_rot_mat = rot_mats[t] @ rot_mats[t-1].T
+                delta_rotvec[t] = st.Rotation.from_matrix(delta_rot_mat).as_rotvec()
+            delta_rotvec[0] = 0  # First delta is zero
+            
+            # Convert gripper position to open/close command (binary)
+            # Threshold: > 0.04 is open (1), <= 0.04 is close (0)
+            gripper_open_close = (gripper > 0.04).astype(np.float32)
+            
+            raw_actions = np.concatenate([
+                delta_pos, delta_rotvec, gripper_open_close
+            ], axis=-1).astype(np.float32)
+        else:
+            # Absolute format: [pos(3), rot6d(6), gripper(1)]
+            pos = raw_actions[...,:3]
+            rot = raw_actions[...,3:6]
+            gripper = raw_actions[...,6:]
+            rot = rotation_transformer.forward(rot)
+            raw_actions = np.concatenate([
+                pos, rot, gripper
+            ], axis=-1).astype(np.float32)
     elif action_key == 'joint_action':
         raw_actions = raw_actions[..., :8]
     else:
@@ -811,6 +884,27 @@ def _convert_actions(raw_actions, rotation_transformer, action_key):
     actions = raw_actions
     # vis_post_actions(actions[:,10:])
     return actions
+
+def _convert_ee_pose_obs(raw_ee_pose, rotation_transformer):
+    """
+    Convert ee_pose observation from [pos(3), euler(3), gripper(1)] to [pos(3), rot6d(6)].
+    
+    Args:
+        raw_ee_pose: Raw ee_pose array with shape (T, 7) - [x, y, z, rx, ry, rz, gripper]
+        rotation_transformer: Rotation transformer for converting euler to rot6d
+    
+    Returns:
+        Converted ee_pose with shape (T, 9) - [x, y, z, rot6d(6)]
+    """
+    pos = raw_ee_pose[..., :3]  # (T, 3)
+    rot_euler = raw_ee_pose[..., 3:6]  # (T, 3)
+    # gripper is not included in ee_pose observation, only in action
+    
+    # Convert euler to rot6d using rotation transformer
+    rot6d = rotation_transformer.forward(rot_euler)  # (T, 6)
+    
+    ee_pose = np.concatenate([pos, rot6d], axis=-1).astype(np.float32)
+    return ee_pose
 
 def get_contact_field(pcd, contact_points, 
                      min_force_magnitude=0.001,
@@ -866,7 +960,7 @@ def get_contact_field(pcd, contact_points,
 
     # For each valid contact point
     for i, (contact_pos, contact_force, force_mag, closest_idx) in enumerate(
-        zip(valid_positions, valid_forces, valid_force_mags, contact_to_pcd_indices)):
+        zip(valid_positions, valid_forces, valid_force_magnitudes, contact_to_pcd_indices)):
         
         # Set contact probability at closest point
         # Use normalized force magnitude as base probability

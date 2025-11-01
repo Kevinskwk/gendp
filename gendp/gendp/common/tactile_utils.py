@@ -65,17 +65,45 @@ class TactileProcessor:
                  marker_config=None,
                  use_gpu=True,
                  marker_mask_min=0,
-                 marker_mask_max=70):
+                 marker_mask_max=70,
+                 # Scaling and clipping parameters for contact field inference
+                 apply_scaling=False,  # Set to True to enable scaling/clipping for contact field
+                 scale_factor=0.15,    # Scale DOWN real-world data to match pre-training distribution
+                 clip_range=(-10.0, 10.0)):
         
         self.marker_config = marker_config
         self.marker_mask_min = marker_mask_min
         self.marker_mask_max = marker_mask_max
+        
+        # Scaling parameters for contact field model inference
+        # Real-world data is LARGER than pre-training simulation data, so we need to SCALE DOWN
+        # Pre-training: raw values ×1000 → range ~[-3, 3]
+        # Real-world: raw values are already large → need to scale DOWN by ~0.15 to match
+        self.apply_scaling = apply_scaling
+        self.scale_factor = scale_factor
+        self.clip_range = clip_range
+        
+        # Pre-clipping thresholds (based on 99.5th percentile to remove extreme outliers)
+        # Real-world statistics (BEFORE x-y swap in code):
+        # - penetration_depth: 99th = 10.77, use ±15 as safe pre-clip
+        # - shear_force_x (dx): 99th = 6.11, use ±25 as safe pre-clip
+        # - shear_force_y (dy): 99th = 19.93, use ±25 as safe pre-clip
+        # Both shear forces use the same threshold for consistency
+        self.pre_clip_thresholds = {
+            'depth': (-15.0, 15.0),      # penetration_depth
+            'dx': (-25.0, 25.0),         # shear_force_x (horizontal, along columns)
+            'dy': (-25.0, 25.0)          # shear_force_y (vertical, along rows)
+        }
         
         self.reconstruction = Reconstruction3D(
             image_width=width,
             image_height=height,
             use_gpu=use_gpu
         )
+        
+        # Expand ~ to full home directory path
+        import os
+        nn_model_path = os.path.expanduser(nn_model_path)
         
         if self.reconstruction.load_nn(nn_model_path) is None:
             raise ValueError(f"Failed to load neural network model from {nn_model_path}")
@@ -155,13 +183,74 @@ class TactileProcessor:
         depth_map, contact_mask, grad_x, grad_y, marker_depths = self.get_depth(frame, initial_positions)
         
         # Calculate displacement field and combine with depth
+        # Swap x and y channels to match simulation convention
         displacement = points - initial_positions
-        force_field = np.concatenate([displacement, marker_depths[:, :, None]], axis=-1)
+        displacement_swapped = displacement[:, :, [1, 0]]  # Swap [x, y] to [y, x]
+        force_field = np.concatenate([marker_depths[:, :, None], displacement_swapped], axis=-1)
         
-        # Note: force_field is now sorted using M * (x-x0)/dx + (y-y0)/dy formula
-        # and can be reshaped to (N, M) where N=cols, M=rows
-        # Grid[x,y] corresponds to column x, row y in the marker grid
+        # Apply scaling and clipping if enabled (for contact field inference)
+        if self.apply_scaling:
+            force_field = self._scale_and_clip(force_field)
+        
+        # Note: force_field shape is (N, M, 3) where:
+        # - N=cols (7), M=rows (9)
+        # - Channel 0: depth (penetration depth, normal force)
+        # - Channel 1: dy (shear force y, vertical, along rows)
+        # - Channel 2: dx (shear force x, horizontal, along columns)
         return force_field
+    
+    def _scale_and_clip(self, force_field):
+        """
+        Apply pre-clipping, scaling, and final clipping to tactile force field data.
+        
+        This is necessary because real-world tactile data has different distribution than
+        simulation pre-training data:
+        - Pre-training: Small raw values (0.001-0.003) × 1000 → range ~[-3, 3]
+        - Real-world: Large raw values (1-20) → need to scale DOWN by ~0.15 → range ~[-3, 3]
+        
+        Pipeline:
+        - Pre-clip: Remove extreme outliers (99.5th percentile)
+        - Scale: Scale DOWN real-world data to match pre-training distribution (×0.15)
+        - Final clip: Clip to model's expected input range [-10, 10]
+        
+        Args:
+            force_field: (N, M, 3) array with [depth, dy, dx] (swapped from real sensor)
+            
+        Returns:
+            Scaled and clipped force field
+        """
+        # Extract channels (note: dy and dx are swapped compared to simulation)
+        depth = force_field[:, :, 0]  # penetration depth
+        dy = force_field[:, :, 1]     # shear force y (vertical, along rows)
+        dx = force_field[:, :, 2]     # shear force x (horizontal, along columns)
+        
+        # Step 1: Pre-clip to remove extreme outliers
+        # Real-world values (BEFORE swap in code, but after conceptual understanding):
+        # - depth: ~[-18, 21]
+        # - dy: ~[-22, 28] (shear y, swapped from original x)
+        # - dx: ~[-7, 7] (shear x, swapped from original y)
+        depth = np.clip(depth, self.pre_clip_thresholds['depth'][0], self.pre_clip_thresholds['depth'][1])
+        dy = np.clip(dy, self.pre_clip_thresholds['dy'][0], self.pre_clip_thresholds['dy'][1])
+        dx = np.clip(dx, self.pre_clip_thresholds['dx'][0], self.pre_clip_thresholds['dx'][1])
+        
+        # Step 2: Scale DOWN to match pre-training distribution
+        # Pre-training 99th percentiles: depth ~1.19, dx ~1.77, dy ~1.24 (after ×1000 scaling)
+        # Real-world 99th percentiles: depth ~10.77, dx ~6.11, dy ~19.93
+        # Use same scale factor (0.15) for all channels
+        depth = depth * self.scale_factor
+        dy = dy * self.scale_factor
+        dx = dx * self.scale_factor
+        
+        # Step 3: Final clip to model input range
+        # Ensures all values are in [-10, 10] as expected by the model
+        depth = np.clip(depth, self.clip_range[0], self.clip_range[1])
+        dx = np.clip(dx, self.clip_range[0], self.clip_range[1])
+        dy = np.clip(dy, self.clip_range[0], self.clip_range[1])
+        
+        # Recombine channels in the same order [depth, dy, dx]
+        scaled_force_field = np.stack([depth, dy, dx], axis=-1)
+        
+        return scaled_force_field
 
     def process_sequence(self, frames):
         force_fields = []

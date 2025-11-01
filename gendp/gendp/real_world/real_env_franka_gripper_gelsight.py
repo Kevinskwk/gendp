@@ -56,7 +56,8 @@ GELSIGHT_NAMES = {
     0: 'right'
 }
 
-GELSIGHT_IDS = [14, 12]
+# GELSIGHT_IDS = [14, 12]
+GELSIGHT_IDS = ['/dev/video-gs_mini_right', '/dev/video-gs_mini_left']
 
 class RealEnvFranka:
     def __init__(self,
@@ -288,6 +289,9 @@ class RealEnvFranka:
         self.stage_accumulator = None
 
         self.start_time = None
+        self.save_video = False
+        self.save_episode = False
+        self.episode_started = False
 
     # ======== start-stop API =============
     @property
@@ -503,11 +507,14 @@ class RealEnvFranka:
         return self.robot.get_state()
 
     # recording API
-    def start_episode(self, start_time=None, curr_outdir=None):
+    def start_episode(self, start_time=None, curr_outdir=None, save_video=True, save_episode=True):
         "Start recording and return first obs"
         if start_time is None:
             start_time = time.time()
         self.start_time = start_time
+        self.save_video = save_video
+        self.save_episode = save_episode
+        self.episode_started = True
 
         assert self.is_ready
 
@@ -519,48 +526,61 @@ class RealEnvFranka:
             video_dir = curr_outdir.joinpath('videos')
             video_dir.mkdir(parents=True, exist_ok=True)
             this_video_dir = video_dir.joinpath(str(self.episode_id))
-        this_video_dir.mkdir(parents=True, exist_ok=True)
-        n_cameras = self.realsense.n_cameras
-        video_paths = list()
-        # gs_video_paths = list()
-        for i in range(n_cameras):
-            video_paths.append(
-                str(this_video_dir.joinpath(f'{i}.mp4').absolute()))
-        # for i in range(self.gelsight.n_cameras):
-        #     gs_video_paths.append(
-        #         str(this_video_dir.joinpath(f'gelsight_{i}.mp4').absolute()))
+        
+        # only create video directory if saving video
+        if save_video:
+            this_video_dir.mkdir(parents=True, exist_ok=True)
+            n_cameras = self.realsense.n_cameras
+            video_paths = list()
+            # gs_video_paths = list()
+            for i in range(n_cameras):
+                video_paths.append(
+                    str(this_video_dir.joinpath(f'{i}.mp4').absolute()))
+            # for i in range(self.gelsight.n_cameras):
+            #     gs_video_paths.append(
+            #         str(this_video_dir.joinpath(f'gelsight_{i}.mp4').absolute()))
+        
         # start recording on realsense
         self.realsense.restart_put(start_time=start_time)
-        self.realsense.start_recording(video_path=video_paths, start_time=start_time)
+        if save_video:
+            self.realsense.start_recording(video_path=video_paths, start_time=start_time)
 
         # start recording on gelsight
         self.gelsight.restart_put(start_time=start_time)
-        # self.gelsight.start_recording(video_path=gs_video_paths, start_time=start_time)
+        # if save_video:
+        #     self.gelsight.start_recording(video_path=gs_video_paths, start_time=start_time)
 
         # create accumulators
-        self.obs_accumulator = TimestampObsAccumulator(
-            start_time=start_time,
-            dt=1 / self.frequency
-        )
-        self.action_accumulator = TimestampActionAccumulator(
-            start_time=start_time,
-            dt=1 / self.frequency
-        )
-        self.stage_accumulator = TimestampActionAccumulator(
-            start_time=start_time,
-            dt=1 / self.frequency
-        )
-        print(f'Episode {self.episode_id} started!')
+        if save_episode:
+            self.obs_accumulator = TimestampObsAccumulator(
+                start_time=start_time,
+                dt=1 / self.frequency
+            )
+            self.action_accumulator = TimestampActionAccumulator(
+                start_time=start_time,
+                dt=1 / self.frequency
+            )
+            self.stage_accumulator = TimestampActionAccumulator(
+                start_time=start_time,
+                dt=1 / self.frequency
+            )
+        print(f'Episode {self.episode_id} started! (save_video={save_video}, save_episode={save_episode})')
 
-    def end_episode(self, curr_outdir=None, incr_epi=False):
+    def end_episode(self, curr_outdir=None, incr_epi=True):
         "Stop recording"
-        assert self.is_ready
+        if not self.is_ready:
+            return
+        
+        # Only proceed if an episode was actually started
+        if not self.episode_started:
+            return
+            
+        # stop video recorder only if we started recording video
+        if self.save_video:
+            self.realsense.stop_recording()
+            # self.gelsight.stop_recording()
 
-        # stop video recorder
-        self.realsense.stop_recording()
-        # self.gelsight.stop_recording()
-
-        if self.obs_accumulator is not None:
+        if self.save_episode and self.obs_accumulator is not None:
             # recording
             assert self.action_accumulator is not None
             assert self.stage_accumulator is not None
@@ -693,12 +713,20 @@ class RealEnvFranka:
                 # save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
                 # print(f'Episode {self.episode_id} saved!')
 
-                if incr_epi:
-                    self.episode_id += 1
-
+            # Clean up accumulators
             self.obs_accumulator = None
             self.action_accumulator = None
             self.stage_accumulator = None
+        
+        # Increment episode ID regardless of save_episode setting
+        if incr_epi:
+            self.episode_id += 1
+            print(f'Episode ID incremented to {self.episode_id}')
+        
+        # Reset flags
+        self.save_video = False
+        self.save_episode = False
+        self.episode_started = False
 
     def _save_episode_data(self, episode, config_dict, episode_path, attr_dict):
         save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)

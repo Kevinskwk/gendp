@@ -52,6 +52,39 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
 
         # configure model
         self.model: DiffusionUnetHybridImagePolicy = hydra.utils.instantiate(cfg.policy)
+        
+        # Print parameter counts for all networks
+        print("\n" + "="*80)
+        print("MODEL ARCHITECTURE - Parameter Counts:")
+        print("="*80)
+        
+        # Total parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"\nTotal Model Parameters: {total_params:,}")
+        print(f"Trainable Parameters: {trainable_params:,}")
+        print(f"Non-trainable Parameters: {total_params - trainable_params:,}")
+        
+        # Observation encoders
+        if hasattr(self.model, 'obs_encoder') and self.model.obs_encoder is not None:
+            print(f"\n{'Observation Encoders:':-^80}")
+            if hasattr(self.model.obs_encoder, 'nets'):
+                for key, net in self.model.obs_encoder.nets.items():
+                    net_params = sum(p.numel() for p in net.parameters())
+                    net_trainable = sum(p.numel() for p in net.parameters() if p.requires_grad)
+                    print(f"  {key:30s}: {net_params:>12,} params ({net_trainable:>12,} trainable) - {net.__class__.__name__}")
+            
+            obs_encoder_params = sum(p.numel() for p in self.model.obs_encoder.parameters())
+            print(f"  {'Total Obs Encoder':30s}: {obs_encoder_params:>12,} params")
+        
+        # Noise predictor (U-Net)
+        if hasattr(self.model, 'noise_pred_net') and self.model.noise_pred_net is not None:
+            print(f"\n{'Noise Prediction Network (U-Net):':-^80}")
+            noise_pred_params = sum(p.numel() for p in self.model.noise_pred_net.parameters())
+            noise_pred_trainable = sum(p.numel() for p in self.model.noise_pred_net.parameters() if p.requires_grad)
+            print(f"  {'U-Net':30s}: {noise_pred_params:>12,} params ({noise_pred_trainable:>12,} trainable)")
+        
+        print("="*80 + "\n")
 
         self.ema_model: DiffusionUnetHybridImagePolicy = None
         if cfg.training.use_ema:

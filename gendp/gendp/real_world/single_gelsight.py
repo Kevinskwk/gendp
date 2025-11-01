@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import multiprocessing as mp
 import time
-from typing import Optional, Callable, Dict, Tuple
+from typing import Optional, Callable, Dict, Tuple, Union
 from gendp.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 from threadpoolctl import threadpool_limits
 
@@ -53,7 +53,7 @@ class SingleGelsight(mp.Process):
     def __init__(
             self,
             shm_manager,
-            device_id: int = 0,
+            device_id: Union[int, str] = 0,
             resolution: Tuple[int, int] = (320, 240),
             capture_fps: int = 30,
             put_fps: Optional[int] = None,

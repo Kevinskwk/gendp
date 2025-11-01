@@ -1,6 +1,6 @@
 _target_: gendp.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUnetHybridWorkspace
 is_real: true
-data_root: /home/showlab/gendp/data
+data_root: /home/kevin/gendp/
 output_dir: ${data_root}/data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
 # output_dir: /users/kevinma/gendp/data/outputs/2025.03.25/13.36.38_train_diffusion_unet_hybrid_screw_driving
 checkpoint:

@@ -6,6 +6,7 @@ and randomizers (e.g. Randomizer, CropRandomizer).
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.transforms import Lambda, Compose
 import torchvision.transforms.functional as TVF
 
@@ -611,19 +612,30 @@ class PointNetFeaNew(nn.Module):
 
 class TactileCore(EncoderCore, BaseNets.ConvBase):
     """
-    this is a latent feature extractor for point cloud data
-    need to distinguish this from other modules defined in feature_extractors.py
-    those modules are only used to extract the corresponding input (e.g. point flow, manual feature, etc.) from original observations
+    Tactile sensor encoder that processes tactile force field data combined with 3D marker coordinates.
+    
+    Input format: (batch, 9, num_markers) where:
+        - Channels 0-2: current force field [depth, dy, dx] (scaled and normalized)
+        - Channels 3-5: reference force field [depth, dy, dx] (scaled and normalized)
+        - Channels 6-8: 3D marker coordinates [x, y, z] in world frame
+    
+    This enables the network to learn spatially-aware tactile features by combining
+    current force measurements, reference baseline, and their 3D spatial locations.
     """
 
     def __init__(self, input_shape, output_dim=16, batchnorm=False):
         super(TactileCore, self).__init__(input_shape=input_shape)
-        self.dim = input_shape[0]
+        self.dim = input_shape[0]  # Should be 9: [force_current(3), force_ref(3), coords(3)]
+        self.num_points = input_shape[1]  # Number of markers (63 for 7x9 grid)
         self.output_dim = output_dim
+
+        # Verify input shape
+        assert self.dim == 9, f"TactileCore expects 9 channels (3 current + 3 ref + 3 coords), got {self.dim}"
 
         self.pointnet_local_feature_num = 64
         self.pointnet_global_feature_num = 512
 
+        # Local feature extraction: processes each marker's 9D features
         self.pointnet_local_fea = nn.Sequential(
             nn.Conv1d(self.dim, self.pointnet_local_feature_num, 1),
             (
@@ -642,12 +654,15 @@ class TactileCore(EncoderCore, BaseNets.ConvBase):
             ),
             nn.ReLU(),
         )
+        
+        # Global feature aggregation: max pooling over all markers
         self.pointnet_global_fea = PointNetFeaNew(
             self.pointnet_local_feature_num,
             [64, 128, self.pointnet_global_feature_num],
             batchnorm=batchnorm,
         )
 
+        # Final MLP to produce output features
         self.mlp_output = nn.Sequential(
             nn.Linear(self.pointnet_global_feature_num, 256),
             nn.ReLU(),
@@ -659,26 +674,122 @@ class TactileCore(EncoderCore, BaseNets.ConvBase):
     def output_shape(self, input_shape):
         return [self.output_dim]
 
-    def forward(self, marker_pos):
+    def forward(self, tactile_data):
         """
-        :param marker_pos: Tensor, size (batch, num_points, 4)
-        :return:
+        Forward pass through tactile encoder.
+        
+        Args:
+            tactile_data: Tensor of shape (batch, 9, num_points) where:
+                - channels 0-2: current force field [depth, dy, dx]
+                - channels 3-5: reference force field [depth, dy, dx]
+                - channels 6-8: 3D coordinates [x, y, z]
+        
+        Returns:
+            Encoded tactile features of shape (batch, output_dim)
         """
-        if marker_pos.ndim == 2:
-            marker_pos = torch.unsqueeze(marker_pos, dim=0)
+        if tactile_data.ndim == 2:
+            tactile_data = torch.unsqueeze(tactile_data, dim=0)
 
-        marker_pos = torch.transpose(marker_pos, 1, 2)
-        local_feature = self.pointnet_local_fea(
-            marker_pos
-        )  # (batch_num, self.pointnet_local_feature_num, point_num)
-        # shape: (batch, step * 2, num_points)
+        # Input: (batch, 9, num_points)
+        # Local features: (batch, 64, num_points)
+        local_feature = self.pointnet_local_fea(tactile_data)
+        
+        # Global features: (batch, 512)
         global_feature = self.pointnet_global_fea(local_feature).view(
             -1, self.pointnet_global_feature_num
-        )  # (batch_num, self.pointnet_global_feature_num)
+        )
 
+        # Output: (batch, output_dim)
         pred = self.mlp_output(global_feature)
-        # pred shape: (batch_num, out_dim)
         return pred
+
+
+class TactileConv2dCore(EncoderCore, BaseNets.ConvBase):
+    """
+    Tactile sensor encoder that processes tactile force field data as 2D arrays using 2D convolutions.
+    
+    Input format: (batch, 9, 7, 9) where:
+        - Channels 0-2: current force field [depth, dy, dx] (scaled and normalized)
+        - Channels 3-5: reference force field [depth, dy, dx] (scaled and normalized)
+        - Channels 6-8: 3D marker coordinates [x, y, z] in world frame
+        - Spatial dimensions: 7x9 tactile marker grid
+    
+    This treats tactile data as images and uses 2D convolutions to capture spatial patterns.
+    """
+
+    def __init__(self, input_shape, output_dim=16, batchnorm=False):
+        super(TactileConv2dCore, self).__init__(input_shape=input_shape)
+        self.input_channels = input_shape[0]  # Should be 9: [force_current(3), force_ref(3), coords(3)]
+        self.height = input_shape[1]  # Should be 7
+        self.width = input_shape[2]  # Should be 9
+        self.output_dim = output_dim
+
+        # Verify input shape
+        assert len(input_shape) == 3, f"TactileConv2dCore expects 3D input (C, H, W), got {len(input_shape)}D"
+        assert self.input_channels == 9, f"TactileConv2dCore expects 9 channels (3 current + 3 ref + 3 coords), got {self.input_channels}"
+
+        # 2D Convolutional layers
+        self.conv_layers = nn.Sequential(
+            # First conv block: 9 -> 32 channels
+            nn.Conv2d(self.input_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32) if batchnorm else nn.Identity(),
+            nn.ReLU(),
+            
+            # Second conv block: 32 -> 64 channels
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64) if batchnorm else nn.Identity(),
+            nn.ReLU(),
+            
+            # Third conv block: 64 -> 128 channels
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128) if batchnorm else nn.Identity(),
+            nn.ReLU(),
+        )
+        
+        # Calculate flattened feature size after conv layers
+        # Since we use padding=1, spatial dimensions remain: 7x9
+        self.conv_output_size = 128 * self.height * self.width  # 128 * 7 * 9 = 8064
+        
+        # MLP layers to produce final output
+        self.mlp_layers = nn.Sequential(
+            nn.Linear(self.conv_output_size, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, output_dim),
+        )
+
+    def output_shape(self, input_shape):
+        return [self.output_dim]
+
+    def forward(self, tactile_data):
+        """
+        Forward pass through 2D conv tactile encoder.
+        
+        Args:
+            tactile_data: Tensor of shape (batch, 9, 7, 9) where:
+                - channels 0-2: current force field [depth, dy, dx]
+                - channels 3-5: reference force field [depth, dy, dx]
+                - channels 6-8: 3D coordinates [x, y, z]
+                - spatial: 7x9 marker grid
+        
+        Returns:
+            Encoded tactile features of shape (batch, output_dim)
+        """
+        if tactile_data.ndim == 3:
+            tactile_data = torch.unsqueeze(tactile_data, dim=0)
+
+        # Input: (batch, 9, 7, 9)
+        # Conv features: (batch, 128, 7, 9)
+        conv_features = self.conv_layers(tactile_data)
+        
+        # Flatten: (batch, 128*7*9)
+        flat_features = conv_features.view(conv_features.size(0), -1)
+        
+        # MLP output: (batch, output_dim)
+        output = self.mlp_layers(flat_features)
+        
+        return output
 
 
 class SparseTransformer(EncoderCore, BaseNets.ConvBase):

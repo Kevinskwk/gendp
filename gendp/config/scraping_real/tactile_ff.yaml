@@ -11,7 +11,7 @@ checkpoint:
     mode: max
     monitor_key: test_mean_score
 dataloader:
-  batch_size: 128
+  batch_size: 64
   num_workers: 8
   persistent_workers: false
   pin_memory: true
@@ -30,7 +30,7 @@ keypoint_visible_rate: 1.0
 logging:
   group: null
   id: null
-  mode: online # online, offline
+  mode: online # online
   name: ${now:%Y.%m.%d}_${task_name}_${dataset_name}
   project: gild_${task_name}
   resume: false
@@ -59,11 +59,12 @@ shape_meta:
   trim_tail: 0
   action:
     shape:
-    - 10
+    - 7
+    delta: true
   obs:
     d3fields:
       shape:
-      - 9 # C (5 original + 4 contact field channels: contact_prob + fx + fy + fz)
+      - 5 # C
       - 2048 # N
       type: spatial
       info:
@@ -74,7 +75,7 @@ shape_meta:
         - camera_front
         - camera_left
         - camera_right
-        N_gripper: 100
+        N_gripper: 10
         boundaries:
           x_lower: 0.3
           x_upper: 0.7
@@ -83,11 +84,10 @@ shape_meta:
           z_lower: -0.03
           z_upper: 0.5
         resize_ratio: 0.5
-        use_contact_field: true  # Enable contact field prediction
     ee_pose:
       type: low_dim
       shape:
-      - 7
+      - 9
     joint_pos:
       type: low_dim
       shape:
@@ -96,32 +96,35 @@ shape_meta:
       type: low_dim
       shape:
       - 9
-    # tactile_left:
-    #   shape:
-    #   - 4
-    #   - 63
-    #   setting:
-    #     N: 7
-    #     M: 9
-    #     fps: 10
-    #     x0: 34.5
-    #     y0: 37.5
-    #     dx: 28.7
-    #     dy: 29.6
-    #   type: tactile
-    # tactile_right:
-    #   shape:
-    #   - 4
-    #   - 63
-    #   setting:
-    #     N: 7
-    #     M: 9
-    #     fps: 10
-    #     x0: 40.6
-    #     y0: 46
-    #     dx: 28.6
-    #     dy: 29.1
-    #   type: tactile
+    tactile_left_force_field:
+      shape:
+      - 9  # force field current (3) + reference (3) + coordinates (3) combined
+      - 63 # 7×9 = 63 markers
+      type: tactile
+    tactile_right_force_field:
+      shape:
+      - 9  # force field current (3) + reference (3) + coordinates (3) combined
+      - 63 # 7×9 = 63 markers
+      type: tactile
+  
+  # Tactile settings stored separately since they're used by base keys
+  tactile_settings:
+    tactile_left:
+      N: 7
+      M: 9
+      fps: 10
+      x0: 34.5
+      y0: 37.5
+      dx: 28.7
+      dy: 29.6
+    tactile_right:
+      N: 7
+      M: 9
+      fps: 10
+      x0: 40.6
+      y0: 46
+      dx: 28.6
+      dy: 29.1
 
 policy:
   _target_: gendp.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
@@ -151,7 +154,7 @@ policy:
   obs_encoder_group_norm: true
   feat_proc: distill # none, linear, mlp
   compositional: false
-  shape_meta: ${shape_meta}  
+  shape_meta: ${shape_meta}
 
 task:
   abs_action: true
@@ -170,20 +173,17 @@ task:
     shape_meta: ${shape_meta}
     use_cache: true
     val_ratio: 0.1
-    # Contact field model settings
-    contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/joint_tools_3_50_4_focal_0.9_0.75_nobias_ref_hist_smoothpc_20251022_181613/last.ckpt  # Path to contact field checkpoint
-    contact_field_device: cuda  # Device for contact field inference
   dataset_dir: ${data_root}/data/${dataset_name}
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
-task_name: scraper_real_contact_field
+task_name: scraper_real_tactile_ff
 dataset_name: scraper_combined
 training:
   checkpoint_every: 1000
   debug: false
   device: cuda
-  device_id: 1
+  device_id: 0
   gradient_accumulate_every: 1
   lr_scheduler: cosine
   lr_warmup_steps: 500

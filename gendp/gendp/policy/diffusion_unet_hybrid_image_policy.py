@@ -154,6 +154,26 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
         else:
             encoder_kwargs['spatial']["core_kwargs"]["contact_field_dim"] = 0
         
+        # Configure tactile encoder based on input shape
+        # If tactile shape is 3D (C, H, W), use TactileConv2dCore
+        # If tactile shape is 2D (C, N), use TactileCore
+        tactile_keys = obs_config.get('tactile', [])
+        if len(tactile_keys) > 0:
+            # Check the first tactile key to determine encoder type
+            first_tactile_key = tactile_keys[0]
+            tactile_shape = obs_shape_meta[first_tactile_key]['shape']
+            
+            if len(tactile_shape) == 3:
+                # 3D shape (C, H, W) -> use 2D conv encoder
+                encoder_kwargs['tactile']['core_class'] = 'TactileConv2dCore'
+                print(f"Using TactileConv2dCore for tactile data with shape {tactile_shape}")
+            elif len(tactile_shape) == 2:
+                # 2D shape (C, N) -> use PointNet-style encoder
+                encoder_kwargs['tactile']['core_class'] = 'TactileCore'
+                print(f"Using TactileCore for tactile data with shape {tactile_shape}")
+            else:
+                raise ValueError(f"Unsupported tactile shape: {tactile_shape}")
+        
         # encoder_kwargs['tactile']['core_kwargs'] = encoder_kwargs['spatial']["core_kwargs"]
         encoder_kwargs['tactile']['core_kwargs']['output_dim'] = 16
 

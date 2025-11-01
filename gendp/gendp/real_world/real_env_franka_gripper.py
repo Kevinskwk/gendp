@@ -104,8 +104,6 @@ class RealEnvFranka:
         if camera_serial_numbers is None:
             camera_serial_numbers = SingleRealsense.get_connected_devices_serial()
 
-        print(camera_serial_numbers)
-
         color_tf = get_image_transform(
             input_res=video_capture_resolution,
             output_res=obs_image_resolution,
@@ -176,14 +174,16 @@ class RealEnvFranka:
         if enable_multi_cam_vis:
             multi_cam_vis = MultiCameraVisualizer(
                 realsense=realsense,
+                window_name='Multi Cam Vis',
                 row=row,
                 col=col,
                 rgb_to_bgr=False
             )
 
         # cube_diag = np.linalg.norm([1, 1, 1])
-        j_init = np.array([0.0702805, -0.90773028, -0.09513126, -2.67802477, -0.0919309, 1.82060218, 0.16051947])
         # j_init = np.array([-0.03173639, -0.24618988, -0.2356476 , -2.3970356 , -0.07736383, 2.19674683, -0.01091733])
+        # j_init = np.array([0.0702805, -0.90773028, -0.09513126, -2.67802477, -0.0919309, 1.82060218, 0.16051947])
+        j_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 1.6146283149719238])
         if not init_joints:
             j_init = None
 
@@ -202,12 +202,23 @@ class RealEnvFranka:
 
         self.realsense = realsense
         self.robot = robot
-        self.cam_front_extri = get_extrinsic([0.8408891228960659, -0.2306640654217388, 0.32780918960803124],
-                                        [-0.7493846612312357, -0.41228123056776256, 0.28491736181125427, 0.4327457837707866])
-        self.cam_left_extri = get_extrinsic([0.27804807679768973, -0.23545503302949033, 0.13971720258705824],
-                                        [-0.6954162447452916, 0.16984997468823826, -0.2334766373619014, 0.6580546272528907])
-        self.cam_right_extri = get_extrinsic([0.3281305272599807, 0.5090284215384193, 0.12379313280393066],
-                                        [-0.14095227077856376, 0.7139867190308669, -0.6725150321346475, 0.13445800073940598])
+        # self.kin_helper = KinHelper(robot_name='franka_ft300_robotiq_2f_140')
+        # left and right finger pose
+        # for link_idx, link in enumerate(self.kin_helper.sapien_robot.get_links()):
+        #     # print(link.name)
+        #     if link.name == 'left_gelsight':
+        #         self.left_gs_idx = link_idx
+        #     if link.name == 'right_gelsight':
+        #         self.right_gs_idx = link_idx
+        # self.fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
+        self.cam_front_extri = get_extrinsic([0.8425395551524414, -0.23980856223114248, 0.32430529343304803],
+                                    # [-0.7436835728382364, -0.42678910445821283, 0.2849678185522488, 0.42846137071605955])
+                                    [-0.7510188, -0.41374503, 0.27744673, 0.43336949])
+        self.cam_left_extri = get_extrinsic([0.3015062294276259, -0.2731493583749173, 0.12464828611110033],
+                                    # [-0.7461453297553833, 0.22962820091980163, -0.20344921784453623, 0.5908861582276331])
+                                    [-0.75190061, 0.21001771, -0.1879119, 0.59600936])
+        self.cam_right_extri = get_extrinsic([0.33561416964601004, 0.5235239893129717, 0.1137736727084544],
+                                    [-0.14008225307645683, 0.7060390316876065, -0.6806702770786354, 0.13628581000362547])
 
         # self.gripper = gripper
         self.multi_cam_vis = multi_cam_vis
@@ -231,6 +242,9 @@ class RealEnvFranka:
         self.stage_accumulator = None
 
         self.start_time = None
+        self.save_video = False
+        self.save_episode = False
+        self.episode_started = False
 
     # ======== start-stop API =============
     @property
@@ -335,18 +349,18 @@ class RealEnvFranka:
             #     camera_obs[f'camera_wrist_extrinsics'] = v[this_idxs]
             # else:
             robot_obs[k] = v[this_idxs]
-        # fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
-        # cam_right_extri = get_extrinsic([0.33140649116301046, 0.5088971764480946, 0.11701259737976832],
-        #                             [-0.14112166822506242, 0.7072779422922251, -0.6794010610611806, 0.1351176721720494])
-        # cam_left_extri = get_extrinsic([0.6093451170018969, -0.21758103645789892, 0.14001694566120815],
-        #                             [0.06233815389071674, -0.6854456458464545, -0.717860365560187, 0.10466478260345545])
-        # camera_obs[f'camera_fixed_extrinsics'] = np.tile(fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        # camera_obs[f'camera_right_extrinsics'] = np.tile(cam_right_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        # camera_obs[f'camera_left_extrinsics'] = np.tile(cam_left_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        # camera_obs[f'camera_front_extrinsics'] = np.tile(cam_front_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
-        camera_obs[f'camera_right_extrinsics'] = np.tile(self.cam_right_extri, (camera_obs[f'camera_right_color'].shape[0], 1, 1))
-        camera_obs[f'camera_left_extrinsics'] = np.tile(self.cam_left_extri, (camera_obs[f'camera_left_color'].shape[0], 1, 1))
-        camera_obs[f'camera_front_extrinsics'] = np.tile(self.cam_front_extri, (camera_obs[f'camera_front_color'].shape[0], 1, 1))
+
+
+        # camera_obs['camera_fixed_extrinsics'] = np.tile(self.fixed_extri, (camera_obs[f'camera_wrist_extrinsics'].shape[0], 1, 1))
+        camera_obs['camera_right_extrinsics'] = np.tile(self.cam_right_extri, (camera_obs['camera_right_color'].shape[0], 1, 1))
+        camera_obs['camera_left_extrinsics'] = np.tile(self.cam_left_extri, (camera_obs['camera_left_color'].shape[0], 1, 1))
+        camera_obs['camera_front_extrinsics'] = np.tile(self.cam_front_extri, (camera_obs['camera_front_color'].shape[0], 1, 1))
+
+        # qpos = robot_obs['joint_pos'][0, :-1].copy()
+        # qpos[-1] *= 5  # 0.14 to 0.7
+        # print(qpos)
+        # gs_poses = self.kin_helper.compute_fk_sapien_links(qpos, [self.left_gs_idx, self.right_gs_idx])
+        # print(gs_poses)
 
         # return obs
         obs_data = dict(camera_obs)
@@ -414,11 +428,14 @@ class RealEnvFranka:
         return self.robot.get_state()
 
     # recording API
-    def start_episode(self, start_time=None, curr_outdir=None):
+    def start_episode(self, start_time=None, curr_outdir=None, save_video=True, save_episode=True):
         "Start recording and return first obs"
         if start_time is None:
             start_time = time.time()
         self.start_time = start_time
+        self.save_video = save_video
+        self.save_episode = save_episode
+        self.episode_started = True
 
         assert self.is_ready
 
@@ -430,40 +447,51 @@ class RealEnvFranka:
             video_dir = curr_outdir.joinpath('videos')
             video_dir.mkdir(parents=True, exist_ok=True)
             this_video_dir = video_dir.joinpath(str(self.episode_id))
-        this_video_dir.mkdir(parents=True, exist_ok=True)
-        n_cameras = self.realsense.n_cameras
-        video_paths = list()
-        for i in range(n_cameras):
-            video_paths.append(
-                str(this_video_dir.joinpath(f'{i}.mp4').absolute()))
+        
+        # only create video directory if saving video
+        if save_video:
+            this_video_dir.mkdir(parents=True, exist_ok=True)
+            n_cameras = self.realsense.n_cameras
+            video_paths = list()
+            for i in range(n_cameras):
+                video_paths.append(
+                    str(this_video_dir.joinpath(f'{i}.mp4').absolute()))
 
         # start recording on realsense
         self.realsense.restart_put(start_time=start_time)
-        self.realsense.start_recording(video_path=video_paths, start_time=start_time)
+        if save_video:
+            self.realsense.start_recording(video_path=video_paths, start_time=start_time)
 
         # create accumulators
-        self.obs_accumulator = TimestampObsAccumulator(
-            start_time=start_time,
-            dt=1 / self.frequency
-        )
-        self.action_accumulator = TimestampActionAccumulator(
-            start_time=start_time,
-            dt=1 / self.frequency
-        )
-        self.stage_accumulator = TimestampActionAccumulator(
-            start_time=start_time,
-            dt=1 / self.frequency
-        )
-        print(f'Episode {self.episode_id} started!')
+        if save_episode:
+            self.obs_accumulator = TimestampObsAccumulator(
+                start_time=start_time,
+                dt=1 / self.frequency
+            )
+            self.action_accumulator = TimestampActionAccumulator(
+                start_time=start_time,
+                dt=1 / self.frequency
+            )
+            self.stage_accumulator = TimestampActionAccumulator(
+                start_time=start_time,
+                dt=1 / self.frequency
+            )
+        print(f'Episode {self.episode_id} started! (save_video={save_video}, save_episode={save_episode})')
 
-    def end_episode(self, curr_outdir=None, incr_epi=False):
+    def end_episode(self, curr_outdir=None, incr_epi=True):
         "Stop recording"
-        assert self.is_ready
+        if not self.is_ready:
+            return
+        
+        # Only proceed if an episode was actually started
+        if not self.episode_started:
+            return
+            
+        # stop video recorder only if we started recording video
+        if self.save_video:
+            self.realsense.stop_recording()
 
-        # stop video recorder
-        self.realsense.stop_recording()
-
-        if self.obs_accumulator is not None:
+        if self.save_episode and self.obs_accumulator is not None:
             # recording
             assert self.action_accumulator is not None
             assert self.stage_accumulator is not None
@@ -536,24 +564,17 @@ class RealEnvFranka:
                     color_save_kwargs = {
                         'chunks': (1, cam_height, cam_width, 3), # (1, 480, 640, 3)
                         'compression': 'gzip',
-                        'compression_opts': 3,
-                        'dtype': 'uint8',
-                    }
-                    tactile_img_save_kwargs = {
-                        'chunks': (1, 240, 320, 3),
-                        'compression': 'gzip',
-                        'compression_opts': 3,
+                        'compression_opts': 5,
                         'dtype': 'uint8',
                     }
                     depth_save_kwargs = {
                         'chunks': (1, cam_height, cam_width), # (1, 480, 640)
                         'compression': 'gzip',
-                        'compression_opts': 3,
+                        'compression_opts': 5,
                         'dtype': 'uint16',
                     }
                     config_dict['observations']['images'][f'camera_{cam_name}_color'] = color_save_kwargs
                     config_dict['observations']['images'][f'camera_{cam_name}_depth'] = depth_save_kwargs
-                    config_dict['observations']['tactile']['tactile_images'] = tactile_img_save_kwargs
 
                 episode['timestamp'] = obs_timestamps[:n_steps]
                 if self.ctrl_mode == 'joint':
@@ -566,10 +587,6 @@ class RealEnvFranka:
                         episode['observations']['images'][key] = value[:n_steps]
                     # elif 'finger' in key:
                     #     episode['observations']['finger_pos'][key] = value[:n_steps]
-                    elif 'marker_flow' in key:
-                        episode['observations']['tactile'][key] = value[:n_steps]
-                    elif 'tactile_images' in key:
-                        episode['observations']['tactile'][key] = value[:n_steps]
                     else:
                         episode['observations'][key] = value[:n_steps]
 
@@ -592,12 +609,20 @@ class RealEnvFranka:
                 # save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
                 # print(f'Episode {self.episode_id} saved!')
 
-                if incr_epi:
-                    self.episode_id += 1
-
+            # Clean up accumulators
             self.obs_accumulator = None
             self.action_accumulator = None
             self.stage_accumulator = None
+        
+        # Increment episode ID regardless of save_episode setting
+        if incr_epi:
+            self.episode_id += 1
+            print(f'Episode ID incremented to {self.episode_id}')
+        
+        # Reset flags
+        self.save_video = False
+        self.save_episode = False
+        self.episode_started = False
 
     def _save_episode_data(self, episode, config_dict, episode_path, attr_dict):
         save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)

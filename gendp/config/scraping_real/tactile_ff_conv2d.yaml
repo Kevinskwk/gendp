@@ -1,8 +1,7 @@
 _target_: gendp.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUnetHybridWorkspace
 is_real: true
-data_root: /home/showlab/gendp
+data_root: /home/kevin/gendp
 output_dir: ${data_root}/data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
-# output_dir: /users/kevinma/gendp/data/outputs/2025.03.25/13.36.38_train_diffusion_unet_hybrid_screw_driving
 checkpoint:
   save_last_ckpt: true
   save_last_snapshot: false
@@ -12,7 +11,7 @@ checkpoint:
     mode: max
     monitor_key: test_mean_score
 dataloader:
-  batch_size: 128
+  batch_size: 192
   num_workers: 8
   persistent_workers: false
   pin_memory: true
@@ -31,7 +30,7 @@ keypoint_visible_rate: 1.0
 logging:
   group: null
   id: null
-  mode: online # online, offline
+  mode: online # online
   name: ${now:%Y.%m.%d}_${task_name}_${dataset_name}
   project: gild_${task_name}
   resume: false
@@ -55,19 +54,18 @@ optimizer:
   lr: 0.0001
   weight_decay: 1.0e-06
 past_action_visible: false
+
 shape_meta:
   trim_tail: 0
   action:
-    # key: joint_action
-    # shape:
-    # - 8
     shape:
-    - 10
+    - 7  # delta_pos(3) + delta_rotvec(3) + gripper_open_close(1)
+    delta: true  # action is delta ee_pose
   obs:
     ee_pose:
       type: low_dim
       shape:
-      - 7
+      - 9  # pos(3) + rot6d(6)
     joint_pos:
       type: low_dim
       shape:
@@ -78,8 +76,8 @@ shape_meta:
       - 9
     d3fields:
       shape:
-      - 5 # C
-      - 1000 # N
+      - 8 # C (5 distilled + 3 RGB)
+      - 1024 # N
       type: spatial
       info:
         reference_frame: robot
@@ -98,6 +96,39 @@ shape_meta:
           z_lower: -0.03
           z_upper: 0.5
         resize_ratio: 0.5
+        add_rgb_channels: true
+    
+    tactile_left_force_field:
+      shape:
+      - 9  # force field current (3) + reference (3) + coordinates (3) combined
+      - 7  # height (rows)
+      - 9  # width (cols)
+      type: tactile
+    tactile_right_force_field:
+      shape:
+      - 9  # force field current (3) + reference (3) + coordinates (3) combined
+      - 7  # height (rows)
+      - 9  # width (cols)
+      type: tactile
+  
+  # Tactile settings stored separately since they're used by base keys
+  tactile_settings:
+    tactile_left:
+      N: 7
+      M: 9
+      fps: 10
+      x0: 34.5
+      y0: 37.5
+      dx: 28.7
+      dy: 29.6
+    tactile_right:
+      N: 7
+      M: 9
+      fps: 10
+      x0: 40.6
+      y0: 46
+      dx: 28.6
+      dy: 29.1
 
 policy:
   _target_: gendp.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
@@ -128,8 +159,9 @@ policy:
   feat_proc: distill # none, linear, mlp
   compositional: false
   shape_meta: ${shape_meta}
+
 task:
-  abs_action: true
+  abs_action: false
   dataset:
     _target_: gendp.dataset.real_dataset.RealDataset
     dataset_dir: ${data_root}/data/${dataset_name}
@@ -137,38 +169,38 @@ task:
     horizon: 16
     pad_after: 7
     pad_before: 1
-    rotation_rep: rotation_6d
+    rotation_rep: rotation_6d  # for abs ee_pose only
     seed: 42
     n_obs_steps: 2
     robot_name: panda
     # exclude_colors: [yellow]
     shape_meta: ${shape_meta}
     use_cache: true
-    val_ratio: 0.1
+    val_ratio: 0.05
   dataset_dir: ${data_root}/data/${dataset_name}
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
-task_name: scraper_real
+task_name: scraper_real_tactile_ff_conv2d
 dataset_name: scraper_combined
 training:
-  checkpoint_every: 1000
+  checkpoint_every: 500
   debug: false
   device: cuda
-  device_id: 0
+  device_id: 1
   gradient_accumulate_every: 1
   lr_scheduler: cosine
   lr_warmup_steps: 500
   max_train_steps: null
   max_val_steps: null
-  num_epochs: 3001
-  resume: False
-  rollout_every: 1000
+  num_epochs: 5001
+  resume: false
+  rollout_every: 500
   sample_every: 5
   seed: 42
   tqdm_interval_sec: 1.0
   use_ema: true
-  val_every: 10
+  val_every: 100
 val_dataloader:
   batch_size: 64
   num_workers: 8
