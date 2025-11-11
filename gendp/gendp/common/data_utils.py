@@ -163,6 +163,18 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     # use_gripper_crop: (bool) if True, further crop object points using gripper pose when use_obj_bg_seg is True
     # gripper_crop_params: (dict) parameters for gripper cropping (tool_length, tool_width, etc.)
     boundaries = shape_meta['info']['boundaries']
+    
+    # Support separate boundaries for object and environment
+    # If obj_boundaries and env_boundaries are specified, use them; otherwise use same boundaries
+    if 'obj_boundaries' in shape_meta['info'] and 'env_boundaries' in shape_meta['info']:
+        obj_boundaries = shape_meta['info']['obj_boundaries']
+        env_boundaries = shape_meta['info']['env_boundaries']
+        print(f"Using separate boundaries: obj={obj_boundaries}, env={env_boundaries}")
+    else:
+        # Legacy behavior: use same boundaries for both
+        obj_boundaries = boundaries
+        env_boundaries = boundaries
+    
     use_seg = False
     use_dino = False
     distill_dino = shape_meta['info']['distill_dino'] if 'distill_dino' in shape_meta['info'] else False
@@ -177,6 +189,18 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         N_gripper = shape_meta['info']['N_per_inst'] # legacy name
     else:
         N_gripper = 100
+    
+    # Support separate N_obj and N_env for contact field models
+    # If N_obj and N_env are specified, use them; otherwise use legacy N_gripper
+    if "N_obj" in shape_meta['info'] and "N_env" in shape_meta['info']:
+        N_obj = shape_meta['info']['N_obj']
+        N_env = shape_meta['info']['N_env']
+        print(f"Using separate point counts: N_obj={N_obj}, N_env={N_env}")
+    else:
+        # Legacy behavior: split N_gripper in half
+        N_obj = None
+        N_env = None
+    
     N_total = shape_meta['shape'][1]
     max_pts_num = shape_meta['shape'][1]
     
@@ -190,7 +214,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             'tool_width': 0.2,
             'gripper_finger_length': 0.1,
             'safety_margin': 0.002,
-            'global_z_threshold': 0.005
+            'global_z_threshold': 0.01
         }
     
     num_bots = robot_base_pose_in_world_seq.shape[1] if len(robot_base_pose_in_world_seq.shape) == 4 else 1
@@ -311,8 +335,16 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         
         if use_obj_bg_seg:
             # Calculate target points for each part (excluding end-effector points)
-            obj_target_pts = (N_total) // 2
-            bg_target_pts = (N_total - ee_pcd.shape[0]) - obj_target_pts
+            # Use explicit N_obj and N_env if provided, otherwise use legacy split
+            if N_obj is not None and N_env is not None:
+                obj_target_pts = N_obj
+                bg_target_pts = N_env
+                # print(f"Using contact field point allocation: obj={obj_target_pts}, env={bg_target_pts}, ee={ee_pcd.shape[0]}, total={obj_target_pts + bg_target_pts + ee_pcd.shape[0]}")
+            else:
+                # Legacy behavior: split remaining points in half
+                obj_target_pts = (N_total) // 2
+                bg_target_pts = (N_total - ee_pcd.shape[0]) - obj_target_pts
+                # print(f"Using legacy point allocation: obj={obj_target_pts}, env={bg_target_pts}, ee={ee_pcd.shape[0]}")
 
             # Apply gripper-based cropping to object points if requested
             if use_gripper_crop and gripper_pose_seq is not None:
@@ -348,15 +380,17 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
 
                 # Update object points and features to only include tool points
                 # if len(obj_tool_pcd) > 0:
-                bg_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=np.concatenate([robot_pcd, obj_pcd], axis=0), exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
+                # Use env_boundaries for environment point extraction
+                bg_pcd = fusion.extract_pcd_in_box(boundaries=env_boundaries, downsample=True, downsample_r=0.002, excluded_pts=np.concatenate([robot_pcd, obj_pcd], axis=0), exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
 
             else:
                 # Perform text-based segmentation for object/background separation
-                fusion.text_queries_for_inst_mask(query_texts, query_thresholds, boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
+                # Use obj_boundaries for object segmentation query
+                fusion.text_queries_for_inst_mask(query_texts, query_thresholds, obj_boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
                 
-                # Extract object and background point clouds separately
-                obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=boundaries)  # Object instances
-                bg_pcd = fusion.extract_masked_pcd([0], boundaries=boundaries)  # Background (instance 0)
+                # Extract object and background point clouds separately with their respective boundaries
+                obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=obj_boundaries)  # Object instances
+                bg_pcd = fusion.extract_masked_pcd([0], boundaries=env_boundaries)  # Background (instance 0)
 
             # bg_pcd is all pcd within bounding box excluding obj pcd
             # print('obj_pcd:', obj_pcd.shape)
@@ -499,10 +533,17 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             bg_feats_ls.append(bg_with_ee_feats.astype(np.float32))
         
         try:
-            assert aggr_src_pts.shape[0] == N_total
-            assert aggr_feats.shape[0] == N_total if (use_dino or distill_dino or use_obj_bg_seg) else True
-        except:
-            raise RuntimeError('aggr_src_pts.shape[0] != N_total')
+            # When using contact field with explicit N_obj and N_env, adjust expected total
+            if use_obj_bg_seg and N_obj is not None and N_env is not None:
+                expected_total = N_obj + N_env + ee_pcd.shape[0]
+                assert aggr_src_pts.shape[0] == expected_total, f"Expected {expected_total} points (obj={N_obj} + env={N_env} + ee={ee_pcd.shape[0]}), got {aggr_src_pts.shape[0]}"
+                assert aggr_feats.shape[0] == expected_total if (use_dino or distill_dino or use_obj_bg_seg) else True
+            else:
+                # Legacy behavior
+                assert aggr_src_pts.shape[0] == N_total, f"Expected {N_total} points, got {aggr_src_pts.shape[0]}"
+                assert aggr_feats.shape[0] == N_total if (use_dino or distill_dino or use_obj_bg_seg) else True
+        except AssertionError as e:
+            raise RuntimeError(f'Point count mismatch: {str(e)}')
         
         # transform to reference frame
         if reference_frame == 'world':
@@ -885,7 +926,7 @@ def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action
     # vis_post_actions(actions[:,10:])
     return actions
 
-def _convert_ee_pose_obs(raw_ee_pose, rotation_transformer):
+def _convert_ee_pose_obs(raw_ee_pose, rotation_transformer, with_gripper=False):
     """
     Convert ee_pose observation from [pos(3), euler(3), gripper(1)] to [pos(3), rot6d(6)].
     
@@ -898,12 +939,15 @@ def _convert_ee_pose_obs(raw_ee_pose, rotation_transformer):
     """
     pos = raw_ee_pose[..., :3]  # (T, 3)
     rot_euler = raw_ee_pose[..., 3:6]  # (T, 3)
-    # gripper is not included in ee_pose observation, only in action
-    
+    gripper = raw_ee_pose[..., 6:]  # (T, 1)
+
     # Convert euler to rot6d using rotation transformer
     rot6d = rotation_transformer.forward(rot_euler)  # (T, 6)
-    
-    ee_pose = np.concatenate([pos, rot6d], axis=-1).astype(np.float32)
+
+    if with_gripper:
+        ee_pose = np.concatenate([pos, rot6d, gripper], axis=-1).astype(np.float32)
+    else:
+        ee_pose = np.concatenate([pos, rot6d], axis=-1).astype(np.float32)
     return ee_pose
 
 def get_contact_field(pcd, contact_points, 

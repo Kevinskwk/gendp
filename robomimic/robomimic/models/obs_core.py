@@ -613,6 +613,7 @@ class PointNetFeaNew(nn.Module):
 class TactileCore(EncoderCore, BaseNets.ConvBase):
     """
     Tactile sensor encoder that processes tactile force field data combined with 3D marker coordinates.
+    Architecture inspired by TactileEncoder from tactile_pointnet_joint_enhanced.py.
     
     Input format: (batch, 9, num_markers) where:
         - Channels 0-2: current force field [depth, dy, dx] (scaled and normalized)
@@ -632,43 +633,34 @@ class TactileCore(EncoderCore, BaseNets.ConvBase):
         # Verify input shape
         assert self.dim == 9, f"TactileCore expects 9 channels (3 current + 3 ref + 3 coords), got {self.dim}"
 
-        self.pointnet_local_feature_num = 64
-        self.pointnet_global_feature_num = 512
+        # Match TactileEncoder's hidden_dim = 128
+        hidden_dim = 128
+        
+        # Separate projections for force (6D: current + ref) and spatial (3D: coords) features
+        # Matches TactileEncoder: force_dim -> hidden_dim//2, spatial_dim -> hidden_dim//2
+        self.force_proj = nn.Linear(6, hidden_dim // 2)  # 6 -> 64
+        self.spatial_proj = nn.Linear(3, hidden_dim // 2)  # 3 -> 64
 
-        # Local feature extraction: processes each marker's 9D features
+        # Local feature extraction via 1D convolutions (similar to TactileEncoder's Conv2d)
+        # Using 1D conv since our input is flattened markers
         self.pointnet_local_fea = nn.Sequential(
-            nn.Conv1d(self.dim, self.pointnet_local_feature_num, 1),
-            (
-                nn.BatchNorm1d(self.pointnet_local_feature_num)
-                if batchnorm
-                else nn.Identity()
-            ),
+            nn.Conv1d(hidden_dim, hidden_dim, 1),
+            nn.BatchNorm1d(hidden_dim) if batchnorm else nn.Identity(),
             nn.ReLU(),
-            nn.Conv1d(
-                self.pointnet_local_feature_num, self.pointnet_local_feature_num, 1
-            ),
-            (
-                nn.BatchNorm1d(self.pointnet_local_feature_num)
-                if batchnorm
-                else nn.Identity()
-            ),
+            nn.Conv1d(hidden_dim, hidden_dim, 1),
+            nn.BatchNorm1d(hidden_dim) if batchnorm else nn.Identity(),
             nn.ReLU(),
         )
         
         # Global feature aggregation: max pooling over all markers
-        self.pointnet_global_fea = PointNetFeaNew(
-            self.pointnet_local_feature_num,
-            [64, 128, self.pointnet_global_feature_num],
-            batchnorm=batchnorm,
-        )
-
-        # Final MLP to produce output features
+        # Keep compact: hidden_dim -> output_dim directly via simple pooling
+        self.global_pool = nn.AdaptiveMaxPool1d(1)
+        
+        # Final MLP to produce output features (similar to TactileEncoder's size)
         self.mlp_output = nn.Sequential(
-            nn.Linear(self.pointnet_global_feature_num, 256),
+            nn.Linear(hidden_dim, 64),
             nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, output_dim),
+            nn.Linear(64, output_dim),
         )
 
     def output_shape(self, input_shape):
@@ -690,14 +682,29 @@ class TactileCore(EncoderCore, BaseNets.ConvBase):
         if tactile_data.ndim == 2:
             tactile_data = torch.unsqueeze(tactile_data, dim=0)
 
-        # Input: (batch, 9, num_points)
-        # Local features: (batch, 64, num_points)
-        local_feature = self.pointnet_local_fea(tactile_data)
+        # Input: (batch, 9, num_points) -> transpose to (batch, num_points, 9)
+        B, C, N = tactile_data.shape
+        tactile_data = tactile_data.transpose(1, 2)  # [B, N, 9]
         
-        # Global features: (batch, 512)
-        global_feature = self.pointnet_global_fea(local_feature).view(
-            -1, self.pointnet_global_feature_num
-        )
+        # Split into force (current + ref) and spatial features
+        forces = tactile_data[..., :6]  # [B, N, 6] - current (0-2) + ref (3-5)
+        coords = tactile_data[..., 6:]  # [B, N, 3] - spatial coordinates
+        
+        # Project to hidden dimensions (matches TactileEncoder)
+        force_feat = self.force_proj(forces)      # [B, N, 64]
+        spatial_feat = self.spatial_proj(coords)  # [B, N, 64]
+        
+        # Combine features
+        combined = torch.cat([force_feat, spatial_feat], dim=-1)  # [B, N, 128]
+        
+        # Transpose back for conv1d: [B, 128, N]
+        combined = combined.transpose(1, 2)
+        
+        # Local feature extraction: (batch, 128, num_points)
+        local_feature = self.pointnet_local_fea(combined)
+        
+        # Global pooling: (batch, 128, num_points) -> (batch, 128, 1) -> (batch, 128)
+        global_feature = self.global_pool(local_feature).squeeze(-1)
 
         # Output: (batch, output_dim)
         pred = self.mlp_output(global_feature)
@@ -707,11 +714,11 @@ class TactileCore(EncoderCore, BaseNets.ConvBase):
 class TactileConv2dCore(EncoderCore, BaseNets.ConvBase):
     """
     Tactile sensor encoder that processes tactile force field data as 2D arrays using 2D convolutions.
+    Architecture inspired by TactileEncoder from tactile_pointnet_joint_enhanced.py.
     
-    Input format: (batch, 9, 7, 9) where:
-        - Channels 0-2: current force field [depth, dy, dx] (scaled and normalized)
-        - Channels 3-5: reference force field [depth, dy, dx] (scaled and normalized)
-        - Channels 6-8: 3D marker coordinates [x, y, z] in world frame
+    Input format: (batch, 6, 7, 9) where:
+        - Channels 0-2: force difference field [depth_diff, dy_diff, dx_diff] (current - reference, scaled and normalized)
+        - Channels 3-5: 3D marker coordinates [x, y, z] in world frame
         - Spatial dimensions: 7x9 tactile marker grid
     
     This treats tactile data as images and uses 2D convolutions to capture spatial patterns.
@@ -719,44 +726,43 @@ class TactileConv2dCore(EncoderCore, BaseNets.ConvBase):
 
     def __init__(self, input_shape, output_dim=16, batchnorm=False):
         super(TactileConv2dCore, self).__init__(input_shape=input_shape)
-        self.input_channels = input_shape[0]  # Should be 9: [force_current(3), force_ref(3), coords(3)]
+        self.input_channels = input_shape[0]  # Should be 6: [force_diff(3), coords(3)]
         self.height = input_shape[1]  # Should be 7
         self.width = input_shape[2]  # Should be 9
         self.output_dim = output_dim
 
         # Verify input shape
         assert len(input_shape) == 3, f"TactileConv2dCore expects 3D input (C, H, W), got {len(input_shape)}D"
-        assert self.input_channels == 9, f"TactileConv2dCore expects 9 channels (3 current + 3 ref + 3 coords), got {self.input_channels}"
 
-        # 2D Convolutional layers
+        # Match TactileEncoder's hidden_dim = 128
+        hidden_dim = 128
+        
+        # Separate projections for force difference (3D) and spatial (3D: coords) features
+        # Applied per-pixel via 1x1 convs (equivalent to Linear layers per-location)
+        # Matches TactileEncoder: force_dim -> hidden_dim//2, spatial_dim -> hidden_dim//2
+        self.force_proj = nn.Conv2d(3, hidden_dim // 2, kernel_size=1)  # 3 -> 64
+        self.spatial_proj = nn.Conv2d(3, hidden_dim // 2, kernel_size=1)  # 3 -> 64
+        
+        # 2D Convolutional layers matching TactileEncoder's finger_conv structure
+        # Two conv blocks: 128 -> 128 -> 128 with 3x3 kernels
         self.conv_layers = nn.Sequential(
-            # First conv block: 9 -> 32 channels
-            nn.Conv2d(self.input_channels, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32) if batchnorm else nn.Identity(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(hidden_dim) if batchnorm else nn.Identity(),
             nn.ReLU(),
-            
-            # Second conv block: 32 -> 64 channels
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(64) if batchnorm else nn.Identity(),
-            nn.ReLU(),
-            
-            # Third conv block: 64 -> 128 channels
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128) if batchnorm else nn.Identity(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(hidden_dim) if batchnorm else nn.Identity(),
             nn.ReLU(),
         )
         
         # Calculate flattened feature size after conv layers
         # Since we use padding=1, spatial dimensions remain: 7x9
-        self.conv_output_size = 128 * self.height * self.width  # 128 * 7 * 9 = 8064
+        self.conv_output_size = hidden_dim * self.height * self.width  # 128 * 7 * 9 = 8064
         
-        # MLP layers to produce final output
+        # MLP layers to produce final output (compact like TactileEncoder)
         self.mlp_layers = nn.Sequential(
-            nn.Linear(self.conv_output_size, 512),
+            nn.Linear(self.conv_output_size, 64),
             nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, output_dim),
+            nn.Linear(64, output_dim),
         )
 
     def output_shape(self, input_shape):
@@ -767,10 +773,9 @@ class TactileConv2dCore(EncoderCore, BaseNets.ConvBase):
         Forward pass through 2D conv tactile encoder.
         
         Args:
-            tactile_data: Tensor of shape (batch, 9, 7, 9) where:
-                - channels 0-2: current force field [depth, dy, dx]
-                - channels 3-5: reference force field [depth, dy, dx]
-                - channels 6-8: 3D coordinates [x, y, z]
+            tactile_data: Tensor of shape (batch, 6, 7, 9) where:
+                - channels 0-2: force difference field [depth_diff, dy_diff, dx_diff]
+                - channels 3-5: 3D coordinates [x, y, z]
                 - spatial: 7x9 marker grid
         
         Returns:
@@ -779,11 +784,27 @@ class TactileConv2dCore(EncoderCore, BaseNets.ConvBase):
         if tactile_data.ndim == 3:
             tactile_data = torch.unsqueeze(tactile_data, dim=0)
 
-        # Input: (batch, 9, 7, 9)
-        # Conv features: (batch, 128, 7, 9)
-        conv_features = self.conv_layers(tactile_data)
+        # Debug: check input shape
+        B, C, H, W = tactile_data.shape
+        if C != 6:
+            raise ValueError(f"TactileConv2dCore expects 6 channels, got {C}. Input shape: {tactile_data.shape}")
+
+        # Input: (batch, 6, 7, 9)
+        # Split into force difference and spatial channels
+        force_diff = tactile_data[:, :3, :, :]   # [B, 3, 7, 9] - channels 0-2
+        coords = tactile_data[:, 3:6, :, :]      # [B, 3, 7, 9] - channels 3-5 (explicit slice)
         
-        # Flatten: (batch, 128*7*9)
+        # Project to hidden dimensions via 1x1 convs
+        force_feat = self.force_proj(force_diff)  # [B, 64, 7, 9]
+        spatial_feat = self.spatial_proj(coords)  # [B, 64, 7, 9]
+        
+        # Combine features
+        combined = torch.cat([force_feat, spatial_feat], dim=1)  # [B, 128, 7, 9]
+        
+        # Conv features: (batch, 128, 7, 9)
+        conv_features = self.conv_layers(combined)
+        
+        # Flatten: (batch, 64*7*9)
         flat_features = conv_features.view(conv_features.size(0), -1)
         
         # MLP output: (batch, output_dim)

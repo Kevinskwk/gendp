@@ -44,7 +44,7 @@ from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
 # from gendp.real_world.aloha_master import AlohaMaster
 # from gendp.real_world.aloha_bimanual_master import AlohaBimanualMaster
 from gendp.common.precise_sleep import precise_wait
-from gendp.real_world.real_inference_util import (
+from gendp.gendp.real_world.real_inference_utils import (
     get_real_obs_resolution, 
     get_real_obs_dict)
 from gendp.common.pytorch_util import dict_apply

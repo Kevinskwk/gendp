@@ -14,6 +14,10 @@ from omegaconf import OmegaConf
 import pathlib
 from gendp.workspace.base_workspace import BaseWorkspace
 
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+
 # allows arbitrary python code execution in configs using the ${eval:''} resolver
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 

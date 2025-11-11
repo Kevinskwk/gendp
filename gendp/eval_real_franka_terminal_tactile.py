@@ -44,9 +44,10 @@ import diffusers
 from d3fields.utils.draw_utils import np2o3d
 from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
 from gendp.common.precise_sleep import precise_wait
-from gendp.real_world.real_inference_util import (
+from gendp.real_world.real_inference_utils import (
     get_real_obs_resolution, 
-    get_real_obs_dict)
+    get_real_obs_dict,
+    reset_reference_tactile)
 from gendp.common.pytorch_util import dict_apply
 from gendp.common.kinematics_utils import KinHelper
 from gendp.common.tactile_utils import TactileProcessor
@@ -441,11 +442,14 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                 obs = env.get_obs()
                 with torch.no_grad():
                     policy.reset()
+                    reset_reference_tactile()  # Reset for warmup
                     exclude_colors = cfg.task.dataset.exclude_colors if 'exclude_colors' in cfg.task.dataset else []
+                    reference_tactile_use_difference = cfg.task.dataset.get('reference_tactile_use_difference', False)
                     obs_dict_np = get_real_obs_dict(
-                        env_obs=obs, shape_meta=cfg.task.shape_meta, 
+                        env_obs=obs, shape_meta=cfg.task.shape_meta,
                         fusion=fusion, expected_labels=expected_labels, teleop=kin_helper, exclude_colors=exclude_colors,
-                        tactile_processors=tactile_processors)
+                        tactile_processors=tactile_processors,
+                        reference_tactile_use_difference=reference_tactile_use_difference)
 
                     obs_dict = dict_apply(obs_dict_np, 
                         lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
@@ -582,6 +586,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                         try:
                             # start episode
                             policy.reset()
+                            reset_reference_tactile()  # Reset reference tactile for new episode
                             start_delay = 1.0
                             eval_t_start = time.time() + start_delay
                             t_start = time.monotonic() + start_delay
@@ -615,7 +620,8 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                     obs_dict_np = get_real_obs_dict(
                                         env_obs=obs, shape_meta=cfg.task.shape_meta, 
                                         fusion=fusion, expected_labels=expected_labels, teleop=kin_helper, exclude_colors=exclude_colors,
-                                        tactile_processors=tactile_processors)
+                                        tactile_processors=tactile_processors,
+                                        reference_tactile_use_difference=reference_tactile_use_difference)
                                     t_obs_dict_end = time.perf_counter()
                                     # print(f"⏱️  [Timing] Get obs dict (fusion + tactile): {(t_obs_dict_end - t_obs_dict_start)*1000:.2f}ms")
                                     

@@ -779,13 +779,13 @@ class SingleRealsense(mp.Process):
                 t_start = t_end
                 if frequency < fps // 2:
                     warnings.warn(f'[{self.serial_number}] FPS {frequency} is much smaller than {fps}.')
-                    print('debugging info:')
-                    print('wait_time:', wait_time)
-                    print('grab_time:', grab_time)
-                    print('transform_time:', transform_time)
+                    # print('debugging info:')
+                    # print('wait_time:', wait_time)
+                    # print('grab_time:', grab_time)
+                    # print('transform_time:', transform_time)
                     # print('vis_time:', vis_time)
-                    print('rec_time:', rec_time)
-                    print('cmd_time:', cmd_time)
+                    # print('rec_time:', rec_time)
+                    # print('cmd_time:', cmd_time)
                 if self.verbose:
                     print(f'[SingleRealsense {self.serial_number}] FPS {frequency}')
         finally:

@@ -68,8 +68,10 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
         # Observation encoders
         if hasattr(self.model, 'obs_encoder') and self.model.obs_encoder is not None:
             print(f"\n{'Observation Encoders:':-^80}")
-            if hasattr(self.model.obs_encoder, 'nets'):
-                for key, net in self.model.obs_encoder.nets.items():
+            if hasattr(self.model.obs_encoder, 'obs_nets'):
+                for key, net in self.model.obs_encoder.obs_nets.items():
+                    if net is None:
+                        continue
                     net_params = sum(p.numel() for p in net.parameters())
                     net_trainable = sum(p.numel() for p in net.parameters() if p.requires_grad)
                     print(f"  {key:30s}: {net_params:>12,} params ({net_trainable:>12,} trainable) - {net.__class__.__name__}")

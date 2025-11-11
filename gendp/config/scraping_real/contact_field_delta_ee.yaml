@@ -24,7 +24,7 @@ ema:
   min_value: 0.0
   power: 0.75
   update_after_step: 0
-exp_name: n_obs_steps_3_abs_ee_no_joint
+exp_name: n_obs_steps_3_delta_ee_no_joint
 horizon: 16
 keypoint_visible_rate: 1.0
 logging:
@@ -59,9 +59,9 @@ shape_meta:
   trim_tail: 0
   action:
     shape:
-    # - 7  # delta_pos(3) + delta_rotvec(3) + gripper_open_close(1) for delta action
-    - 10  # pos(3) + rot6d(6) + gripper_open_close(1) for abs ee_pose
-    delta: false  # action is delta ee_pose
+    - 7  # delta_pos(3) + delta_rotvec(3) + gripper_open_close(1) for delta action
+    # - 10  # pos(3) + rot6d(6) + gripper_open_close(1) for abs ee_pose
+    delta: true  # action is delta ee_pose
   obs:
     ee_pose:
       type: low_dim
@@ -185,7 +185,7 @@ training:
   checkpoint_every: 250
   debug: false
   device: cuda
-  device_id: 0
+  device_id: 1
   gradient_accumulate_every: 1
   lr_scheduler: cosine
   lr_warmup_steps: 500
