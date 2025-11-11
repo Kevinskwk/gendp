@@ -120,6 +120,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         rotation_transformer=rotation_transformer,
                         action_key=data_key,
                         delta_action=delta_action,
+                        rot_format='rotvec',
                     )
                     assert this_data.shape == (episode_length,) + tuple(shape_meta['action']['shape']), \
                         f"Action shape mismatch: {this_data.shape} vs expected {(episode_length,) + tuple(shape_meta['action']['shape'])}"

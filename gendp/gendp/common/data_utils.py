@@ -857,7 +857,7 @@ def vis_post_actions(actions):
         time.sleep(0.03)
     visualizer.destroy_window()
 
-def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action=False):
+def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action=False, rot_format='euler'):
     """
     Convert raw actions to the desired format.
     
@@ -879,7 +879,7 @@ def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action
         if delta_action:
             # Convert to delta format: [delta_pos(3), delta_rotvec(3), gripper_open_close(1)]
             pos = raw_actions[...,:3]  # (T, 3)
-            rot_euler = raw_actions[...,3:6]  # (T, 3) euler angles
+            rot = raw_actions[...,3:6]  # (T, 3) euler angles
             gripper = raw_actions[...,6:]  # (T, 1)
             
             # Compute delta positions
@@ -889,8 +889,11 @@ def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action
             
             # Convert euler to rotation matrices
             import scipy.spatial.transform as st
-            rot_mats = st.Rotation.from_euler('xyz', rot_euler).as_matrix()  # (T, 3, 3)
-            
+            if rot_format == 'euler':
+                rot_mats = st.Rotation.from_euler('xyz', rot).as_matrix()  # (T, 3, 3)
+            else:
+                rot_mats = st.Rotation.from_rotvec(rot).as_matrix()  # (T, 3, 3)
+
             # Compute delta rotations as rotvec (axis-angle)
             delta_rotvec = np.zeros_like(pos)  # (T, 3)
             for t in range(1, act_num):
