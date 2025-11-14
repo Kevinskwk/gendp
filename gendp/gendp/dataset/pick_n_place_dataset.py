@@ -111,6 +111,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     lowdim_data_dict[key] = list()
                 if data_key == 'cartesian_action':
                     this_data = file['observations']['ee_pose'][:episode_length]
+                elif data_key == 'joint_action':
+                    this_data = file['observations']['joint_pos'][:episode_length]
                 else:
                     this_data = file[data_key][:episode_length]
                 if key == 'action':
@@ -127,7 +129,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 elif key == 'ee_pose':
                     # Convert ee_pose from [pos(3), rotvec(3), gripper(1)] to [pos(3), rot6d(6)]
                     # print(f"Converting ee_pose: input shape {this_data.shape}, expected output shape {(episode_length,) + tuple(shape_meta['obs'][key]['shape'])}")
-                    this_data = _convert_ee_pose_obs(this_data, rotation_transformer)
+                    with_gripper = shape_meta['obs'][key]['shape'][-1] == 10
+                    this_data = _convert_ee_pose_obs(this_data, rotation_transformer, with_gripper=with_gripper)
                     # print(f"After conversion: {this_data.shape}")
                     assert this_data.shape == (episode_length,) + tuple(shape_meta['obs'][key]['shape']), \
                         f"EE pose shape mismatch: {this_data.shape} vs expected {(episode_length,) + tuple(shape_meta['obs'][key]['shape'])}"
