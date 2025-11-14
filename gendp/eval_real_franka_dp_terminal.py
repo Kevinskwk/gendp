@@ -1,0 +1,795 @@
+"""
+Terminal-based evaluation for real Franka robot that uses policy inference and avoids OpenCV display issues.
+
+NOTE: This script uses real_env_franka_mirror which is the same environment used for data collection
+in demo_real_franka_terminal.py. This ensures consistency between data collection and evaluation.
+
+Usage:
+python eval_real_franka_terminal.py -i <ckpt_path> -o <save_dir> --robot_ip <ip_of_franka>
+
+================ Human in control ==============
+Commands (type and press Enter):
+- c: Start evaluation (hand control over to policy)
+- s: Stop evaluation and gain control back
+- q: Exit program
+- h: Move robot to initial pose
+- status: Show current status
+- help: Show this help
+
+================ Policy in control ==============
+Make sure you can hit the robot hardware emergency-stop button quickly! 
+
+Recording control:
+- s: Stop evaluation and gain control back
+- q: Exit program
+
+================ Coordinate Frame Conversions ==============
+Robot -> Policy (Observation):
+  - Robot outputs: ee_pose as [x, y, z, qx, qy, qz, qw, gripper] (quaternion)
+  - Policy expects: ee_pose as [x, y, z, rot6d(6)] (rot6d, no gripper)
+  - Conversion: quaternion -> rotation_matrix -> rot6d (in real_inference_utils.py)
+
+Policy -> Robot (Action):
+  - Policy outputs: delta action as [delta_pos(3), delta_rotvec(3), gripper_open_close(1)]
+  - Robot expects: absolute pose as [x, y, z, rx, ry, rz, gripper] (euler angles)
+  - Conversion: delta_rotvec + current_quat -> new_euler (in policy_action_to_env_action)
+"""
+
+import os
+import time
+import threading
+import queue
+from multiprocessing.managers import SharedMemoryManager
+import click
+import cv2
+import numpy as np
+import torch
+import dill
+import hydra
+import pathlib
+import skvideo.io
+import transforms3d
+from omegaconf import OmegaConf
+from omegaconf import open_dict
+import scipy.spatial.transform as st
+import diffusers
+# Use real_env_franka_mirror - same environment as demo_real_franka_terminal for data collection
+from gendp.real_world.real_env_franka_mirror import RealEnvFranka, CAMERA_NAMES
+# from gendp.real_world.real_env_franka_rgb_only import RealEnvFrankaRGBOnly as RealEnvFranka, CAMERA_NAMES
+# from gendp.real_world.real_env_franka_gripper import RealEnvFranka, CAMERA_NAMES
+# from gendp.real_world.real_env_franka_gripper_gelsight import RealEnvFranka, CAMERA_NAMES, GELSIGHT_NAMES
+from gendp.common.precise_sleep import precise_wait
+from gendp.real_world.real_inference_utils import (
+    get_real_obs_resolution, 
+    get_real_obs_dict)
+from gendp.common.pytorch_util import dict_apply
+# from gendp.common.kinematics_utils import KinHelper
+from gendp.workspace.base_workspace import BaseWorkspace
+from gendp.policy.base_image_policy import BaseImagePolicy
+from gendp.common.cv2_util import get_image_transform
+from gendp.real_world.keystroke_counter import (
+    KeystrokeCounter, Key, KeyCode
+)
+
+# hacks to be compatiable with old models
+import gendp
+import sys
+sys.modules["diffusion_policy"] = gendp
+
+# Global variables for communication between threads
+command_queue = queue.Queue()
+robot_state = {
+    'running': False,
+    'policy_active': False,
+    'episode_id': 0,
+    'stage': 0,
+    'gripper_pos': 0.08,
+    'stop': False,
+    'iteration': 0,
+    'move_to_init': False
+}
+
+def rotation_matrix_to_rotation_6d(rot_mat):
+    """
+    Convert rotation matrix to 6D rotation representation.
+    Uses the first two columns of the rotation matrix.
+    
+    Args:
+        rot_mat: (..., 3, 3) rotation matrices
+    Returns:
+        rot6d: (..., 6) 6D rotation representation
+    """
+    # Take first two columns of rotation matrix
+    rot6d = rot_mat[..., :2, :].reshape(*rot_mat.shape[:-2], 6)
+    return rot6d
+
+def rotation_6d_to_rotation_matrix(rot6d):
+    """
+    Convert 6D rotation representation to rotation matrix.
+    
+    Args:
+        rot6d: (..., 6) 6D rotation representation
+    Returns:
+        rot_mat: (..., 3, 3) rotation matrices
+    """
+    # Reshape to get first two columns
+    rot6d_reshaped = rot6d.reshape(*rot6d.shape[:-1], 2, 3)
+    
+    # First column (already normalized in theory, but normalize to be safe)
+    col1 = rot6d_reshaped[..., 0, :]
+    col1 = col1 / np.linalg.norm(col1, axis=-1, keepdims=True)
+    
+    # Second column
+    col2 = rot6d_reshaped[..., 1, :]
+    
+    # Gram-Schmidt orthogonalization
+    col2 = col2 - np.sum(col1 * col2, axis=-1, keepdims=True) * col1
+    col2 = col2 / np.linalg.norm(col2, axis=-1, keepdims=True)
+    
+    # Third column via cross product
+    col3 = np.cross(col1, col2, axis=-1)
+    
+    # Stack columns to form rotation matrix
+    rot_mat = np.stack([col1, col2, col3], axis=-1)
+    return rot_mat
+
+def convert_ee_pose_quat_to_rot6d(ee_pose_quat):
+    """
+    Convert ee_pose from quaternion to rot6d format for policy input.
+    
+    Args:
+        ee_pose_quat: (N, 7) array [x, y, z, qx, qy, qz, qw]
+    Returns:
+        ee_pose_rot6d: (N, 10) array [x, y, z, rot6d(6), gripper]
+    """
+    # ee_pose_quat: [x, y, z, qx, qy, qz, qw]
+    pos = ee_pose_quat[:, :3]
+    quat = ee_pose_quat[:, 3:7]  # [qx, qy, qz, qw]
+    gripper = ee_pose_quat[:, 7:8] if ee_pose_quat.shape[1] > 7 else np.zeros((ee_pose_quat.shape[0], 1))
+    
+    # Convert quaternion to rotation matrix
+    rot_mat = st.Rotation.from_quat(quat).as_matrix()
+    
+    # Convert rotation matrix to rot6d
+    rot6d = rotation_matrix_to_rotation_6d(rot_mat)
+    
+    # Concatenate [pos(3), rot6d(6), gripper(1)]
+    ee_pose_rot6d = np.concatenate([pos, rot6d, gripper], axis=-1)
+    return ee_pose_rot6d
+
+def policy_action_to_env_action(policy_action, action_mode, num_bots, delta_action=False, current_ee_pose=None):
+    """
+    Convert policy action to environment action format.
+    
+    Args:
+        policy_action: (T, Da) array
+            - If delta_action=False: Da=10 * num_bots (3 dof translation, 6 dof rotation, 1 gripper)
+            - If delta_action=True: Da=7 * num_bots (3 dof delta_pos, 3 dof delta_rotvec, 1 gripper_open_close)
+        action_mode: 'eef' or 'joint'
+        num_bots: number of robots
+        delta_action: If True, policy outputs delta actions
+        current_ee_pose: Current EE pose (8,) [x,y,z,qx,qy,qz,qw,gripper] in quaternion format from robot
+
+    Output:
+        env_actions: (T, Da_env) array
+            - If action_mode='eef': Da_env=7 * num_bots (3 dof translation, 3 dof euler rotation, 1 gripper)
+            - If action_mode='joint': Da_env = same as policy_action
+    """
+    # policy_action: (T, Da), Da=10 * num_bots (3 dof translation, 6 dof rotation, 1 gripper)
+    if action_mode == 'eef':
+        T = policy_action.shape[0]
+        action_reshape = policy_action.reshape((T * num_bots, -1))
+        env_actions = np.zeros((T * num_bots, 7), dtype=np.float64)
+        
+        if delta_action:
+            # Policy outputs: [delta_pos(3), delta_rotvec(3), gripper_open_close(1)]
+            assert current_ee_pose is not None, "current_ee_pose required for delta actions"
+            assert action_reshape.shape[1] == 7, f"Expected 7 dims for delta action, got {action_reshape.shape[1]}"
+            
+            # Current pose from robot is in quaternion format: [x, y, z, qx, qy, qz, qw, gripper]
+            curr_pos = current_ee_pose[:3]
+            curr_quat = current_ee_pose[3:7]  # [qx, qy, qz, qw]
+            curr_rot = st.Rotation.from_quat(curr_quat)
+            curr_rot_mat = curr_rot.as_matrix()
+            
+            for t in range(T):
+                # Extract delta action
+                delta_pos = action_reshape[t, :3]
+                delta_pos[2] *= 1.2  # Scale z-axis more
+                delta_rotvec = action_reshape[t, 3:6]
+                gripper_open_close = action_reshape[t, 6]
+                
+                # Apply delta position
+                new_pos = curr_pos + delta_pos
+                
+                # Apply delta rotation
+                delta_rot = st.Rotation.from_rotvec(delta_rotvec)
+                new_rot_mat = delta_rot.as_matrix() @ curr_rot_mat
+                new_euler = st.Rotation.from_matrix(new_rot_mat).as_euler('xyz')
+                
+                # Convert gripper_open_close (0/1) to gripper position (0.0/0.08)
+                gripper_pos = 0.08 if gripper_open_close > 0.07 else 0.0
+                
+                # Store absolute pose for environment (env expects euler format)
+                env_actions[t, :3] = new_pos
+                env_actions[t, 3:6] = new_euler
+                env_actions[t, 6] = gripper_pos
+                
+                # Update current pose for next step
+                curr_pos = new_pos
+                curr_rot_mat = new_rot_mat
+        else:
+            # Absolute action: [pos(3), rot6d(6), gripper(1)]
+            assert action_reshape.shape[1] == 10, f"Expected 10 dims for absolute action, got {action_reshape.shape[1]}"
+            env_actions[:,:3] = action_reshape[:,:3]
+            # Convert rot6d to rotation matrix using scipy
+            action_rot_mat = rotation_6d_to_rotation_matrix(action_reshape[:,3:9])
+            env_actions[:, 3:6] = st.Rotation.from_matrix(action_rot_mat).as_euler('xyz')
+            # Convert gripper_open_close (0/1) to gripper position (0.0/0.08)
+            gripper_open_close = action_reshape[:,9]
+            gripper_pos = np.where(gripper_open_close > 0.07, 0.08, 0.0)
+            env_actions[:, 6:] = gripper_pos[:, None]
+            # env_actions[:, 6:] = 0
+        
+        env_actions = env_actions.reshape((T, num_bots * 7))
+    elif action_mode == 'joint':
+        env_actions = policy_action
+    return env_actions
+
+def terminal_input_thread():
+    """Handle terminal input in separate thread"""
+    print("\n" + "="*60)
+    print("FRANKA ROBOT EVALUATION - TERMINAL CONTROL")
+    print("="*60)
+    print("Commands:")
+    print("  c       - Start evaluation (policy takes control)")
+    print("  s       - Stop evaluation (human takes control)")
+    print("  q       - Exit program")
+    print("  h       - Move robot to initial pose")
+    print("  g       - Close gripper")
+    print("  o       - Open gripper")
+    print("  status  - Show current status")
+    print("  help    - Show commands")
+    print("="*60)
+    print("Type commands and press Enter...")
+    
+    while not robot_state['stop']:
+        try:
+            cmd = input().strip().lower()
+            if cmd:
+                command_queue.put(cmd)
+                if cmd == 'q':
+                    break
+        except (EOFError, KeyboardInterrupt):
+            command_queue.put('q')
+            break
+
+def process_commands(key_counter):
+    """Process commands from terminal input and spacemouse"""
+    global robot_state
+    
+    # Process terminal commands
+    while not command_queue.empty():
+        try:
+            command = command_queue.get_nowait()
+            
+            if command == 'q':
+                robot_state['stop'] = True
+                print('🔴 Quitting...')
+            elif command == 'c':
+                if not robot_state['policy_active']:
+                    robot_state['policy_active'] = True
+                    print('🤖 Policy taking control! (Type "s" to stop)')
+                else:
+                    print('⚠️  Policy already active')
+            elif command == 's':
+                if robot_state['policy_active']:
+                    robot_state['policy_active'] = False
+                    print('👤 Human taking control back')
+                else:
+                    print('⚠️  Policy not active')
+            elif command == 'g':
+                robot_state['gripper_pos'] = 0.0
+                print('✊ Closing gripper...')
+            elif command == 'o':
+                robot_state['gripper_pos'] = 0.08
+                print('✋ Opening gripper...')
+            elif command == 'h':
+                robot_state['move_to_init'] = True
+                print('🏠 Moving to initial pose...')
+            elif command == 'status':
+                status = f"Episode: {robot_state['episode_id']}, Stage: {robot_state['stage']}, Iter: {robot_state['iteration']}"
+                status += f", Policy Active: {'YES' if robot_state['policy_active'] else 'NO'}"
+                status += f", Gripper: {'CLOSED' if robot_state['gripper_pos'] < 0.05 else 'OPEN'}"
+                print(f"📊 Status: {status}")
+            elif command == 'help':
+                print("\nCommands: c(start policy) s(stop policy) q(quit) h(home pose) g(grip) o(open) status help")
+            else:
+                print(f"❓ Unknown command: {command}. Type 'help' for commands.")
+                
+        except queue.Empty:
+            break
+    
+    # Process SpaceMouse/KeystrokeCounter commands
+    press_events = key_counter.get_press_events()
+    for key_stroke in press_events:
+        if key_stroke == KeyCode(char='q'):
+            robot_state['stop'] = True
+            print('🔴 Quitting...')
+        elif key_stroke == KeyCode(char='c'):
+            if not robot_state['policy_active']:
+                robot_state['policy_active'] = True
+                print('🤖 Policy taking control! (Type "s" to stop)')
+            else:
+                print('⚠️  Policy already active')
+        elif key_stroke == KeyCode(char='s'):
+            if robot_state['policy_active']:
+                robot_state['policy_active'] = False
+                print('👤 Human taking control back')
+            else:
+                print('⚠️  Policy not active')
+        elif key_stroke == KeyCode(char='g'):
+            robot_state['gripper_pos'] = 0.0
+            print('✊ Closing gripper...')
+        elif key_stroke == KeyCode(char='o'):
+            robot_state['gripper_pos'] = 0.08
+            print('✋ Opening gripper...')
+        elif key_stroke == KeyCode(char='h'):
+            robot_state['move_to_init'] = True
+            print('🏠 Moving to initial pose...')
+
+def save_visualization_images(vis_img, output_dir, iter_idx, save_interval=30):
+    """Save visualization images periodically"""
+    if iter_idx % save_interval == 0:
+        viz_dir = os.path.join(output_dir, 'visualization')
+        os.makedirs(viz_dir, exist_ok=True)
+        latest_file_name = os.path.join(viz_dir, 'latest.jpg')
+        cv2.imwrite(latest_file_name, vis_img)
+
+OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+@click.command()
+@click.option('--input_dir', '-i', required=True, help='Path to checkpoint')
+@click.option('--output', '-o', required=True, help='Directory to save recording')
+@click.option('--robot_ip', '-ri', default="192.168.1.112", help="Franka's IP address")
+@click.option('--match_dataset', '-m', default=None, help='Dataset used to overlay and adjust initial condition')
+@click.option('--match_episode', '-me', default=None, type=int, help='Match specific episode from the match dataset')
+@click.option('--vis_camera_idx', default=0, type=int, help="Which RealSense camera to visualize.")
+@click.option('--steps_per_inference', '-si', default=6, type=int, help="Action horizon for inference.")
+@click.option('--max_duration', '-md', default=60, help='Max duration for each epoch in seconds.')
+@click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
+@click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving command to executing on Robot in Sec.")
+@click.option('--n_action_steps', '-n', default=-1, type=int, help="Number of action steps to execute. -1 means invalid.")
+@click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
+@click.option('--save_viz_interval', default=30, type=int, help="Save visualization every N frames (0 to disable)")
+def main(input_dir, output, robot_ip, match_dataset, match_episode,
+    vis_camera_idx,
+    steps_per_inference, max_duration,
+    frequency, command_latency, n_action_steps, init_joints, save_viz_interval):
+    
+    # load match_dataset
+    match_camera_idx = 0
+    episode_first_frame_map = dict()
+    
+    if match_dataset is not None:
+        match_dir = pathlib.Path(match_dataset)
+        match_video_dir = match_dir.joinpath('videos')
+        for vid_dir in match_video_dir.glob("*/"):
+            episode_idx = int(vid_dir.stem)
+            match_video_path = vid_dir.joinpath(f'{match_camera_idx}.mp4')
+            if match_video_path.exists():
+                frames = skvideo.io.vread(
+                    str(match_video_path), num_frames=1)
+                episode_first_frame_map[episode_idx] = frames[0]
+    print(f"Loaded initial frame for {len(episode_first_frame_map)} episodes")
+    
+    # load checkpoint
+    ckpt_path = input_dir
+    payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
+    cfg = payload['cfg']
+    
+    cls = hydra.utils.get_class(cfg._target_)
+    workspace = cls(cfg)
+    workspace: BaseWorkspace
+    workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+
+    num_bots = 1
+
+    # hacks for method-specific setup.
+    action_offset = 0
+    delta_action = cfg.task.shape_meta['action'].get('delta', False)
+    print(f"Delta action mode: {delta_action}")
+    if 'diffusion' in cfg.name:
+        # diffusion model
+        policy: BaseImagePolicy
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+
+        device = torch.device('cuda')
+        policy.eval().to(device)
+
+        # set inference params
+        if n_action_steps > 0:
+            policy.n_action_steps = n_action_steps
+        policy.num_inference_steps = 16 # DDIM inference iterations
+        noise_scheduler = diffusers.schedulers.scheduling_ddim.DDIMScheduler(
+            num_train_timesteps=100,
+            beta_start=0.0001,
+            beta_end=0.02,
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=True,
+            set_alpha_to_one=True,
+            steps_offset=0,
+            prediction_type='epsilon'
+        )
+        policy.noise_scheduler = noise_scheduler
+        if 'key' not in cfg.task.shape_meta['action'] or cfg.task.shape_meta['action']['key'] == 'eef_action':
+            action_mode = 'eef'
+        elif cfg.task.shape_meta['action']['key'] == 'joint_action':
+            action_mode = 'joint'
+        else:
+            raise RuntimeError("Unsupported action mode: ", cfg.task.shape_meta['action']['key'])
+    else:
+        raise RuntimeError("Unsupported policy type: ", cfg.name)
+
+    # setup experiment
+    dt = 1/frequency
+    os.system(f'mkdir -p {output}')
+    # kin_helper = KinHelper(robot_name=cfg.task.dataset.robot_name)
+    kin_helper = None
+    fusion = None
+    expected_labels = None
+
+    obs_res = get_real_obs_resolution(cfg.task.shape_meta)
+    n_obs_steps = cfg.n_obs_steps
+    print("n_obs_steps: ", n_obs_steps)
+    print("steps_per_inference:", steps_per_inference)
+    print("action_offset:", action_offset)
+
+    # Start terminal input thread
+    input_thread = threading.Thread(target=terminal_input_thread, daemon=True)
+    input_thread.start()
+
+    print("Starting RealEnvFranka...")
+
+    try:
+        with SharedMemoryManager() as shm_manager:
+            with KeystrokeCounter() as key_counter, \
+                RealEnvFranka(
+                output_dir=output, 
+                robot_ip=robot_ip, 
+                frequency=frequency,
+                n_obs_steps=n_obs_steps,
+                obs_float32=False,
+                init_joints=init_joints,
+                ctrl_mode=action_mode,
+                enable_multi_cam_vis=True,
+                record_raw_video=True,
+                video_capture_fps=30,
+                # thread_per_video=3,
+                video_crf=21,
+                shm_manager=shm_manager) as env:
+
+                print("Waiting for realsense")
+                time.sleep(1.0)
+
+                print("Warming up policy inference")
+                obs = env.get_obs()
+                with torch.no_grad():
+                    policy.reset()
+                    exclude_colors = cfg.task.dataset.exclude_colors if 'exclude_colors' in cfg.task.dataset else []
+                    obs_dict_np = get_real_obs_dict(
+                        env_obs=obs, shape_meta=cfg.task.shape_meta, 
+                        fusion=fusion, expected_labels=expected_labels, teleop=kin_helper, exclude_colors=exclude_colors)
+
+                    obs_dict = dict_apply(obs_dict_np, 
+                        lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
+                    # import pdb; pdb.set_trace()
+                    result = policy.predict_action(obs_dict)
+                    action = result['action'][0].detach().to('cpu').numpy()
+                    del result
+
+                print('🤖 Robot ready! Type commands in terminal...')
+                robot_state['running'] = True
+                
+                # Main control loop
+                while not robot_state['stop']:
+                    # ========= human control loop ==========
+                    if not robot_state['policy_active']:
+                        print("👤 Human in control!")
+                        state = env.get_robot_state()
+                        t_start = time.monotonic()
+                        iter_idx = 0
+                        last_status_time = time.time()
+                        
+                        while not robot_state['stop'] and not robot_state['policy_active']:
+                            # calculate timing
+                            t_cycle_end = t_start + (iter_idx + 1) * dt
+                            t_sample = t_cycle_end - command_latency
+                            t_command_target = t_cycle_end + dt
+
+                            # pump obs
+                            obs = env.get_obs()
+                            
+                            # Process commands
+                            process_commands(key_counter)
+                            
+                            # Update state
+                            robot_state['stage'] = key_counter[Key.space]
+                            robot_state['episode_id'] = env.episode_id
+
+                            # visualize (save only, no display)
+                            episode_id = robot_state['episode_id']
+                            stage = robot_state['stage']
+                            robot_state['iteration'] = iter_idx
+                            
+                            # Create visualization similar to demo_real_franka_terminal
+                            if vis_camera_idx == 0:
+                                vis_img = obs[f'camera_{CAMERA_NAMES[vis_camera_idx]}_color'][-1]
+                            else:
+                                # Use front and right cameras like in demo
+                                rs_front = obs['camera_front_color'][-1,:,:,::-1].copy() if 'camera_front_color' in obs else obs[f'camera_{CAMERA_NAMES[0]}_color'][-1]
+                                rs_right = obs['camera_right_color'][-1,:,:,::-1].copy() if 'camera_right_color' in obs else obs[f'camera_{CAMERA_NAMES[1]}_color'][-1]
+                                
+                                # Concatenate images
+                                vis_img = np.concatenate([rs_front, rs_right], axis=1)
+                                vis_img = cv2.resize(vis_img, (960, 360))
+                            
+                            # Match dataset overlay if provided
+                            match_episode_id = episode_id
+                            if match_episode is not None:
+                                match_episode_id = match_episode
+                            if match_episode_id in episode_first_frame_map:
+                                match_img = episode_first_frame_map[match_episode_id]
+                                ih, iw, _ = match_img.shape
+                                oh, ow, _ = vis_img.shape
+                                tf = get_image_transform(
+                                    input_res=(iw, ih), 
+                                    output_res=(ow, oh), 
+                                    bgr_to_rgb=False)
+                                match_img = tf(match_img).astype(np.float32) / 255
+                                vis_img = np.minimum(vis_img, match_img)
+
+                            text = f'Episode: {episode_id}, Stage: {stage} [HUMAN]'
+                            cv2.putText(
+                                vis_img,
+                                text,
+                                (10, 30),
+                                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                                fontScale=0.8,
+                                thickness=2,
+                                color=(255, 255, 255)
+                            )
+                            
+                            # Save visualization images periodically
+                            if save_viz_interval > 0:
+                                save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
+                            
+                            # Execute robot actions (maintain current position + gripper control)
+                            # Check if we need to move to initial pose
+                            if robot_state['move_to_init']:
+                                if action_mode == 'joint':
+                                    # Initial joint configuration from real_env_franka_gripper_gelsight.py
+                                    # j_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, 
+                                    #                    -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 
+                                    #                    1.6146283149719238, robot_state['gripper_pos']])
+                                    j_init = np.array([0.0, -0.4058451, 0.0, -2.6068573, 0.0, 2.1711833, 0.86116207, robot_state['gripper_pos']])
+                                    env.exec_actions(
+                                        actions=[j_init],
+                                        timestamps=[t_command_target-time.monotonic()+time.time()],
+                                        mode='joint')
+                                elif action_mode == 'eef':
+                                    # Home end-effector pose: [x, y, z, rx, ry, rz, gripper]
+                                    ee_init = np.array([0.5, 0.242, 0.2517, 2.702, -0.458, -0.614, robot_state['gripper_pos']])
+                                    env.exec_actions(
+                                        actions=[ee_init],
+                                        timestamps=[t_command_target-time.monotonic()+time.time()],
+                                        mode='eef')
+                                robot_state['move_to_init'] = False
+                            elif action_mode == 'joint':
+                                joint_pos = obs['full_joint_pos']
+                                actions = joint_pos[-1, :8].copy()
+                                actions[-1] = robot_state['gripper_pos']
+                                env.exec_actions(
+                                    actions=[actions],
+                                    timestamps=[t_command_target-time.monotonic()+time.time()],
+                                    mode='joint')
+                            elif action_mode == 'eef':
+                                # For EEF mode, maintain current EEF position and gripper
+                                curr_ee_pose = obs['ee_pose'][-1].copy()  # [x, y, z, qx, qy, qz, qw, gripper]
+                                curr_ee_pose_euler = np.zeros(7)
+                                curr_ee_pose_euler[:3] = curr_ee_pose[:3]
+                                # Convert quaternion to euler
+                                curr_rot = st.Rotation.from_quat(curr_ee_pose[3:7])
+                                curr_ee_pose_euler[3:6] = curr_rot.as_euler('xyz')
+                                curr_ee_pose_euler[-1] = robot_state['gripper_pos']  # Update gripper position
+                                env.exec_actions(
+                                    actions=[curr_ee_pose_euler],
+                                    timestamps=[t_command_target-time.monotonic()+time.time()],
+                                    mode='eef')
+
+                            precise_wait(t_cycle_end)
+                            iter_idx += 1
+                            
+                            # Print status periodically
+                            current_time = time.time()
+                            if current_time - last_status_time > 5.0:
+                                status = f"📊 Human Control - Iter: {iter_idx}, Ep: {episode_id}, Stage: {stage}"
+                                status += f", Gripper: {'CLOSED' if robot_state['gripper_pos'] < 0.05 else 'OPEN'}"
+                                print(status)
+                                last_status_time = current_time
+
+                    # ========== policy control loop ==============
+                    elif robot_state['policy_active']:
+                        try:
+                            # start episode
+                            policy.reset()
+                            start_delay = 1.0
+                            eval_t_start = time.time() + start_delay
+                            t_start = time.monotonic() + start_delay
+                            # env.start_episode(eval_t_start, save_episode=False)
+                            env.start_episode(eval_t_start, save_video=True, save_episode=False)
+                            # wait for 1/15 sec to get the closest frame actually
+                            frame_latency = 1/15
+                            precise_wait(eval_t_start - frame_latency, time_func=time.time)
+                            print("🤖 Policy started!")
+                            iter_idx = 0
+                            last_status_time = time.time()
+                            
+                            while robot_state['policy_active'] and not robot_state['stop']:
+                                # calculate timing
+                                t_cycle_end = t_start + (iter_idx + steps_per_inference) * dt
+
+                                # get obs
+                                t_obs_start = time.perf_counter()
+                                obs = env.get_obs()
+                                obs_timestamps = obs['timestamp']
+                                t_obs_end = time.perf_counter()
+                                # print(f"⏱️  [Timing] Get obs: {(t_obs_end - t_obs_start)*1000:.2f}ms")
+
+                                # Process commands (check for stop)
+                                process_commands(key_counter)
+
+                                # run inference
+                                with torch.no_grad():
+                                    t_inference_start = time.perf_counter()
+                                    
+                                    t_obs_dict_start = time.perf_counter()
+                                    obs_dict_np = get_real_obs_dict(
+                                        env_obs=obs, shape_meta=cfg.task.shape_meta, 
+                                        fusion=fusion, expected_labels=expected_labels, teleop=kin_helper, exclude_colors=exclude_colors)
+                                    t_obs_dict_end = time.perf_counter()
+                                    # print(f"⏱️  [Timing] Get obs dict (fusion): {(t_obs_dict_end - t_obs_dict_start)*1000:.2f}ms")
+                                    
+                                    t_to_device_start = time.perf_counter()
+                                    obs_dict = dict_apply(obs_dict_np, 
+                                        lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
+                                    t_to_device_end = time.perf_counter()
+                                    # print(f"⏱️  [Timing] Transfer to device: {(t_to_device_end - t_to_device_start)*1000:.2f}ms")
+                                    
+                                    t_predict_start = time.perf_counter()
+                                    result = policy.predict_action(obs_dict)
+                                    t_predict_end = time.perf_counter()
+                                    # print(f"⏱️  [Timing] Policy predict: {(t_predict_end - t_predict_start)*1000:.2f}ms")
+                                    
+                                    action = result['action'][0].detach().to('cpu').numpy()
+                                    
+                                    t_inference_end = time.perf_counter()
+                                    # print(f"⏱️  [Timing] Total inference: {(t_inference_end - t_inference_start)*1000:.2f}ms")
+
+                                t_action_convert_start = time.perf_counter()
+                                # Get current ee_pose for delta action conversion
+                                current_ee_pose = obs['ee_pose'][-1] if delta_action else None
+                                print("Action:", action)
+                                env_actions = policy_action_to_env_action(
+                                    action, action_mode, num_bots, 
+                                    delta_action=delta_action,
+                                    current_ee_pose=current_ee_pose
+                                )
+                                t_action_convert_end = time.perf_counter()
+                                # print(f"⏱️  [Timing] Action conversion: {(t_action_convert_end - t_action_convert_start)*1000:.2f}ms")
+
+                                # deal with timing
+                                t_timing_start = time.perf_counter()
+                                action_timestamps = (np.arange(len(action), dtype=np.float64) + action_offset
+                                    ) * dt + obs_timestamps[-1]
+                                action_exec_latency = 0.2
+                                curr_time = time.time()
+                                is_new = action_timestamps > (curr_time + action_exec_latency)
+                                if np.sum(is_new) == 0:
+                                    # exceeded time budget, still do something
+                                    print(f"⚠️  [Warning] Exceeded time budget! Using last action only.")
+                                    env_actions = env_actions[[-1]]
+                                    # schedule on next available step
+                                    next_step_idx = int(np.ceil((curr_time - eval_t_start) / dt))
+                                    action_timestamp = eval_t_start + (next_step_idx) * dt
+                                    action_timestamps = np.array([action_timestamp])
+                                else:
+                                    env_actions = env_actions[is_new]
+                                    action_timestamps = action_timestamps[is_new]
+                                t_timing_end = time.perf_counter()
+                                # print(f"⏱️  [Timing] Action timing calculation: {(t_timing_end - t_timing_start)*1000:.2f}ms")
+                                
+                                # execute actions
+                                t_exec_start = time.perf_counter()
+                                if action_mode == 'eef':
+                                    env.exec_actions(
+                                        actions=env_actions,
+                                        timestamps=action_timestamps,
+                                        mode=action_mode)
+                                elif action_mode == 'joint':
+                                    env.exec_actions(
+                                        actions=env_actions,
+                                        timestamps=action_timestamps,
+                                        mode=action_mode)
+                                t_exec_end = time.perf_counter()
+                                # print(f"⏱️  [Timing] Execute actions: {(t_exec_end - t_exec_start)*1000:.2f}ms")
+
+                                # visualize (save only)
+                                t_viz_start = time.perf_counter()
+                                episode_id = env.episode_id
+                                robot_state['episode_id'] = episode_id
+                                robot_state['iteration'] = iter_idx
+                                
+                                vis_camera_name = CAMERA_NAMES[vis_camera_idx]
+                                vis_img = obs[f'camera_{vis_camera_name}_color'][-1]
+                                text = 'Episode: {}, Time: {:.1f} [POLICY]'.format(
+                                    episode_id, time.monotonic() - t_start
+                                )
+                                cv2.putText(
+                                    vis_img,
+                                    text,
+                                    (10, 30),
+                                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                                    fontScale=0.8,
+                                    thickness=2,
+                                    color=(0,255,0)
+                                )
+                                
+                                # Save visualization images periodically
+                                if save_viz_interval > 0:
+                                    save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
+                                t_viz_end = time.perf_counter()
+                                # print(f"⏱️  [Timing] Visualization: {(t_viz_end - t_viz_start)*1000:.2f}ms")
+
+                                # wait for execution
+                                t_wait_start = time.perf_counter()
+                                precise_wait(t_cycle_end - frame_latency)
+                                t_wait_end = time.perf_counter()
+                                
+                                # Calculate total cycle time
+                                t_cycle_total = t_wait_end - t_obs_start
+                                # print(f"⏱️  [Timing] Wait time: {(t_wait_end - t_wait_start)*1000:.2f}ms")
+                                # print(f"⏱️  [Timing] ========== TOTAL CYCLE: {t_cycle_total*1000:.2f}ms ==========\n")
+                                
+                                iter_idx += steps_per_inference
+
+                                # Print status periodically
+                                current_time = time.time()
+                                if current_time - last_status_time > 5.0:
+                                    print(f"📊 Policy Control - Iter: {iter_idx}, Episode: {episode_id}, Freq: {1/(time.perf_counter() - (current_time - 5.0)):.1f}Hz")
+                                    last_status_time = current_time
+
+                        except KeyboardInterrupt:
+                            print("Policy interrupted!")
+                            robot_state['policy_active'] = False
+                        
+                        # Always end episode after policy control ends
+                        env.end_episode(incr_epi=True)
+                        robot_state['policy_active'] = False
+                        print("Policy episode ended")
+
+    except KeyboardInterrupt:
+        print("\n🔴 Interrupted by user")
+        robot_state['stop'] = True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        robot_state['stop'] = True
+        raise
+    finally:
+        robot_state['running'] = False
+        print("🏁 Robot evaluation ended")
+
+if __name__ == '__main__':
+    main()

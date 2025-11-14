@@ -556,20 +556,24 @@ class SingleRealsense(mp.Process):
             rs_config.enable_device(self.serial_number)
 
             # start pipeline
+            print(f"🎥 Starting camera {self.serial_number}...")
             pipeline = rs.pipeline()
             pipeline_profile = pipeline.start(rs_config)
+            print(f"✅ Camera {self.serial_number} pipeline started")
 
             # Check available sensors first
             device = pipeline_profile.get_device()
-            print(f"Device {self.serial_number} sensors:")
-            for i in range(len(device.sensors)):
-                sensor = device.sensors[i]
-                print(f"  Sensor {i}: {sensor.get_info(rs.camera_info.name)}")
+            if self.verbose:
+                print(f"Device {self.serial_number} sensors:")
+                for i in range(len(device.sensors)):
+                    sensor = device.sensors[i]
+                    print(f"  Sensor {i}: {sensor.get_info(rs.camera_info.name)}")
 
 
             # report global time
             # https://github.com/IntelRealSense/librealsense/pull/3909
-            print("getting device:", self.serial_number)
+            if self.verbose:
+                print("getting device:", self.serial_number)
             try:
                 d = pipeline_profile.get_device().first_color_sensor()
             except:
@@ -788,10 +792,16 @@ class SingleRealsense(mp.Process):
                     # print('cmd_time:', cmd_time)
                 if self.verbose:
                     print(f'[SingleRealsense {self.serial_number}] FPS {frequency}')
+        except Exception as e:
+            print(f"❌ Camera {self.serial_number} failed with error: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't set ready_event on error - let retry logic handle it
         finally:
             self.video_recorder.stop()
             rs_config.disable_all_streams()
-            self.ready_event.set()
+            # Only set ready event if we successfully started (had at least one iteration)
+            # This prevents marking failed cameras as "ready"
         
         if self.verbose:
             print(f'[SingleRealsense {self.serial_number}] Exiting worker process.')
