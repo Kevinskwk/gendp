@@ -16,9 +16,9 @@ import h5py
 import cv2
 import scipy.spatial.transform as st
 from filelock import FileLock
-from threadpoolctl import threadpool_limits
-from omegaconf import OmegaConf, DictConfig
-import transforms3d
+# from threadpoolctl import threadpool_limits
+# from omegaconf import OmegaConf, DictConfig
+# import transforms3d
 import scipy.spatial.transform as st
 import yaml
 
@@ -27,7 +27,7 @@ from gendp.common.replay_buffer import ReplayBuffer
 from gendp.model.common.rotation_transformer import RotationTransformer
 from gendp.common.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
-from gendp.common.kinematics_utils import KinHelper
+# from gendp.common.kinematics_utils import KinHelper
 from gendp.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from gendp.common.data_utils import _convert_actions, _convert_ee_pose_obs, load_dict_from_hdf5, modify_hdf5_from_dict
 from gendp.dataset.base_dataset import BaseImageDataset
@@ -42,6 +42,53 @@ from gendp.common.normalize_util import (
 register_codecs()
 
 
+def _filter_small_ee_changes(ee_poses, pos_threshold=0.001, rot_threshold=0.01):
+    """
+    Filter out steps with small changes in EE pose.
+    
+    Args:
+        ee_poses: Array of EE poses with shape (T, 7) - [pos(3), euler(3), gripper(1)]
+        pos_threshold: Position change threshold in meters
+        rot_threshold: Rotation change threshold in radians
+        
+    Returns:
+        keep_mask: Boolean mask indicating which steps to keep (True = keep, False = filter out)
+    """
+    T = ee_poses.shape[0]
+    keep_mask = np.ones(T, dtype=bool)
+    
+    if T <= 1:
+        return keep_mask
+    
+    # Always keep the first frame
+    keep_mask[0] = True
+    
+    # Compute position changes
+    pos = ee_poses[:, :3]
+    pos_changes = np.linalg.norm(pos[1:] - pos[:-1], axis=-1)  # (T-1,)
+    
+    # Compute rotation changes using axis-angle representation
+    rot_euler = ee_poses[:, 3:6]
+    rot_mats = st.Rotation.from_euler('xyz', rot_euler).as_matrix()  # (T, 3, 3)
+    
+    rot_changes = np.zeros(T - 1)
+    for t in range(T - 1):
+        # R_delta = R_{t+1} * R_t^T
+        delta_rot_mat = rot_mats[t + 1] @ rot_mats[t].T
+        # Convert to axis-angle and get angle magnitude
+        rotvec = st.Rotation.from_matrix(delta_rot_mat).as_rotvec()
+        rot_changes[t] = np.linalg.norm(rotvec)
+    
+    # Filter: keep step if either position or rotation change exceeds threshold
+    for t in range(1, T):
+        if pos_changes[t - 1] > pos_threshold or rot_changes[t - 1] > rot_threshold:
+            keep_mask[t] = True
+        else:
+            keep_mask[t] = False
+    
+    return keep_mask
+
+
 def normalizer_from_stat(stat):
     max_abs = np.maximum(stat['max'].max(), np.abs(stat['min']).max())
     scale = np.full_like(stat['max'], fill_value=1/max_abs)
@@ -54,7 +101,14 @@ def normalizer_from_stat(stat):
 
 # convert raw hdf5 data to replay buffer, which is used for diffusion policy training
 def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transformer, 
-        n_workers=None, max_inflight_tasks=None, robot_name='panda'):
+        n_workers=None, max_inflight_tasks=None, robot_name='panda', 
+        filter_small_changes=False, pos_threshold=0.001, rot_threshold=0.01):
+    """
+    Args:
+        filter_small_changes: If True, filter out steps with small changes in EE pose
+        pos_threshold: Position change threshold in meters (default: 0.001m = 1mm)
+        rot_threshold: Rotation change threshold in radians (default: 0.01 rad ~= 0.57 degrees)
+    """
     if n_workers is None:
         n_workers = multiprocessing.cpu_count()
     if max_inflight_tasks is None:
@@ -92,12 +146,31 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
     lowdim_data_dict = dict()
     rgb_data_dict = dict()
     depth_data_dict = dict()
+    total_filtered_steps = 0
+    total_original_steps = 0
+    
     for epi_idx in tqdm(episodes_idx, desc=f"Loading episodes"):
         dataset_path = os.path.join(dataset_dir, f'episode_{epi_idx}.hdf5')
         with h5py.File(dataset_path) as file:
             # count total steps
             # episode_length = file['cartesian_action'].shape[0]
-            episode_length = file['joint_action'].shape[0] - trim_tail
+            original_episode_length = file['joint_action'].shape[0] - trim_tail
+            total_original_steps += original_episode_length
+            
+            # Apply filtering if enabled
+            if filter_small_changes:
+                raw_ee_pose = file['observations']['ee_pose'][:original_episode_length]
+                keep_mask = _filter_small_ee_changes(
+                    raw_ee_pose, 
+                    pos_threshold=pos_threshold, 
+                    rot_threshold=rot_threshold
+                )
+                episode_length = np.sum(keep_mask)
+                total_filtered_steps += (original_episode_length - episode_length)
+            else:
+                keep_mask = np.ones(original_episode_length, dtype=bool)
+                episode_length = original_episode_length
+            
             episode_end = prev_end + episode_length
             prev_end = episode_end
             episode_ends.append(episode_end)
@@ -110,11 +183,15 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 if key not in lowdim_data_dict:
                     lowdim_data_dict[key] = list()
                 if data_key == 'cartesian_action':
-                    this_data = file['observations']['ee_pose'][:episode_length]
+                    this_data = file['observations']['ee_pose'][:original_episode_length]
                 elif data_key == 'joint_action':
-                    this_data = file['observations']['joint_pos'][:episode_length]
+                    this_data = file['observations']['joint_pos'][:original_episode_length]
                 else:
-                    this_data = file[data_key][:episode_length]
+                    this_data = file[data_key][:original_episode_length]
+                
+                # Apply filtering mask before converting actions
+                this_data = this_data[keep_mask]
+                
                 if key == 'action':
                     delta_action = shape_meta['action'].get('delta', False)
                     this_data = _convert_actions(
@@ -142,7 +219,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             for key in rgb_keys:
                 if key not in rgb_data_dict:
                     rgb_data_dict[key] = list()
-                frames = file['observations']['images'][key][:episode_length]
+                frames = file['observations']['images'][key][:original_episode_length]
+                # Apply filtering mask
+                frames = frames[keep_mask]
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
                 resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in frames]
@@ -153,7 +232,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             for key in depth_keys:
                 if key not in depth_data_dict:
                     depth_data_dict[key] = list()
-                frames = file['observations']['images'][key][:episode_length]
+                frames = file['observations']['images'][key][:original_episode_length]
+                # Apply filtering mask
+                frames = frames[keep_mask]
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
                 resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in frames]
@@ -161,6 +242,11 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 frames = np.clip(frames, 0, 1000).astype(np.uint16)
                 assert frames[0].shape == (h,w,c)
                 depth_data_dict[key].append(frames)
+    
+    if filter_small_changes:
+        print(f"Filtered {total_filtered_steps} steps out of {total_original_steps} "
+              f"({100.0 * total_filtered_steps / total_original_steps:.2f}%) "
+              f"with pos_threshold={pos_threshold}m, rot_threshold={rot_threshold}rad")
     
 
     def img_copy(zarr_arr, zarr_idx, hdf5_arr, hdf5_idx):
@@ -273,7 +359,10 @@ class RealDataset(BaseImageDataset):
             manual_val_mask=False,
             manual_val_start=-1,
             n_obs_steps=None,
-            robot_name='panda'
+            robot_name='panda',
+            filter_small_changes=False,
+            pos_threshold=0.001,
+            rot_threshold=0.01
             ):
         
         super().__init__()
@@ -300,6 +389,9 @@ class RealDataset(BaseImageDataset):
         if 'delta' in shape_meta['action'] and shape_meta['action']['delta']:
             cache_info_str += '_delta'
             cache_info_str += f"_act{shape_meta['action']['shape'][0]}"
+        # Add filtering info to cache string
+        if filter_small_changes:
+            cache_info_str += f'_filt_p{int(pos_threshold*1000)}mm_r{int(rot_threshold*1000)}mrad'
         if use_cache:
             cache_zarr_path = os.path.join(dataset_dir, f'cache{cache_info_str}.zarr.zip')
             cache_lock_path = cache_zarr_path + '.lock'
@@ -317,6 +409,9 @@ class RealDataset(BaseImageDataset):
                             dataset_dir=dataset_dir, 
                             rotation_transformer=rotation_transformer,
                             robot_name=robot_name,
+                            filter_small_changes=filter_small_changes,
+                            pos_threshold=pos_threshold,
+                            rot_threshold=rot_threshold,
                             )
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:
@@ -341,6 +436,9 @@ class RealDataset(BaseImageDataset):
                 dataset_dir=dataset_dir,
                 rotation_transformer=rotation_transformer,
                 robot_name=robot_name,
+                filter_small_changes=filter_small_changes,
+                pos_threshold=pos_threshold,
+                rot_threshold=rot_threshold,
             )
         self.replay_buffer = replay_buffer
 
@@ -506,105 +604,3 @@ class RealDataset(BaseImageDataset):
         sample = self.sampler.sample_sequence(idx)
         data = self._sample_to_data(sample)
         return data
-
-def update_ee_pose():
-    # create on 12/17/2023, only for one-time use
-    
-    ### ALOHA fixed constants
-    DT = 0.02
-    JOINT_NAMES = ["waist", "shoulder", "elbow", "forearm_roll", "wrist_angle", "wrist_rotate"]
-    START_ARM_POSE = [0, -0.96, 1.16, 0, -0.3, 0, 0.02239, -0.02239,  0, -0.96, 1.16, 0, -0.3, 0, 0.02239, -0.02239]
-    START_EE_POSE = [2.56418115e-01, -5.50126845e-04,  2.95703636e-01,  6.88682872e-04, -3.83402967e-02, -1.18223866e-03,  9.99263804e-01, -0.3]
-
-    # Left finger position limits (qpos[7]), right_finger = -1 * left_finger
-    MASTER_GRIPPER_POSITION_OPEN = 0.02417
-    MASTER_GRIPPER_POSITION_CLOSE = 0.01244
-    PUPPET_GRIPPER_POSITION_OPEN = 0.05800
-    PUPPET_GRIPPER_POSITION_CLOSE = 0.01844
-
-    # Gripper joint limits (qpos[6])
-    MASTER_GRIPPER_JOINT_OPEN = 0.3083
-    MASTER_GRIPPER_JOINT_CLOSE = -0.6842
-    PUPPET_GRIPPER_JOINT_OPEN = 1.4910
-    PUPPET_GRIPPER_JOINT_CLOSE = -0.6213
-
-    ############################ Helper functions ############################
-
-    MASTER_GRIPPER_POSITION_NORMALIZE_FN = lambda x: (x - MASTER_GRIPPER_POSITION_CLOSE) / (MASTER_GRIPPER_POSITION_OPEN - MASTER_GRIPPER_POSITION_CLOSE)
-    PUPPET_GRIPPER_POSITION_NORMALIZE_FN = lambda x: (x - PUPPET_GRIPPER_POSITION_CLOSE) / (PUPPET_GRIPPER_POSITION_OPEN - PUPPET_GRIPPER_POSITION_CLOSE)
-    MASTER_GRIPPER_POSITION_UNNORMALIZE_FN = lambda x: x * (MASTER_GRIPPER_POSITION_OPEN - MASTER_GRIPPER_POSITION_CLOSE) + MASTER_GRIPPER_POSITION_CLOSE
-    PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN = lambda x: x * (PUPPET_GRIPPER_POSITION_OPEN - PUPPET_GRIPPER_POSITION_CLOSE) + PUPPET_GRIPPER_POSITION_CLOSE
-    MASTER2PUPPET_POSITION_FN = lambda x: PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN(MASTER_GRIPPER_POSITION_NORMALIZE_FN(x))
-
-    MASTER_GRIPPER_JOINT_NORMALIZE_FN = lambda x: (x - MASTER_GRIPPER_JOINT_CLOSE) / (MASTER_GRIPPER_JOINT_OPEN - MASTER_GRIPPER_JOINT_CLOSE)
-    PUPPET_GRIPPER_JOINT_NORMALIZE_FN = lambda x: (x - PUPPET_GRIPPER_JOINT_CLOSE) / (PUPPET_GRIPPER_JOINT_OPEN - PUPPET_GRIPPER_JOINT_CLOSE)
-    MASTER_GRIPPER_JOINT_UNNORMALIZE_FN = lambda x: x * (MASTER_GRIPPER_JOINT_OPEN - MASTER_GRIPPER_JOINT_CLOSE) + MASTER_GRIPPER_JOINT_CLOSE
-    PUPPET_GRIPPER_JOINT_UNNORMALIZE_FN = lambda x: x * (PUPPET_GRIPPER_JOINT_OPEN - PUPPET_GRIPPER_JOINT_CLOSE) + PUPPET_GRIPPER_JOINT_CLOSE
-    MASTER2PUPPET_JOINT_FN = lambda x: PUPPET_GRIPPER_JOINT_UNNORMALIZE_FN(MASTER_GRIPPER_JOINT_NORMALIZE_FN(x))
-
-    MASTER_GRIPPER_VELOCITY_NORMALIZE_FN = lambda x: x / (MASTER_GRIPPER_POSITION_OPEN - MASTER_GRIPPER_POSITION_CLOSE)
-    PUPPET_GRIPPER_VELOCITY_NORMALIZE_FN = lambda x: x / (PUPPET_GRIPPER_POSITION_OPEN - PUPPET_GRIPPER_POSITION_CLOSE)
-
-    MASTER_POS2JOINT = lambda x: MASTER_GRIPPER_POSITION_NORMALIZE_FN(x) * (MASTER_GRIPPER_JOINT_OPEN - MASTER_GRIPPER_JOINT_CLOSE) + MASTER_GRIPPER_JOINT_CLOSE
-    MASTER_JOINT2POS = lambda x: MASTER_GRIPPER_POSITION_UNNORMALIZE_FN((x - MASTER_GRIPPER_JOINT_CLOSE) / (MASTER_GRIPPER_JOINT_OPEN - MASTER_GRIPPER_JOINT_CLOSE))
-    PUPPET_POS2JOINT = lambda x: PUPPET_GRIPPER_POSITION_NORMALIZE_FN(x) * (PUPPET_GRIPPER_JOINT_OPEN - PUPPET_GRIPPER_JOINT_CLOSE) + PUPPET_GRIPPER_JOINT_CLOSE
-    PUPPET_JOINT2POS = lambda x: PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN((x - PUPPET_GRIPPER_JOINT_CLOSE) / (PUPPET_GRIPPER_JOINT_OPEN - PUPPET_GRIPPER_JOINT_CLOSE))
-
-    MASTER_GRIPPER_JOINT_MID = (MASTER_GRIPPER_JOINT_OPEN + MASTER_GRIPPER_JOINT_CLOSE)/2
-    
-    
-    DEBUG = False
-    
-    # update ee_pose in hdf5
-    data_dir = '/home/yixuan/general_dp/data/real_aloha_demo/open_bag_v2_demo_1'
-    epi_s = 0
-    epi_e = 1
-    kin_helper = KinHelper(robot_name='trossen_vx300s_v3')
-    for epi_i in tqdm(range(epi_s, epi_e)):
-        epi_fn = os.path.join(data_dir, f'episode_{epi_i}.hdf5')
-        epi_data, fn = load_dict_from_hdf5(epi_fn)
-        # joint_action = epi_data['joint_action']
-        old_cartesian_action = epi_data['cartesian_action']
-        robot_base_in_world_seq = epi_data['observations']['robot_base_pose_in_world']
-        sec_base_in_world = np.array([[0,1,0,-0.13],
-                                    [-1,0,0,0.27],
-                                    [0,0,1,0.02],
-                                    [0,0,0,1]])
-        new_epi_data = {'cartesian_action': np.array(epi_data['cartesian_action']).copy(),
-                        # 'observations': {
-                        #     'ee_pose': np.array(epi_data['observations']['ee_pose']).copy(),
-                        #     }
-                        }
-        for i in range(old_cartesian_action.shape[0]):
-            ### update cartesian_action
-            # puppet_gripper_pos = PUPPET_JOINT2POS(joint_action[i,-1])
-            # puppet_action_qpos = np.concatenate([joint_action[i,:-1], np.array([puppet_gripper_pos, -puppet_gripper_pos])])
-            # puppet_action_eef_mat = kin_helper.compute_fk_links(qpos=puppet_action_qpos, link_idx=[kin_helper.eef_link_idx])[0]
-            puppet_action_old_eef = old_cartesian_action[i] # (14,)
-            puppet_action_old_sec_eef = puppet_action_old_eef[7:] # (7,)
-            puppet_action_old_sec_mat = np.eye(4)
-            puppet_action_old_sec_mat[:3, 3] = puppet_action_old_sec_eef[:3]
-            puppet_action_old_sec_mat[:3, :3] = transforms3d.euler.euler2mat(*puppet_action_old_sec_eef[3:6])
-            puppet_action_new_sec_mat = np.linalg.inv(robot_base_in_world_seq[i, 0]) @ sec_base_in_world @ puppet_action_old_sec_mat
-            puppet_action_eef = np.concatenate([puppet_action_old_eef[:7],
-                                                puppet_action_new_sec_mat[:3,3],
-                                                transforms3d.euler.mat2euler(puppet_action_new_sec_mat[:3,:3]),
-                                                puppet_action_old_sec_eef[-1:]])
-            if DEBUG:
-                print('original cartesian_action: ', epi_data['cartesian_action'][i])
-                print('new cartesian_action: ', puppet_action_eef)
-            new_epi_data['cartesian_action'][i] = puppet_action_eef
-
-            # ### update ee_pose
-            # qpos = epi_data['observations']['joint_pos'][i]
-            # full_qpos = epi_data['observations']['full_joint_pos'][i]
-            # puppet_eef_mat = kin_helper.compute_fk_links(qpos=full_qpos, link_idx=[kin_helper.eef_link_idx])[0]
-            # puppet_eef = np.concatenate([puppet_eef_mat[:3,3],
-            #                              transforms3d.euler.mat2euler(puppet_eef_mat[:3,:3]),
-            #                              qpos[-1:]])
-            # if DEBUG:
-            #     print('original ee_pose: ', epi_data['observations']['ee_pose'][i])
-            #     print('new ee_pose: ', puppet_eef)
-            # new_epi_data['observations']['ee_pose'][i] = puppet_eef
-        fn.close()
-        modify_hdf5_from_dict(epi_fn, new_epi_data)

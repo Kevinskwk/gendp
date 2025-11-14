@@ -132,6 +132,10 @@ task:
     seed: 42
     n_obs_steps: 3
     robot_name: panda
+    # Data filtering options - filter out steps with small changes in EE pose
+    filter_small_changes: true  # Set to true to enable filtering
+    pos_threshold: 0.001  # Position change threshold in meters (default: 1mm)
+    rot_threshold: 0.01   # Rotation change threshold in radians (default: ~0.57 degrees)
     # exclude_colors: [yellow]
     shape_meta: ${shape_meta}
     use_cache: true
