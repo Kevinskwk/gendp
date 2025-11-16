@@ -499,6 +499,13 @@ class RealDataset(BaseImageDataset):
             key_first_k=key_first_k,
             shape_meta=shape_meta,)
         
+            # Define augmentations
+        self.image_augmentations = transforms.Compose([
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            # transforms.RandomCrop((224, 224)),  # Example crop size, adjust as needed
+            transforms.Lambda(lambda img: img + torch.randn_like(img) * 0.01)  # Add Gaussian noise
+        ])
+        
         self.shape_meta = shape_meta
         self.rgb_keys = rgb_keys
         self.depth_keys = depth_keys
@@ -573,13 +580,6 @@ class RealDataset(BaseImageDataset):
     def __len__(self) -> int:
         return len(self.sampler)
 
-    # Define augmentations
-    image_augmentations = transforms.Compose([
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        # transforms.RandomCrop((224, 224)),  # Example crop size, adjust as needed
-        transforms.Lambda(lambda img: img + torch.randn_like(img) * 0.05)  # Add Gaussian noise
-    ])
-
     def _sample_to_data(self, sample):
         # to save RAM, only return first n_obs_steps of OBS
         # since the rest will be discarded anyway.
@@ -588,14 +588,15 @@ class RealDataset(BaseImageDataset):
         T_slice = slice(self.n_obs_steps)
 
         obs_dict = dict()
+        obs_dict_tensors = dict()
         for key in self.rgb_keys:
             # move channel last to channel first
             # T,H,W,C
             # convert uint8 image to float32
-            obs_dict[key] = np.moveaxis(sample[key][T_slice], -1, 1
+            rgb_data = np.moveaxis(sample[key][T_slice], -1, 1
                 ).astype(np.float32) / 255.
-            # Apply augmentations
-            obs_dict[key] = torch.stack([image_augmentations(torch.tensor(img)) for img in obs_dict[key]])
+            # Apply augmentations and convert to tensor
+            obs_dict_tensors[key] = torch.stack([self.image_augmentations(torch.tensor(img)) for img in rgb_data])
             # T,C,H,W
             del sample[key]
         for key in self.depth_keys:
@@ -610,8 +611,13 @@ class RealDataset(BaseImageDataset):
             obs_dict[key] = sample[key][T_slice].astype(np.float32)
             del sample[key]
         
+        # Convert numpy arrays to tensors
+        obs_dict_converted = dict_apply(obs_dict, torch.from_numpy)
+        # Merge with already-converted augmented RGB tensors
+        obs_dict_converted.update(obs_dict_tensors)
+        
         data = {
-            'obs': dict_apply(obs_dict, torch.from_numpy),
+            'obs': obs_dict_converted,
             'action': torch.from_numpy(sample['action'].astype(np.float32))
         }
         return data
