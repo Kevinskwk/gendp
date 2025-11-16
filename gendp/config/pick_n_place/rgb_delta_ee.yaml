@@ -1,7 +1,7 @@
 _target_: gendp.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUnetHybridWorkspace
 is_real: true
 data_root: /home/showlab/gendp
-output_dir: ${data_root}/data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+output_dir: ${data_root}/data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}_${exp_name}
 # output_dir: /users/kevinma/gendp/data/outputs/2025.03.25/13.36.38_train_diffusion_unet_hybrid_screw_driving
 checkpoint:
   save_last_ckpt: true
@@ -12,7 +12,7 @@ checkpoint:
     mode: max
     monitor_key: test_mean_score
 dataloader:
-  batch_size: 128
+  batch_size: 64
   num_workers: 8
   persistent_workers: true
   pin_memory: true
@@ -25,8 +25,8 @@ ema:
   min_value: 0.0
   power: 0.75
   update_after_step: 0
-exp_name: default
-horizon: 16
+exp_name: delta_ee_no_joint_horizon_24
+horizon: 24
 keypoint_visible_rate: 1.0
 logging:
   group: null
@@ -41,7 +41,7 @@ logging:
   - franka
   - realsense
   - default
-n_action_steps: 8
+n_action_steps: 12
 n_latency_steps: 0
 n_obs_steps: 3
 name: train_diffusion_unet_hybrid
@@ -68,15 +68,15 @@ shape_meta:
     ee_pose:
       type: low_dim
       shape:
-      - 9  # pos(3) + rot6d(6)
-    joint_pos:
-      type: low_dim
-      shape:
-      - 9
-    joint_vel:
-      type: low_dim
-      shape:
-      - 9
+      - 10  # pos(3) + rot6d(6) + gripper_open_close(1)
+    # joint_pos:
+    #   type: low_dim
+    #   shape:
+    #   - 9
+    # joint_vel:
+    #   type: low_dim
+    #   shape:
+    #   - 9
     camera_front_color:
       type: rgb
       shape:
@@ -99,11 +99,11 @@ policy:
   - 1024
   - 2048
   eval_fixed_crop: true
-  horizon: 16
+  horizon: ${horizon}
   kernel_size: 5
-  n_action_steps: 8
+  n_action_steps: ${n_action_steps}
   n_groups: 8
-  n_obs_steps: 3
+  n_obs_steps: ${n_obs_steps}
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
     beta_end: 0.02
@@ -125,17 +125,18 @@ task:
     _target_: gendp.dataset.pick_n_place_dataset.RealDataset
     dataset_dir: ${data_root}/data/${dataset_name}
     vis_input: false
-    horizon: 16
+    horizon: ${horizon}
     pad_after: 7
     pad_before: 1
     rotation_rep: rotation_6d  # for abs ee_pose only
     seed: 42
-    n_obs_steps: 3
+    n_obs_steps: ${n_obs_steps}
     robot_name: panda
     # Data filtering options - filter out steps with small changes in EE pose
-    filter_small_changes: true  # Set to true to enable filtering
+    filter_small_changes: false  # Set to true to enable filtering
     pos_threshold: 0.001  # Position change threshold in meters (default: 1mm)
-    rot_threshold: 0.01   # Rotation change threshold in radians (default: ~0.57 degrees)
+    rot_threshold: 0.001   # Rotation change threshold in radians (default: ~0.57 degrees)
+    gripper_threshold: 0.001  # Gripper change threshold (default: 1mm)
     # exclude_colors: [yellow]
     shape_meta: ${shape_meta}
     use_cache: true
@@ -144,8 +145,8 @@ task:
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
-task_name: pick_n_place_simple
-dataset_name: pick_n_place_simple
+task_name: pick_n_place_mug
+dataset_name: pick_n_place_mug_clean
 training:
   checkpoint_every: 250
   debug: false

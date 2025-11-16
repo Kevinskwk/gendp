@@ -21,6 +21,7 @@ from filelock import FileLock
 # import transforms3d
 import scipy.spatial.transform as st
 import yaml
+from torchvision import transforms
 
 from gendp.common.pytorch_util import dict_apply
 from gendp.common.replay_buffer import ReplayBuffer
@@ -42,7 +43,7 @@ from gendp.common.normalize_util import (
 register_codecs()
 
 
-def _filter_small_ee_changes(ee_poses, pos_threshold=0.001, rot_threshold=0.01):
+def _filter_small_ee_changes(ee_poses, pos_threshold=0.001, rot_threshold=0.01, gripper_threshold=0.001):
     """
     Filter out steps with small changes in EE pose.
     
@@ -70,7 +71,10 @@ def _filter_small_ee_changes(ee_poses, pos_threshold=0.001, rot_threshold=0.01):
     # Compute rotation changes using axis-angle representation
     rot_euler = ee_poses[:, 3:6]
     rot_mats = st.Rotation.from_euler('xyz', rot_euler).as_matrix()  # (T, 3, 3)
-    
+
+    # Compute gripper change
+    gripper_changes = np.abs(ee_poses[1:, 6] - ee_poses[:-1, 6])  # (T-1,)
+
     rot_changes = np.zeros(T - 1)
     for t in range(T - 1):
         # R_delta = R_{t+1} * R_t^T
@@ -81,7 +85,7 @@ def _filter_small_ee_changes(ee_poses, pos_threshold=0.001, rot_threshold=0.01):
     
     # Filter: keep step if either position or rotation change exceeds threshold
     for t in range(1, T):
-        if pos_changes[t - 1] > pos_threshold or rot_changes[t - 1] > rot_threshold:
+        if pos_changes[t - 1] > pos_threshold or rot_changes[t - 1] > rot_threshold or gripper_changes[t - 1] > gripper_threshold:
             keep_mask[t] = True
         else:
             keep_mask[t] = False
@@ -102,7 +106,7 @@ def normalizer_from_stat(stat):
 # convert raw hdf5 data to replay buffer, which is used for diffusion policy training
 def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transformer, 
         n_workers=None, max_inflight_tasks=None, robot_name='panda', 
-        filter_small_changes=False, pos_threshold=0.001, rot_threshold=0.01):
+        filter_small_changes=False, pos_threshold=0.001, rot_threshold=0.01, gripper_threshold=0.001):
     """
     Args:
         filter_small_changes: If True, filter out steps with small changes in EE pose
@@ -163,7 +167,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 keep_mask = _filter_small_ee_changes(
                     raw_ee_pose, 
                     pos_threshold=pos_threshold, 
-                    rot_threshold=rot_threshold
+                    rot_threshold=rot_threshold,
+                    gripper_threshold=gripper_threshold
                 )
                 episode_length = np.sum(keep_mask)
                 total_filtered_steps += (original_episode_length - episode_length)
@@ -362,7 +367,8 @@ class RealDataset(BaseImageDataset):
             robot_name='panda',
             filter_small_changes=False,
             pos_threshold=0.001,
-            rot_threshold=0.01
+            rot_threshold=0.01,
+            gripper_threshold=0.001
             ):
         
         super().__init__()
@@ -412,6 +418,7 @@ class RealDataset(BaseImageDataset):
                             filter_small_changes=filter_small_changes,
                             pos_threshold=pos_threshold,
                             rot_threshold=rot_threshold,
+                            gripper_threshold=gripper_threshold
                             )
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:
@@ -439,6 +446,7 @@ class RealDataset(BaseImageDataset):
                 filter_small_changes=filter_small_changes,
                 pos_threshold=pos_threshold,
                 rot_threshold=rot_threshold,
+                gripper_threshold=gripper_threshold
             )
         self.replay_buffer = replay_buffer
 
@@ -565,6 +573,13 @@ class RealDataset(BaseImageDataset):
     def __len__(self) -> int:
         return len(self.sampler)
 
+    # Define augmentations
+    image_augmentations = transforms.Compose([
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        # transforms.RandomCrop((224, 224)),  # Example crop size, adjust as needed
+        transforms.Lambda(lambda img: img + torch.randn_like(img) * 0.05)  # Add Gaussian noise
+    ])
+
     def _sample_to_data(self, sample):
         # to save RAM, only return first n_obs_steps of OBS
         # since the rest will be discarded anyway.
@@ -577,15 +592,17 @@ class RealDataset(BaseImageDataset):
             # move channel last to channel first
             # T,H,W,C
             # convert uint8 image to float32
-            obs_dict[key] = np.moveaxis(sample[key][T_slice],-1,1
+            obs_dict[key] = np.moveaxis(sample[key][T_slice], -1, 1
                 ).astype(np.float32) / 255.
+            # Apply augmentations
+            obs_dict[key] = torch.stack([image_augmentations(torch.tensor(img)) for img in obs_dict[key]])
             # T,C,H,W
             del sample[key]
         for key in self.depth_keys:
             # move channel last to channel first
             # T,H,W,C
             # convert uint16 image to float32
-            obs_dict[key] = np.moveaxis(sample[key][T_slice],-1,1
+            obs_dict[key] = np.moveaxis(sample[key][T_slice], -1, 1
                 ).astype(np.float32) / 1000.
             # T,C,H,W
             del sample[key]
