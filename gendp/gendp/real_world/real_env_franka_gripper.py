@@ -73,7 +73,7 @@ class RealEnvFranka:
             max_rot_speed=0.6,
             # robot
             tcp_offset=0.13,
-            init_joints=False,
+            init_joints=None,
             ctrl_mode='joint',
             # video capture params
             video_capture_fps=30,
@@ -93,7 +93,34 @@ class RealEnvFranka:
         assert output_dir.parent.is_dir()
         video_dir = output_dir.joinpath('videos')
         video_dir.mkdir(parents=True, exist_ok=True)
-        self.episode_id = len(glob.glob(os.path.join(output_dir.absolute().as_posix(), '*.hdf5')))
+        
+        # Determine the next episode ID by checking both HDF5 files and video folders
+        hdf5_episodes = []
+        for hdf5_file in glob.glob(os.path.join(output_dir.absolute().as_posix(), 'episode_*.hdf5')):
+            try:
+                episode_num = int(pathlib.Path(hdf5_file).stem.split('_')[-1])
+                hdf5_episodes.append(episode_num)
+            except (ValueError, IndexError):
+                pass
+        
+        video_episodes = []
+        if video_dir.exists():
+            for video_folder in video_dir.iterdir():
+                if video_folder.is_dir():
+                    try:
+                        episode_num = int(video_folder.name)
+                        video_episodes.append(episode_num)
+                    except ValueError:
+                        pass
+        
+        # Start from the maximum episode ID found + 1, or 0 if none exist
+        max_episode = max(
+            max(hdf5_episodes) if hdf5_episodes else -1,
+            max(video_episodes) if video_episodes else -1
+        )
+        self.episode_id = max_episode + 1
+        print(f'📁 Found {len(hdf5_episodes)} HDF5 files and {len(video_episodes)} video folders. Starting from episode {self.episode_id}')
+        
         # zarr_path = str(output_dir.joinpath('replay_buffer.zarr').absolute())
         # replay_buffer = ReplayBuffer.create_from_path(
         #     zarr_path=zarr_path, mode='a')
@@ -183,8 +210,18 @@ class RealEnvFranka:
         # cube_diag = np.linalg.norm([1, 1, 1])
         # j_init = np.array([-0.03173639, -0.24618988, -0.2356476 , -2.3970356 , -0.07736383, 2.19674683, -0.01091733])
         # j_init = np.array([0.0702805, -0.90773028, -0.09513126, -2.67802477, -0.0919309, 1.82060218, 0.16051947])
-        j_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 1.6146283149719238])
-        if not init_joints:
+        # Default initial joint configuration (scraper task)
+        j_init_default = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 1.6146283149719238])
+        
+        # Use provided init_joints if given, otherwise use default, or None to skip initialization
+        if init_joints is not None:
+            if isinstance(init_joints, bool):
+                # Backward compatibility: True uses default, False uses None
+                j_init = j_init_default if init_joints else None
+            else:
+                # Use provided joint positions (should be 7-element array)
+                j_init = np.array(init_joints)
+        else:
             j_init = None
 
         robot = FrankaInterpolationController(
@@ -626,7 +663,7 @@ class RealEnvFranka:
 
     def _save_episode_data(self, episode, config_dict, episode_path, attr_dict):
         save_dict_to_hdf5(episode, config_dict, str(episode_path), attr_dict=attr_dict)
-        print(f'Episode saved to {episode_path}!')
+        print(f'✅ Episode saved to {episode_path}!')
 
     def drop_episode(self):
         self.end_episode()

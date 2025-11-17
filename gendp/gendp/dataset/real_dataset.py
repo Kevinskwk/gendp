@@ -69,11 +69,56 @@ def normalizer_from_stat(stat):
         input_stats_dict=stat
     )
 
+def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, boundary_frames=10):
+    """
+    Filter out frames where the EE pose displacement is small compared to the previous frame.
+    
+    Args:
+        ee_pose_raw: (T, 7 or 8) array of EE poses [x, y, z, rx, ry, rz (euler), (gripper)]
+        pos_threshold: minimum displacement threshold in meters for position
+        rot_threshold: minimum displacement threshold in radians for rotation
+        boundary_frames: number of frames at the beginning and end to always keep
+    
+    Returns:
+        valid_indices: boolean mask of frames to keep
+    """
+    T = ee_pose_raw.shape[0]
+    
+    # Always keep first and last boundary_frames
+    valid_mask = np.zeros(T, dtype=bool)
+    valid_mask[:boundary_frames] = True
+    valid_mask[-boundary_frames:] = True
+    
+    # Compute position displacement for middle frames
+    for i in range(boundary_frames, T - boundary_frames):
+        # Position displacement
+        pos_disp = np.linalg.norm(ee_pose_raw[i, :3] - ee_pose_raw[i-1, :3])
+        
+        # Rotation displacement (Euler angle distance with wrapping handling)
+        # Extract Euler angles (rx, ry, rz) in radians
+        euler1 = ee_pose_raw[i-1, 3:6]
+        euler2 = ee_pose_raw[i, 3:6]
+        
+        # Compute angular difference with wrapping (using shortest path on circle)
+        # For each angle, we want the smallest difference considering 2π periodicity
+        euler_diff = euler2 - euler1
+        # Wrap to [-π, π] range
+        euler_diff = np.arctan2(np.sin(euler_diff), np.cos(euler_diff))
+        # Compute L2 norm of wrapped differences
+        euler_disp = np.linalg.norm(euler_diff)
+        
+        # Keep frame if displacement is above threshold
+        if pos_disp > pos_threshold or euler_disp > rot_threshold:
+            valid_mask[i] = True
+    
+    return valid_mask
+
 # convert raw hdf5 data to replay buffer, which is used for diffusion policy training
 def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transformer, 
         n_workers=None, max_inflight_tasks=None, fusion : Optional[Fusion]=None, robot_name='panda', expected_labels=None,
         exclude_colors=[], contact_field_model=None, contact_field_config=None, contact_field_device='cuda',
-        reference_tactile_use_difference=False):
+        reference_tactile_use_difference=False, filter_static_frames_enabled=True, 
+        filter_pos_threshold=0.001, filter_rot_threshold=0.01, filter_boundary_frames=10):
     if n_workers is None:
         n_workers = multiprocessing.cpu_count()
     if max_inflight_tasks is None:
@@ -114,6 +159,16 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         elif type == 'tactile':
             tactile_keys.append(key)
     
+    # Check if we need to process tactile data for merging into d3fields
+    include_tactile_in_d3fields = shape_meta.get('include_tactile_as_pointcloud', False)
+    if include_tactile_in_d3fields and len(tactile_keys) == 0:
+        # Add tactile keys even if they're not in obs (they will be merged into d3fields)
+        if 'tactile_settings' in shape_meta:
+            for base_key in shape_meta['tactile_settings'].keys():
+                force_field_key = f"{base_key}_force_field"
+                tactile_keys.append(force_field_key)
+            print(f"📊 Tactile-as-pointcloud mode: Added tactile keys {tactile_keys} for d3fields merging")
+    
     root = zarr.group(store)
     data_group = root.require_group('data', overwrite=True)
     meta_group = root.require_group('meta', overwrite=True)
@@ -140,7 +195,27 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             # count total steps
             # episode_length = file['cartesian_action'].shape[0]
             episode_length = file['joint_action'].shape[0] - trim_tail
-            episode_end = prev_end + episode_length
+            
+            # Filter out static frames based on EE pose displacement
+            if filter_static_frames_enabled:
+                ee_pose_raw = file['observations']['ee_pose'][:episode_length]
+                valid_frame_mask = filter_static_frames(
+                    ee_pose_raw, 
+                    pos_threshold=filter_pos_threshold, 
+                    rot_threshold=filter_rot_threshold, 
+                    boundary_frames=filter_boundary_frames
+                )
+                valid_indices = np.where(valid_frame_mask)[0]
+                filtered_episode_length = len(valid_indices)
+                
+                print(f"Episode {epi_idx}: Original length {episode_length}, Filtered length {filtered_episode_length} ({filtered_episode_length/episode_length*100:.1f}%)")
+            else:
+                # No filtering - use all frames
+                valid_indices = np.arange(episode_length)
+                filtered_episode_length = episode_length
+                print(f"Episode {epi_idx}: No filtering applied, length {episode_length}")
+            
+            episode_end = prev_end + filtered_episode_length
             prev_end = episode_end
             episode_ends.append(episode_end)
             
@@ -155,6 +230,10 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     this_data = file['observations']['ee_pose'][:episode_length]
                 else:
                     this_data = file[data_key][:episode_length]
+                
+                # Apply frame filtering
+                this_data = this_data[valid_indices]
+                
                 if key == 'action':
                     delta_action = shape_meta['action'].get('delta', False)
                     this_data = _convert_actions(
@@ -163,19 +242,19 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         action_key=data_key,
                         delta_action=delta_action,
                     )
-                    assert this_data.shape == (episode_length,) + tuple(shape_meta['action']['shape']), \
-                        f"Action shape mismatch: {this_data.shape} vs expected {(episode_length,) + tuple(shape_meta['action']['shape'])}"
+                    assert this_data.shape == (filtered_episode_length,) + tuple(shape_meta['action']['shape']), \
+                        f"Action shape mismatch: {this_data.shape} vs expected {(filtered_episode_length,) + tuple(shape_meta['action']['shape'])}"
                 elif key == 'ee_pose':
                     # Convert ee_pose from [pos(3), euler(3), gripper(1)] to [pos(3), rot6d(6)]
-                    # print(f"Converting ee_pose: input shape {this_data.shape}, expected output shape {(episode_length,) + tuple(shape_meta['obs'][key]['shape'])}")
+                    # print(f"Converting ee_pose: input shape {this_data.shape}, expected output shape {(filtered_episode_length,) + tuple(shape_meta['obs'][key]['shape'])}")
                     # if ee_pose shape_meta is 10, then it includes gripper opening
                     this_data = _convert_ee_pose_obs(this_data, rotation_transformer, with_gripper=(shape_meta['obs'][key]['shape'][0]==10))
                     # print(f"After conversion: {this_data.shape}")
-                    assert this_data.shape == (episode_length,) + tuple(shape_meta['obs'][key]['shape']), \
-                        f"EE pose shape mismatch: {this_data.shape} vs expected {(episode_length,) + tuple(shape_meta['obs'][key]['shape'])}"
+                    assert this_data.shape == (filtered_episode_length,) + tuple(shape_meta['obs'][key]['shape']), \
+                        f"EE pose shape mismatch: {this_data.shape} vs expected {(filtered_episode_length,) + tuple(shape_meta['obs'][key]['shape'])}"
                 else:
-                    assert this_data.shape == (episode_length,) + tuple(shape_meta['obs'][key]['shape']), \
-                        f"Obs {key} shape mismatch: {this_data.shape} vs expected {(episode_length,) + tuple(shape_meta['obs'][key]['shape'])}"
+                    assert this_data.shape == (filtered_episode_length,) + tuple(shape_meta['obs'][key]['shape']), \
+                        f"Obs {key} shape mismatch: {this_data.shape} vs expected {(filtered_episode_length,) + tuple(shape_meta['obs'][key]['shape'])}"
                 lowdim_data_dict[key].append(this_data)
             
             for key in rgb_keys:
@@ -185,6 +264,10 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     frames = file['observations']['tactile'][key][:episode_length]
                 else:
                     frames = file['observations']['images'][key][:episode_length]
+                
+                # Apply frame filtering
+                frames = frames[valid_indices]
+                
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
                 resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in frames]
@@ -196,6 +279,10 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 if key not in depth_data_dict:
                     depth_data_dict[key] = list()
                 frames = file['observations']['images'][key][:episode_length]
+                
+                # Apply frame filtering
+                frames = frames[valid_indices]
+                
                 shape = tuple(shape_meta['obs'][key]['shape'])
                 c,h,w = shape
                 resize_imgs = [cv2.resize(img, (w,h), interpolation=cv2.INTER_AREA) for img in frames]
@@ -241,8 +328,17 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 extri_seq = np.stack([file['observations']['images'][f'{k}_extrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 4, 4)
                 intri_seq = np.stack([file['observations']['images'][f'{k}_intrinsics'][:episode_length] for k in view_keys], axis=1) # (T, V, 3, 3)
                 qpos_seq = file['observations']['full_joint_pos'][:episode_length] if 'full_joint_pos' in file['observations'] else file['observations']['joint_pos'][:-trim_tail] # (T, -1)
+                
+                # Apply frame filtering to all sequences
+                color_seq = color_seq[valid_indices]
+                depth_seq = depth_seq[valid_indices]
+                extri_seq = extri_seq[valid_indices]
+                intri_seq = intri_seq[valid_indices]
+                qpos_seq = qpos_seq[valid_indices]
+                
                 if 'robot_base_pose_in_world' in file['observations']:
                     robot_base_pose_in_world_seq = file['observations']['robot_base_pose_in_world'][:episode_length] # (T, 4, 4)
+                    robot_base_pose_in_world_seq = robot_base_pose_in_world_seq[valid_indices]
                 else:
                     print('using default robot base pose!')
                     robot_base_pose_in_world = np.array([[ 1.  ,  0.  ,  0.  , -0.52],
@@ -256,6 +352,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     print(f"Processing contact field for episode {epi_idx}...")
                     
                     # Run d3fields_proc once with object/background segmentation enabled
+                    gripper_pose_seq_full = file['observations']['ee_pose'][:episode_length]
+                    gripper_pose_seq_filtered = gripper_pose_seq_full[valid_indices]
+                    
                     obj_bg_result = d3fields_proc(
                         fusion=fusion,
                         shape_meta=shape_meta['obs'][key],
@@ -268,7 +367,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         qpos_seq=qpos_seq,
                         exclude_threshold=0.01,
                         use_obj_bg_seg=True,
-                        gripper_pose_seq=file['observations']['ee_pose'][:episode_length],
+                        gripper_pose_seq=gripper_pose_seq_filtered,
                         use_gripper_crop=True,
                     )
                     
@@ -355,7 +454,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     print(f"  Phase 1: Collecting tactile and pose data for {len(aggr_src_pts_ls)} timesteps...")
                     processed_data = []
                     
-                    for t_idx in range(len(aggr_src_pts_ls)):
+                    for filtered_t_idx, t_idx in enumerate(valid_indices):
                         step_data = {}
                         
                         if has_tactile_left and has_tactile_right and 'tactile' in file['observations']:
@@ -426,7 +525,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                                         processed_data[t_idx][history_key] = history_data[history_key]
                     
                     # Prepare batched data for contact field prediction
-                    valid_indices = []
+                    batch_valid_indices = []
                     obj_pcd_list = []
                     tactile_ff_left_list = []
                     tactile_ff_right_list = []
@@ -459,7 +558,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                                 if isinstance(ee_pose_7d, torch.Tensor):
                                     ee_pose_7d = ee_pose_7d.numpy()
                                 
-                                valid_indices.append(t_idx)
+                                batch_valid_indices.append(t_idx)
                                 obj_pcd_list.append(obj_pcd[:, :3])
                                 tactile_ff_left_list.append(tactile_ff_left)
                                 tactile_ff_right_list.append(tactile_ff_right)
@@ -468,8 +567,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                                 ee_pose_7d_list.append(ee_pose_7d)
                     
                     # Run batched contact field prediction
-                    if len(valid_indices) > 0:
-                        print(f"  Running batched contact field prediction for {len(valid_indices)} valid timesteps...")
+                    if len(batch_valid_indices) > 0:
+                        print(f"  Running batched contact field prediction for {len(batch_valid_indices)} valid timesteps...")
                         batch_results = predict_contact_field_batch(
                             model=contact_field_model,
                             obj_pointclouds=obj_pcd_list,
@@ -487,7 +586,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     for t_idx in range(len(aggr_src_pts_ls)):
                         full_pcd = aggr_src_pts_ls[t_idx]
                         
-                        if t_idx in valid_indices:
+                        if t_idx in batch_valid_indices:
                             # Use batch prediction result
                             contact_prob, contact_force = batch_results[result_idx]
                             result_idx += 1
@@ -565,6 +664,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 
                 frames = file['observations']['tactile'][tactile_img_key][:episode_length]
                 
+                # Apply frame filtering
+                frames = frames[valid_indices]
+                
                 # Get settings from either obs or tactile_settings
                 if base_key in shape_meta.get('tactile_settings', {}):
                     setting = shape_meta['tactile_settings'][base_key]
@@ -576,6 +678,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 
                 # Get robot pose data for 3D marker coordinate computation
                 ee_poses = file['observations']['ee_pose'][:episode_length]  # (T, 8) [x,y,z,qx,qy,qz,qw,gripper]
+                
+                # Apply frame filtering to ee_poses
+                ee_poses = ee_poses[valid_indices]
                 
                 # Initialize TactileProcessor for this key if not already done
                 # IMPORTANT: Use same preprocessing as contact field prediction for consistency
@@ -766,6 +871,133 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             
     # dump spatial data
     print('Dumping spatial data')
+    
+    # Check if we should include tactile as pointcloud in d3fields
+    include_tactile_in_d3fields = shape_meta.get('include_tactile_as_pointcloud', False)
+    
+    if include_tactile_in_d3fields and len(tactile_data_dict) > 0 and len(tactile_coord_dict) > 0:
+        print("✅ Merging tactile data as point clouds into d3fields...")
+        
+        # Get tactile history configuration
+        tactile_history_config = shape_meta.get('tactile_history', {})
+        tactile_history_enabled = tactile_history_config.get('enabled', False)
+        tactile_history_length = tactile_history_config.get('length', 1)
+        
+        if tactile_history_enabled and tactile_history_length > 1:
+            print(f"  📊 Tactile history enabled: length={tactile_history_length}")
+            print(f"     Each tactile point will have {tactile_history_length} timesteps of force field data")
+        
+        # We need to merge tactile points into 'd3fields' spatial data
+        if 'd3fields' in spatial_data_dict:
+            d3fields_data = spatial_data_dict['d3fields']  # List of (N, C) arrays
+            
+            # Get tactile keys (left and right)
+            tactile_left_key = 'tactile_left_force_field'
+            tactile_right_key = 'tactile_right_force_field'
+            tactile_left_coord_key = 'tactile_left_coord'
+            tactile_right_coord_key = 'tactile_right_coord'
+            
+            if (tactile_left_key in tactile_data_dict and tactile_right_key in tactile_data_dict and
+                tactile_left_coord_key in tactile_coord_dict and tactile_right_coord_key in tactile_coord_dict):
+                
+                # Get all tactile data (concatenate episode lists)
+                tactile_left_ff = np.concatenate(tactile_data_dict[tactile_left_key], axis=0)  # (T, 7, 9, C_ff)
+                tactile_right_ff = np.concatenate(tactile_data_dict[tactile_right_key], axis=0)
+                tactile_left_coords = np.concatenate(tactile_coord_dict[tactile_left_coord_key], axis=0)  # (T, 7, 9, 3)
+                tactile_right_coords = np.concatenate(tactile_coord_dict[tactile_right_coord_key], axis=0)
+                
+                print(f"  Tactile left FF shape: {tactile_left_ff.shape}")
+                print(f"  Tactile right FF shape: {tactile_right_ff.shape}")
+                print(f"  Tactile left coords shape: {tactile_left_coords.shape}")
+                print(f"  Tactile right coords shape: {tactile_right_coords.shape}")
+                
+                T_total = tactile_left_ff.shape[0]
+                C_ff_base = tactile_left_ff.shape[-1]  # Base tactile channels (3 for difference mode, 6 for stack mode)
+                
+                # Process each timestep
+                merged_d3fields_data = []
+                for t_idx, d3fields_pts in enumerate(d3fields_data):
+                    # d3fields_pts shape: (N_d3fields, C_d3fields)
+                    # First 3 channels are xyz, remaining are features (dino, rgb, contact_field, etc.)
+                    
+                    # Collect tactile history for this timestep
+                    if tactile_history_enabled and tactile_history_length > 1:
+                        # Get historical tactile data: t_idx, t_idx-1, ..., t_idx-(history_length-1)
+                        tactile_left_ff_history = []
+                        tactile_right_ff_history = []
+                        
+                        for h in range(tactile_history_length):
+                            hist_idx = max(0, t_idx - h)  # Clamp to 0 for early timesteps
+                            tactile_left_ff_history.append(tactile_left_ff[hist_idx])  # (7, 9, C_ff_base)
+                            tactile_right_ff_history.append(tactile_right_ff[hist_idx])
+                        
+                        # Stack along last dimension: (7, 9, C_ff_base * history_length)
+                        tactile_left_ff_t = np.concatenate(tactile_left_ff_history, axis=-1)
+                        tactile_right_ff_t = np.concatenate(tactile_right_ff_history, axis=-1)
+                    else:
+                        # No history, just current timestep
+                        tactile_left_ff_t = tactile_left_ff[t_idx]  # (7, 9, C_ff_base)
+                        tactile_right_ff_t = tactile_right_ff[t_idx]
+                    
+                    # Use coordinates from current timestep only (no history for coords)
+                    tactile_left_coords_t = tactile_left_coords[t_idx]  # (7, 9, 3)
+                    tactile_right_coords_t = tactile_right_coords[t_idx]
+                    
+                    # Flatten to point cloud format
+                    tactile_left_ff_flat = tactile_left_ff_t.reshape(-1, tactile_left_ff_t.shape[-1]).astype(np.float32)  # (63, C_ff)
+                    tactile_right_ff_flat = tactile_right_ff_t.reshape(-1, tactile_right_ff_t.shape[-1]).astype(np.float32)
+                    tactile_left_coords_flat = tactile_left_coords_t.reshape(-1, 3).astype(np.float32)  # (63, 3)
+                    tactile_right_coords_flat = tactile_right_coords_t.reshape(-1, 3).astype(np.float32)
+                    
+                    # Combine left and right
+                    tactile_ff = np.concatenate([tactile_left_ff_flat, tactile_right_ff_flat], axis=0)  # (126, C_ff)
+                    tactile_coords = np.concatenate([tactile_left_coords_flat, tactile_right_coords_flat], axis=0)  # (126, 3)
+                    N_tactile = tactile_coords.shape[0]
+                    C_ff = tactile_ff.shape[1]
+                    
+                    # Extract d3fields components (ensure float32)
+                    d3fields_xyz = d3fields_pts[:, :3].astype(np.float32)  # (N_d3fields, 3)
+                    d3fields_features = d3fields_pts[:, 3:].astype(np.float32)  # (N_d3fields, C_features)
+                    N_d3fields = d3fields_xyz.shape[0]
+                    C_features = d3fields_features.shape[1]
+                    
+                    # Create zero-filled tactile force field channels for d3fields points
+                    d3fields_ff_zeros = np.zeros((N_d3fields, C_ff), dtype=np.float32)
+                    
+                    # Create zero-filled feature channels for tactile points  
+                    tactile_features_zeros = np.zeros((N_tactile, C_features), dtype=np.float32)
+                    
+                    # Concatenate features for each point type
+                    # D3fields points: [xyz, original_features, tactile_ff_zeros]
+                    d3fields_combined = np.concatenate([d3fields_xyz, d3fields_features, d3fields_ff_zeros], axis=1).astype(np.float32)
+                    
+                    # Tactile points: [xyz, feature_zeros, tactile_ff]
+                    tactile_combined = np.concatenate([tactile_coords, tactile_features_zeros, tactile_ff], axis=1).astype(np.float32)
+                    
+                    # Merge all points (ensure float32)
+                    merged_pts = np.concatenate([d3fields_combined, tactile_combined], axis=0).astype(np.float32)  # (N_d3fields + N_tactile, 3 + C_features + C_ff)
+                    
+                    merged_d3fields_data.append(merged_pts)
+                
+                # Update the d3fields data
+                spatial_data_dict['d3fields'] = merged_d3fields_data
+                
+                # Update max_pts_num to account for tactile points
+                old_max_pts = max_pts_num
+                max_pts_num = shape_meta['obs']['d3fields']['shape'][1]  # Get the updated N from config
+                
+                # Print summary
+                total_channels = 3 + C_features + C_ff
+                print(f"  ✅ Merged tactile into d3fields:")
+                print(f"     Points: {old_max_pts} -> {max_pts_num} (added {N_tactile} tactile points)")
+                print(f"     Total channels: {total_channels} = 3 (xyz) + {C_features} (d3fields features) + {C_ff} (tactile_ff)")
+                if tactile_history_enabled and tactile_history_length > 1:
+                    print(f"     Tactile history: {tactile_history_length} timesteps × {C_ff_base} base channels = {C_ff} total tactile channels")
+                else:
+                    print(f"     Tactile (no history): {C_ff} channels")
+            else:
+                print(f"  ⚠️  Missing tactile data keys, skipping merge")
+    
     for key, data in spatial_data_dict.items():
         # pad to max_pts_num
         for d_i, d in enumerate(data):
@@ -848,7 +1080,11 @@ class RealDataset(BaseImageDataset):
             exclude_colors=[],
             contact_field_checkpoint_path=None,
             contact_field_device='cuda',
-            reference_tactile_use_difference=False
+            reference_tactile_use_difference=False,
+            filter_static_frames=True,
+            filter_pos_threshold=0.001,
+            filter_rot_threshold=0.01,
+            filter_boundary_frames=10
             ):
         
         super().__init__()
@@ -932,6 +1168,11 @@ class RealDataset(BaseImageDataset):
             if 'delta' in shape_meta['action'] and shape_meta['action']['delta']:
                 cache_info_str += '_delta'
                 cache_info_str += f"_act{shape_meta['action']['shape'][0]}"
+        
+        # Add frame filtering to cache string
+        if filter_static_frames:
+            cache_info_str += f'_filtered_p{filter_pos_threshold}_r{filter_rot_threshold}_b{filter_boundary_frames}'
+        
         if use_cache:
             cache_zarr_path = os.path.join(dataset_dir, f'cache{cache_info_str}.zarr.zip')
             cache_lock_path = cache_zarr_path + '.lock'
@@ -964,6 +1205,10 @@ class RealDataset(BaseImageDataset):
                             contact_field_config=contact_field_config,
                             contact_field_device=contact_field_device,
                             reference_tactile_use_difference=reference_tactile_use_difference,
+                            filter_static_frames_enabled=filter_static_frames,
+                            filter_pos_threshold=filter_pos_threshold,
+                            filter_rot_threshold=filter_rot_threshold,
+                            filter_boundary_frames=filter_boundary_frames,
                             )
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:
@@ -1003,6 +1248,10 @@ class RealDataset(BaseImageDataset):
                 contact_field_config=contact_field_config,
                 contact_field_device=contact_field_device,
                 reference_tactile_use_difference=reference_tactile_use_difference,
+                filter_static_frames_enabled=filter_static_frames,
+                filter_pos_threshold=filter_pos_threshold,
+                filter_rot_threshold=filter_rot_threshold,
+                filter_boundary_frames=filter_boundary_frames,
             )
         self.replay_buffer = replay_buffer
         if fusion is not None:

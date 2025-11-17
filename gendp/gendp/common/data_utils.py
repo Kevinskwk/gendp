@@ -209,13 +209,16 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     
     # Set default gripper cropping parameters
     if gripper_crop_params is None:
-        gripper_crop_params = {
-            'tool_length': 0.2,
-            'tool_width': 0.2,
-            'gripper_finger_length': 0.1,
-            'safety_margin': 0.002,
-            'global_z_threshold': 0.01
-        }
+        if 'gripper_crop_params' in shape_meta['info']:
+            gripper_crop_params = shape_meta['info']['gripper_crop_params']
+        else:
+            gripper_crop_params = {
+                'tool_length': 0.2,
+                'tool_width': 0.2,
+                'gripper_finger_length': 0.1,
+                'safety_margin': 0.002,
+                'global_z_threshold': 0.01
+            }
     
     num_bots = robot_base_pose_in_world_seq.shape[1] if len(robot_base_pose_in_world_seq.shape) == 4 else 1
     robot_base_pose_in_world_seq = robot_base_pose_in_world_seq.reshape(robot_base_pose_in_world_seq.shape[0], num_bots, 4, 4)

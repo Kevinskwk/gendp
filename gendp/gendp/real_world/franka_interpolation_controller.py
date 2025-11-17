@@ -400,13 +400,6 @@ class FrankaInterpolationController(mp.Process):
                     time_to_go=self.joints_init_duration
                 )
 
-
-            # close gripper
-            print("Testing Gripper")
-            # robot.control_gripper(gripper_action=1.0)
-            robot.set_gripper_position(0.0)
-            time.sleep(1.0)
-
             # main loop
             dt = 1. / self.frequency
             curr_pose = robot.get_ee_pose()
@@ -438,8 +431,10 @@ class FrankaInterpolationController(mp.Process):
                     Kqd=None
                 )
 
-            gripper_curr = 0.7
-            gripper_new = 0.8
+            # Initialize gripper state from actual robot state
+            gripper_curr = robot.get_gripper_position()[0]
+            gripper_new = gripper_curr
+            print(f"[FrankaPositionalController] Initial gripper position: {gripper_curr:.4f}")
 
             t_start = time.monotonic()
             iter_idx = 0

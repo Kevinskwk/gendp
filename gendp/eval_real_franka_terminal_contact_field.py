@@ -76,7 +76,9 @@ robot_state = {
     'gripper_pos': 0.08,
     'stop': False,
     'iteration': 0,
-    'move_to_init': False
+    'move_to_init': False,
+    'homing_trajectory': None,  # Store trajectory for smooth homing
+    'homing_step': 0  # Current step in homing trajectory
 }
 
 def obs_dict_np_to_o3d(obs_dict_np):
@@ -94,6 +96,43 @@ def obs_dict_np_to_o3d(obs_dict_np):
     else:
         d3fields_o3d = np2o3d(d3fields)
     return d3fields_o3d
+
+def generate_smooth_trajectory(start_pos, end_pos, num_steps=30):
+    """
+    Generate a smooth trajectory from start to end position using cubic interpolation.
+    Properly handles angle wrapping for rotations.
+    
+    Args:
+        start_pos: Starting position array (joint or EEF)
+        end_pos: Target position array (joint or EEF)
+        num_steps: Number of steps in the trajectory
+    
+    Returns:
+        Array of shape (num_steps, dim) containing smooth trajectory
+    """
+    # Use cubic ease-in-out for smooth acceleration/deceleration
+    t = np.linspace(0, 1, num_steps)
+    # Cubic ease-in-out: smooth start and end
+    smooth_t = np.where(t < 0.5, 
+                       4 * t ** 3, 
+                       1 - (-2 * t + 2) ** 3 / 2)
+    
+    # Handle angle wrapping for rotations
+    # For EEF mode: positions are [x, y, z, rx, ry, rz, gripper]
+    # For joint mode: all joint angles need wrapping
+    delta = end_pos - start_pos
+    
+    # Detect if this is EEF mode (7 dims) or joint mode (8 dims)
+    if len(start_pos) == 7:
+        # EEF mode: wrap euler angles (indices 3:6)
+        delta[3:6] = np.arctan2(np.sin(delta[3:6]), np.cos(delta[3:6]))
+    else:
+        # Joint mode: wrap all joint angles (all except last which is gripper)
+        delta[:-1] = np.arctan2(np.sin(delta[:-1]), np.cos(delta[:-1]))
+    
+    # Generate trajectory using wrapped deltas
+    trajectory = start_pos + np.outer(smooth_t, delta)
+    return trajectory
 
 def policy_action_to_env_action(policy_action, action_mode, num_bots, delta_action=False, current_ee_pose=None):
     """
@@ -274,6 +313,32 @@ def save_visualization_images(vis_img, output_dir, iter_idx, save_interval=30):
         latest_file_name = os.path.join(viz_dir, 'latest.jpg')
         cv2.imwrite(latest_file_name, vis_img)
 
+def get_init_poses(task='scraper'):
+    """
+    Get initial poses for different tasks.
+    
+    Args:
+        task: Task name ('scraper' or 'crayon')
+    
+    Returns:
+        Tuple of (joint_init, ee_init)
+    """
+    if task == 'scraper':
+        j_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, 
+                           -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 
+                           1.6146283149719238])
+        ee_init = np.array([0.5, 0.242, 0.2517, 2.702, -0.458, -0.614])
+    elif task == 'crayon':
+        j_init = np.array([-0.1898142248392105, 0.42033371329307556, -0.0180759746581316, 
+                           -1.826417088508606, -0.0848948061466217, 2.243102788925171, 
+                           0.5972442030906677])
+        ee_init = np.array([0.6289371252059937, -0.13435199856758118, 0.3047587275505066, 
+                            3.0775118520198985, -0.03660714979931323, -0.7493871829330105])
+    else:
+        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon'")
+    
+    return j_init, ee_init
+
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 @click.command()
@@ -292,10 +357,11 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--n_action_steps', '-n', default=-1, type=int, help="Number of action steps to execute. -1 means invalid.")
 @click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
 @click.option('--save_viz_interval', default=30, type=int, help="Save visualization every N frames (0 to disable)")
+@click.option('--task', '-t', default='scraper', type=click.Choice(['scraper', 'crayon']), help="Task to perform (scraper or crayon)")
 def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_episode,
     vis_camera_idx, vis_d3fields,
     steps_per_inference, max_duration,
-    frequency, command_latency, n_action_steps, init_joints, save_viz_interval):
+    frequency, command_latency, n_action_steps, init_joints, save_viz_interval, task):
     
     # load match_dataset
     match_camera_idx = 0
@@ -428,6 +494,11 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
     input_thread = threading.Thread(target=terminal_input_thread, daemon=True)
     input_thread.start()
 
+    # Get task-specific initial joint positions
+    j_init, ee_init = get_init_poses(task)
+    # Use joint positions if init_joints flag is True, otherwise None
+    init_joint_pos = j_init if init_joints else None
+
     try:
         # unregister eval resolver before starting subprocesses
         OmegaConf.clear_resolver("eval")
@@ -439,7 +510,7 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
                 frequency=frequency,
                 n_obs_steps=n_obs_steps,
                 obs_float32=False,
-                init_joints=init_joints,
+                init_joints=init_joint_pos,
                 ctrl_mode=action_mode,
                 enable_multi_cam_vis=True,
                 record_raw_video=True,
@@ -553,23 +624,46 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
                             # Execute robot actions (maintain current position + gripper control)
                             # Check if we need to move to initial pose
                             if robot_state['move_to_init']:
-                                if action_mode == 'joint':
-                                    # Initial joint configuration from real_env_franka_gripper_gelsight.py
-                                    j_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, 
-                                                       -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 
-                                                       1.6146283149719238, robot_state['gripper_pos']])
+                                # Initialize trajectory on first call
+                                if robot_state['homing_trajectory'] is None:
+                                    # Get task-specific init poses
+                                    j_init_base, ee_init_base = get_init_poses(task)
+                                    
+                                    if action_mode == 'joint':
+                                        # Initial joint configuration with gripper
+                                        j_init = np.append(j_init_base, robot_state['gripper_pos'])
+                                        current_joint = obs['full_joint_pos'][-1, :8].copy()
+                                        current_joint[-1] = robot_state['gripper_pos']
+                                        # Generate smooth trajectory (2 seconds at 10Hz = 20 steps)
+                                        robot_state['homing_trajectory'] = generate_smooth_trajectory(
+                                            current_joint, j_init, num_steps=20)
+                                        robot_state['homing_step'] = 0
+                                        print(f'🏠 Starting smooth homing motion for task "{task}" (joint mode, 20 steps)...')
+                                    elif action_mode == 'eef':
+                                        # Home end-effector pose: [x, y, z, rx, ry, rz, gripper]
+                                        ee_init = np.append(ee_init_base, robot_state['gripper_pos'])
+                                        current_ee = obs['ee_pose'][-1].copy()
+                                        current_ee[-1] = robot_state['gripper_pos']
+                                        # Generate smooth trajectory (2 seconds at 10Hz = 20 steps)
+                                        robot_state['homing_trajectory'] = generate_smooth_trajectory(
+                                            current_ee, ee_init, num_steps=20)
+                                        robot_state['homing_step'] = 0
+                                        print(f'🏠 Starting smooth homing motion for task "{task}" (EEF mode, 20 steps)...')
+                                
+                                # Execute current step of trajectory
+                                if robot_state['homing_step'] < len(robot_state['homing_trajectory']):
+                                    actions = robot_state['homing_trajectory'][robot_state['homing_step']]
                                     env.exec_actions(
-                                        actions=[j_init],
+                                        actions=[actions],
                                         timestamps=[t_command_target-time.monotonic()+time.time()],
-                                        mode='joint')
-                                elif action_mode == 'eef':
-                                    # Home end-effector pose: [x, y, z, rx, ry, rz, gripper]
-                                    ee_init = np.array([0.5, 0.242, 0.2517, 2.702, -0.458, -0.614, robot_state['gripper_pos']])
-                                    env.exec_actions(
-                                        actions=[ee_init],
-                                        timestamps=[t_command_target-time.monotonic()+time.time()],
-                                        mode='eef')
-                                robot_state['move_to_init'] = False
+                                        mode=action_mode)
+                                    robot_state['homing_step'] += 1
+                                else:
+                                    # Trajectory complete
+                                    robot_state['move_to_init'] = False
+                                    robot_state['homing_trajectory'] = None
+                                    robot_state['homing_step'] = 0
+                                    print('✅ Homing motion complete')
                             elif action_mode == 'joint':
                                 joint_pos = obs['full_joint_pos']
                                 actions = joint_pos[-1, :8].copy()

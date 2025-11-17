@@ -600,8 +600,8 @@ class Fusion():
         if update_dino:
             features = self.extract_features(color, params)
             self.curr_obs_torch['dino_feats'] = features
-        self.curr_obs_torch['color'] = color
-        self.curr_obs_torch['color_tensor'] = torch.from_numpy(color).to(self.device, dtype=self.dtype) / 255.0
+        # Store color as normalized tensor for interpolation in eval()
+        self.curr_obs_torch['color'] = torch.from_numpy(color).to(self.device, dtype=self.dtype) / 255.0
         self.curr_obs_torch['depth'] = torch.from_numpy(obs['depth']).to(self.device, dtype=self.dtype)
         self.curr_obs_torch['pose'] = torch.from_numpy(obs['pose']).to(self.device, dtype=self.dtype)
         self.curr_obs_torch['K'] = torch.from_numpy(obs['K']).to(self.device, dtype=self.dtype)
@@ -1013,7 +1013,8 @@ class Fusion():
         mask_confs = []
         for i in range(self.num_cam):
             # mask, label = grounded_instance_sam_bacth_queries_np(self.curr_obs_torch['color'][i], queries, self.ground_dino_model, self.sam_model, thresholds, merge_all)
-            mask, label, mask_conf = grounded_instance_sam_new_ver(self.curr_obs_torch['color'][i], queries, self.ground_dino_model, self.sam_model, thresholds, merge_all)
+            color_np = (self.curr_obs_torch['color'][i].detach().cpu().numpy() * 255).astype(np.uint8)
+            mask, label, mask_conf = grounded_instance_sam_new_ver(color_np, queries, self.ground_dino_model, self.sam_model, thresholds, merge_all)
             
             # filter out the mask close to robot_pcd
             if robot_pcd is not None:
@@ -1148,7 +1149,7 @@ class Fusion():
     
     def extract_masked_pcd(self, inst_idx_ls, boundaries=None):
         # extract point cloud of the object instance with index inst_idx
-        color = self.curr_obs_torch['color']
+        color = self.curr_obs_torch['color'].detach().cpu().numpy()
         depth = self.curr_obs_torch['depth'].detach().cpu().numpy()
         mask = self.curr_obs_torch['mask'].detach().cpu().numpy()
         sel_mask = np.zeros(mask.shape[:3]).astype(bool)
@@ -1166,7 +1167,7 @@ class Fusion():
     def extract_masked_pcd_in_views(self, inst_idx_ls, view_idx_ls, boundaries, downsample=True):
         assert len(view_idx_ls) == 1
         # extract point cloud of the object instance with index inst_idx
-        color = self.curr_obs_torch['color'][view_idx_ls]
+        color = self.curr_obs_torch['color'].detach().cpu().numpy()[view_idx_ls]
         depth = self.curr_obs_torch['depth'].detach().cpu().numpy()[view_idx_ls]
         mask = np.stack([self.curr_obs_torch['mask_gs'][view_idx] for view_idx in view_idx_ls], axis=0).transpose(0, 2, 3, 1) # [num_view, H, W, num_inst]
         K = self.curr_obs_torch['K'].detach().cpu().numpy()[view_idx_ls]
@@ -1185,7 +1186,7 @@ class Fusion():
 
     def extract_pcd_in_box(self, boundaries, downsample=False, downsample_r=0.01, excluded_pts=None, exclude_threshold=0.01, exclude_colors=[]):
         # extract point cloud of the object instance with index inst_idx
-        color = self.curr_obs_torch['color']
+        color = self.curr_obs_torch['color'].detach().cpu().numpy()
         depth = self.curr_obs_torch['depth'].detach().cpu().numpy()
         K = self.curr_obs_torch['K'].detach().cpu().numpy()
         pose = self.curr_obs_torch['pose'].detach().cpu().numpy() # [num_cam, 3, 4]
@@ -1195,7 +1196,7 @@ class Fusion():
         return pcd
     
     def get_query_obj_pcd(self):
-        color = self.curr_obs_torch['color']
+        color = self.curr_obs_torch['color'].detach().cpu().numpy()
         depth = self.curr_obs_torch['depth'].detach().cpu().numpy()
         mask = self.curr_obs_torch['mask'].detach().cpu().numpy()
         mask = (mask[..., 1:].sum(axis=-1) > 0)
@@ -1305,14 +1306,14 @@ class Fusion():
             
             sample_pts, sample_idx, _ = fps_np(masked_pts.detach().cpu().numpy(), N, init_idx=init_idx)
             # src_feats_list.append(out['dino_feats'][sample_idx])
-            src_feats_list.append(self.eval(torch.from_numpy(sample_pts).to(self.device, torch.float32))['dino_feats'])
+            src_feats_list.append(self.eval(torch.from_numpy(sample_pts).to(self.device, self.dtype))['dino_feats'])
             src_pts_list.append(sample_pts)
             
             num_pts = sample_pts.shape[0]
             pose = self.curr_obs_torch['pose'][0].detach().cpu().numpy()
             K = self.curr_obs_torch['K'][0].detach().cpu().numpy()
             fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-            img = self.curr_obs_torch['color'][0]
+            img = self.curr_obs_torch['color'][0].detach().cpu().numpy()
             
             cmap = cm.get_cmap('viridis')
             colors = ((cmap(np.linspace(0, 1, num_pts))[:, :3]) * 255).astype(np.int32)
@@ -1333,7 +1334,7 @@ class Fusion():
         del out
         return src_feats_list, src_pts_list, img_list
     
-    def select_features_from_pcd(self, pcd, N, per_instance=False, init_idx=-1, vis=False, use_seg=True, use_dino=True):
+    def select_features_from_pcd(self, pcd, N, per_instance=False, init_idx=-1, vis=False, use_seg=True, use_dino=True, include_rgb=False):
         # pcd: (N, 3) numpy array
         dist_threshold = 0.005
         
@@ -1350,6 +1351,7 @@ class Fusion():
         ### handle the case of not using seg first
         if not use_seg:
             src_feats_list = []
+            src_colors_list = []
             img_list = [] # NOTE: empty for the sake of time
             src_pts_list = []
             masked_pts = pcd_tensor[dist_mask & out['valid_mask']]
@@ -1365,22 +1367,41 @@ class Fusion():
             # ratio = (N + 100) / masked_pts.shape[0]
             # index = fps(masked_pts, batch, ratio=ratio, random_start=False)
             # sample_pts = masked_pts[index[:N]].detach().cpu().numpy()
-            if N > 0:
-                sample_pts, index = sample_farthest_points(masked_pts[None], K = N, random_start_point=False)
-                sample_pts = sample_pts[0].detach().cpu().numpy()
+            if N > 0 and masked_pts.shape[0] >= N:
+                try:
+                    sample_pts, index = sample_farthest_points(masked_pts[None], K = N, random_start_point=False)
+                    sample_pts = sample_pts[0].detach().cpu().numpy()
+                except (RuntimeError, IndexError) as e:
+                    print(f"Warning: FPS sampling failed with {masked_pts.shape[0]} points, using all points. Error: {e}")
+                    sample_pts = masked_pts.detach().cpu().numpy()
+            elif N > 0 and masked_pts.shape[0] < N:
+                # If we have fewer points than N, repeat points to match desired shape
+                sample_pts = masked_pts.detach().cpu().numpy()
+                num_repeats = (N + masked_pts.shape[0] - 1) // masked_pts.shape[0]  # Ceiling division
+                sample_pts = np.tile(sample_pts, (num_repeats, 1))[:N]  # Repeat and truncate to N
+                print(f"Warning: Only {masked_pts.shape[0]} points available, repeated to match desired {N} points")
             else:
+                # If N=0, just use all of them
                 sample_pts = masked_pts.detach().cpu().numpy()
             
             src_pts_list.append(sample_pts)
-            if use_dino:
-                src_feats_list.append(self.eval(torch.from_numpy(sample_pts).to(self.device, self.dtype), return_names=['dino_feats'])['dino_feats'])
-            return src_feats_list, src_pts_list, img_list
+            return_names = ['dino_feats'] if use_dino else []
+            if include_rgb:
+                return_names.append('color')
+            if return_names:
+                eval_result = self.eval(torch.from_numpy(sample_pts).to(self.device, self.dtype), return_names=return_names)
+                if use_dino:
+                    src_feats_list.append(eval_result['dino_feats'])
+                if include_rgb:
+                    src_colors_list.append(eval_result['color'])
+            return src_feats_list, src_pts_list, img_list, src_colors_list
         
         label = self.curr_obs_torch['consensus_mask_label']
         
         last_label = label[0]
         
         src_feats_list = []
+        src_colors_list = []
         img_list = []
         src_pts_list = []
         mask = out['mask'] # (N, num_instances) where 0 is background
@@ -1396,15 +1417,38 @@ class Fusion():
             # sample_pts, sample_idx, _ = fps_np(masked_pts.detach().cpu().numpy(), N, init_idx=init_idx)
 
             # batch = torch.zeros((masked_pts.shape[0],), dtype=torch.long, device=self.device)
-            # ratio = N / masked_pts.shape[0]
+            # ratio = (N + 100) / masked_pts.shape[0]
             # index = fps(masked_pts, batch, ratio=ratio, random_start=False)
             # sample_pts = masked_pts[index[:N]].detach().cpu().numpy()
-            sample_pts, index = sample_farthest_points(masked_pts[None], K = N, random_start_point=False)
-            sample_pts = sample_pts[0].detach().cpu().numpy()
+            
+            # Handle cases where we have fewer points than N or sampling fails
+            if N > 0 and masked_pts.shape[0] >= N:
+                try:
+                    sample_pts, index = sample_farthest_points(masked_pts[None], K = N, random_start_point=False)
+                    sample_pts = sample_pts[0].detach().cpu().numpy()
+                except (RuntimeError, IndexError) as e:
+                    print(f"Warning: FPS sampling failed for instance {i} with {masked_pts.shape[0]} points, using all points. Error: {e}")
+                    sample_pts = masked_pts.detach().cpu().numpy()
+            elif N > 0 and masked_pts.shape[0] < N:
+                # If we have fewer points than N, repeat points to match desired shape
+                sample_pts = masked_pts.detach().cpu().numpy()
+                num_repeats = (N + masked_pts.shape[0] - 1) // masked_pts.shape[0]  # Ceiling division
+                sample_pts = np.tile(sample_pts, (num_repeats, 1))[:N]  # Repeat and truncate to N
+                print(f"Warning: Instance {i} has only {masked_pts.shape[0]} points, repeated to match desired {N} points")
+            else:
+                # If N=0, just use all of them
+                sample_pts = masked_pts.detach().cpu().numpy()
             
             # src_feats_list.append(out['dino_feats'][sample_idx])
-            if use_dino:
-                src_feats_list.append(self.eval(torch.from_numpy(sample_pts).to(self.device, self.dtype))['dino_feats'])
+            return_names = ['dino_feats'] if use_dino else []
+            if include_rgb:
+                return_names.append('color')
+            if return_names:
+                eval_result = self.eval(torch.from_numpy(sample_pts).to(self.device, self.dtype), return_names=return_names)
+                if use_dino:
+                    src_feats_list.append(eval_result['dino_feats'])
+                if include_rgb:
+                    src_colors_list.append(eval_result['color'])
             src_pts_list.append(sample_pts)
             
             last_label = label[i]
@@ -1417,7 +1461,7 @@ class Fusion():
             pose = self.curr_obs_torch['pose'][0].detach().cpu().numpy()
             K = self.curr_obs_torch['K'][0].detach().cpu().numpy()
             fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-            img = self.curr_obs_torch['color'][0]
+            img = self.curr_obs_torch['color'][0].detach().cpu().numpy()
             
             cmap = cm.get_cmap('viridis')
             colors = ((cmap(np.linspace(0, 1, num_pts))[:, :3]) * 255).astype(np.int32)
@@ -1435,76 +1479,7 @@ class Fusion():
             img_list.append(img)
         
         del out
-        return src_feats_list, src_pts_list, img_list
-    
-    def select_features_rand_v2(self, boundaries, N, per_instance=False):
-        N_per_cam = N // self.num_cam
-        src_feats_list = []
-        img_list = []
-        src_pts_list = []
-        label = self.curr_obs_torch['mask_label'][0]
-        last_label = label[0]
-        for i in range(1, len(label)):
-            if label[i] == last_label and not per_instance:
-                continue
-            src_pts_np = []
-            for cam_i in range(self.num_cam):
-                instance_mask = (self.curr_obs_torch['mask'][cam_i, :, :, i]).detach().cpu().numpy().astype(bool)
-                depth_i = self.curr_obs_torch['depth'][cam_i].detach().cpu().numpy()
-                K_i = self.curr_obs_torch['K'][cam_i].detach().cpu().numpy()
-                pose_i = self.curr_obs_torch['pose'][cam_i].detach().cpu().numpy()
-                pose_i = np.concatenate([pose_i, np.array([[0, 0, 0, 1]])], axis=0)
-                valid_depth = (depth_i > 0.0) & (depth_i < 1.5)
-                instance_mask = instance_mask & valid_depth
-                instance_mask = (instance_mask * 255).astype(np.uint8)
-                # plt.subplot(1, 2, 1)
-                # plt.imshow(instance_mask)
-                instance_mask = cv2.erode(instance_mask, np.ones([15, 15], np.uint8), iterations=1)
-                # plt.subplot(1, 2, 2)
-                # plt.imshow(instance_mask)
-                # plt.show()
-                instance_mask_idx = np.array(instance_mask.nonzero()).T # (num_pts, 2)
-                sel_idx, _, _ = fps_np(instance_mask_idx, N_per_cam)
-                
-                sel_depth = depth_i[sel_idx[:, 0], sel_idx[:, 1]]
-                
-                src_pts = np.zeros([N_per_cam, 3])
-                src_pts[:, 0] = (sel_idx[:, 1] - K_i[0, 2]) * sel_depth / K_i[0, 0]
-                src_pts[:, 1] = (sel_idx[:, 0] - K_i[1, 2]) * sel_depth / K_i[1, 1]
-                src_pts[:, 2] = sel_depth
-                
-                # sample_pts = np.concatenate([sample_pts, np.ones([N, 1])], axis=-1) # [num_pts, 4]
-                # sample_pts = np.matmul(pose, sample_pts.T)[:3].T # [num_pts, 3] # world to camera
-                
-                src_pts = np.matmul(np.linalg.inv(pose_i), np.concatenate([src_pts, np.ones([N_per_cam, 1])], axis=-1).T)[:3].T # [num_pts, 3] # camera to world
-                
-                src_pts_np.append(src_pts)
-            sample_pts = np.concatenate(src_pts_np, axis=0)
-            src_pts_list.append(sample_pts)
-            src_feats_list.append(self.eval(torch.from_numpy(sample_pts).to(self.device, torch.float32))['dino_feats'])
-            
-            cmap = cm.get_cmap('jet')
-            colors = ((cmap(np.linspace(0, 1, N))[:, :3]) * 255).astype(np.int32)
-            
-            pose = self.curr_obs_torch['pose'][0].detach().cpu().numpy()
-            K = self.curr_obs_torch['K'][0].detach().cpu().numpy()
-            fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-            img = self.curr_obs_torch['color'][0]
-            
-            sample_pts = np.concatenate([sample_pts, np.ones([N, 1])], axis=-1) # [num_pts, 4]
-            sample_pts = np.matmul(pose, sample_pts.T)[:3].T # [num_pts, 3]
-            
-            sample_pts_2d = sample_pts[:, :2] / sample_pts[:, 2:] # [num_pts, 2]
-            sample_pts_2d[:, 0] = sample_pts_2d[:, 0] * fx + cx
-            sample_pts_2d[:, 1] = sample_pts_2d[:, 1] * fy + cy
-            
-            sample_pts_2d = sample_pts_2d.astype(np.int32)
-            sample_pts_2d = sample_pts_2d.reshape(N, 2)
-            img = draw_keypoints(img, sample_pts_2d, colors, radius=5)
-            img_list.append(img)
-            last_label = label[i]
-
-        return src_feats_list, src_pts_list, img_list
+        return src_feats_list, src_pts_list, img_list, src_colors_list
     
     def rigid_tracking(self,
                        src_feat_info,
@@ -1589,7 +1564,7 @@ class Fusion():
         # return vis_mask, which is a numpy array of shape [num_cam, H, W, 3]. It can be visualized using cv2
         vis_mask = np.zeros((self.num_cam, self.H, self.W, 3))
         for i in range(self.num_cam):
-            color = (self.curr_obs_torch['color'][i] * 255).astype(np.uint8)
+            color = (self.curr_obs_torch['color'][i].detach().cpu().numpy() * 255).astype(np.uint8)
             mask = self.curr_obs_torch['mask'][i].detach().cpu().numpy() # [H, W, num_instance]
             mask = onehot2instance(mask) # [H, W]
             jet_cmap = cm.get_cmap('jet')
