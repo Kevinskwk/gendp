@@ -21,7 +21,7 @@ feat_dim = 1024  # vitl14
 
 # root_dir = "/workspaces/bdai/projects/dexterous_mobile_manipulation/src/mobile_exp/data"
 root_dir = "/home/kevin/gendp/d3fields_dev/d3fields"
-obj_type = "scraper"
+obj_type = "crayon"
 os.system(f"mkdir -p {root_dir}/sel_feats/{obj_type}")
 
 device = "cuda"

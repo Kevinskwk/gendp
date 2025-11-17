@@ -165,4 +165,5 @@ cython_debug/
 
 *.mp4
 
+outputs/
 

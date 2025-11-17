@@ -1,0 +1,182 @@
+_target_: gendp.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUnetHybridWorkspace
+is_real: true
+data_root: /home/kevin/gendp
+output_dir: ${data_root}/data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}_${exp_name}
+# output_dir: /users/kevinma/gendp/data/outputs/2025.03.25/13.36.38_train_diffusion_unet_hybrid_screw_driving
+checkpoint:
+  save_last_ckpt: true
+  save_last_snapshot: false
+  topk:
+    format_str: epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt
+    k: 5
+    mode: max
+    monitor_key: test_mean_score
+dataloader:
+  batch_size: 128
+  num_workers: 8
+  persistent_workers: true
+  pin_memory: true
+  shuffle: true
+# dataset_obs_steps: 3
+ema:
+  _target_: gendp.model.diffusion.ema_model.EMAModel
+  inv_gamma: 1.0
+  max_value: 0.9999
+  min_value: 0.0
+  power: 0.75
+  update_after_step: 0
+exp_name: n_obs_steps_3_delta_ee_no_joint
+horizon: 24
+keypoint_visible_rate: 1.0
+logging:
+  group: null
+  id: null
+  mode: online # online, offline
+  name: ${now:%Y.%m.%d}_${task_name}_${dataset_name}
+  project: gild_${task_name}
+  resume: false
+  tags:
+  - train_diffusion_unet_hybrid
+  - ${task_name}
+  - franka
+  - realsense
+  - default
+n_action_steps: 12
+n_latency_steps: 0
+n_obs_steps: 3
+name: train_diffusion_unet_hybrid
+obs_as_global_cond: true
+optimizer:
+  _target_: torch.optim.AdamW
+  betas:
+  - 0.95
+  - 0.999
+  eps: 1.0e-08
+  lr: 0.0001
+  weight_decay: 1.0e-06
+past_action_visible: false
+shape_meta:
+  trim_tail: 0
+  action:
+    # key: joint_action
+    # shape:
+    # - 8
+    shape:
+    - 7  # delta_pos(3) + delta_rotvec(3) + gripper_open_close(1)
+    delta: true  # action is delta ee_pose
+  obs:
+    ee_pose:
+      type: low_dim
+      shape:
+      - 9  # pos(3) + rot6d(6)
+    # joint_pos:
+    #   type: low_dim
+    #   shape:
+    #   - 9
+    # joint_vel:
+    #   type: low_dim
+    #   shape:
+    #   - 9
+    d3fields:
+      shape:
+      - 8 # C (5 distilled + 3 RGB)
+      - 868 # N
+      type: spatial
+      info:
+        reference_frame: robot
+        distill_dino: true
+        distill_obj: crayon
+        view_keys:
+        - camera_front
+        - camera_left
+        - camera_right
+        N_gripper: 100
+        N_obj: 256  # Object points (from contact field config)
+        N_env: 512  # Environment points (from contact field config)
+        boundaries:
+          x_lower: 0.3
+          x_upper: 0.7
+          y_lower: -0.2
+          y_upper: 0.2
+          z_lower: -0.03
+          z_upper: 0.5
+        resize_ratio: 0.5
+        add_rgb_channels: true
+
+policy:
+  _target_: gendp.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
+  cond_predict_scale: true
+  diffusion_step_embed_dim: 128
+  down_dims:
+  - 512
+  - 1024
+  - 2048
+  eval_fixed_crop: true
+  horizon: ${horizon}
+  kernel_size: 5
+  n_action_steps: ${n_action_steps}
+  n_groups: 8
+  n_obs_steps: ${n_obs_steps}
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    beta_start: 0.0001
+    clip_sample: true
+    num_train_timesteps: 100
+    prediction_type: epsilon
+    variance_type: fixed_small
+  num_inference_steps: 100
+  obs_as_global_cond: true
+  obs_encoder_group_norm: true
+  feat_proc: distill # none, linear, mlp
+  compositional: false
+  shape_meta: ${shape_meta}
+
+task:
+  abs_action: false
+  dataset:
+    _target_: gendp.dataset.real_dataset.RealDataset
+    dataset_dir: ${data_root}/data/${dataset_name}
+    vis_input: false
+    horizon: ${horizon}
+    pad_after: 7
+    pad_before: 1
+    rotation_rep: rotation_6d  # for abs ee_pose only
+    seed: 42
+    n_obs_steps: ${n_obs_steps}
+    robot_name: panda
+    # exclude_colors: [yellow]
+    shape_meta: ${shape_meta}
+    use_cache: true
+    val_ratio: 0.05
+  dataset_dir: ${data_root}/data/${dataset_name}
+  name: ${task_name}
+  shape_meta: ${shape_meta}
+  task_name: ${task_name}
+task_name: crayon_cross_gendp
+dataset_name: crayon_cross
+training:
+  checkpoint_every: 250
+  debug: false
+  device: cuda
+  device_id: 1
+  gradient_accumulate_every: 1
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_train_steps: null
+  max_val_steps: null
+  num_epochs: 1001
+  resume: false
+  rollout_every: 500
+  sample_every: 5
+  seed: 42
+  tqdm_interval_sec: 1.0
+  use_ema: true
+  val_every: 100
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+  persistent_workers: false
+  pin_memory: true
+  shuffle: false

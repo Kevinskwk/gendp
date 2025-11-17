@@ -5,6 +5,7 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 from matplotlib import colormaps
+import matplotlib.pyplot as plt
 # add path for importing
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,18 +17,58 @@ import scipy.spatial.transform as st
 from vis_utils import segment_pointcloud_by_color
 
 
+def sample_or_pad_pointcloud(pointcloud, colors, target_size):
+    """
+    Downsample or pad point cloud to target size.
+    
+    Args:
+        pointcloud: (N, 3) array of point positions
+        colors: (N, 3) array of point colors
+        target_size: Target number of points
+    
+    Returns:
+        Tuple of (sampled_pointcloud, sampled_colors) with shape (target_size, 3)
+    """
+    if len(pointcloud) == 0:
+        return np.zeros((target_size, 3)), np.zeros((target_size, 3))
+    
+    if len(pointcloud) > target_size:
+        # Random downsampling
+        indices = np.random.choice(len(pointcloud), target_size, replace=False)
+        return pointcloud[indices], colors[indices]
+    elif len(pointcloud) < target_size:
+        # Pad with zeros
+        pad_size = target_size - len(pointcloud)
+        padded_pointcloud = np.concatenate([
+            pointcloud,
+            np.zeros((pad_size, 3))
+        ], axis=0)
+        padded_colors = np.concatenate([
+            colors,
+            np.zeros((pad_size, 3))
+        ], axis=0)
+        return padded_pointcloud, padded_colors
+    else:
+        return pointcloud, colors
+
+
 ### hyper param
-epi_range = [1]
+epi_range = [10]
 vis_robot = True
 vis_action = True
 apply_color_segmentation = False  # Set to True to apply color filtering
 use_gripper_segmentation = True   # Set to True to use gripper-based tool segmentation
 vis_segmented_separately = True  # Set to True to show object and env separately
 vis_only_object = True            # Set to True to visualize only object/tool points (when segmentation is enabled)
+
+# Downsampling parameters (set to None to disable downsampling)
+downsample_obj_points = 256   # Number of object points after downsampling
+downsample_env_points = 512   # Number of environment points after downsampling
+
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
-# data_dir = f'{curr_dir}/../../data/polymetis/screwdriver_short'
-data_dir = f'{curr_dir}/../../data/scrap_tool_10'
+data_dir = f'{curr_dir}/../../data/crayon_cross'
+# data_dir = f'{curr_dir}/../../data/scraper_combined'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 # cam_keys = ['camera_wrist', 'camera_fixed']
@@ -73,20 +114,20 @@ else:
 # Separate spatial boundaries for object and environment
 OBJECT_BOUNDARIES = {
     'x_lower': 0.3,
-    'x_upper': 0.6,
+    'x_upper': 0.7,
     'y_lower': -0.15,
     'y_upper': 0.15,
-    'z_lower': 0.01,
+    'z_lower': 0.0,
     'z_upper': 0.25,
 }
 
 ENV_BOUNDARIES = {
-    'x_lower': 0.2,
-    'x_upper': 0.7,
-    'y_lower': -0.2,
-    'y_upper': 0.2,
+    'x_lower': 0.4,
+    'x_upper': 0.6,
+    'y_lower': -0.1,
+    'y_upper': 0.05,
     'z_lower': -0.1,
-    'z_upper': 0.1,
+    'z_upper': 0.01,
 }
 
 
@@ -103,6 +144,10 @@ visualizer.start()
 
 ### create kinematics helper
 kin_helper = KinHelper(robot_name='panda')
+
+# Initialize list to collect tool point counts
+tool_point_counts = []
+frame_numbers = []
 
 for i in tqdm(epi_range):
     data_path = f'{data_dir}/episode_{i}.hdf5'
@@ -140,11 +185,11 @@ for i in tqdm(epi_range):
         extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t] for cam_key in cam_keys])
 
         boundaries = {
-            'x_lower': 0.2,
+            'x_lower': 0.3,
             'x_upper': 0.7,
             'y_lower': -0.2,
             'y_upper': 0.2,
-            'z_lower': -0.03,
+            'z_lower': -0.1,
             'z_upper': 0.5,
         }
         # boundaries = {
@@ -194,11 +239,11 @@ for i in tqdm(epi_range):
             # Extract tool point cloud using original gripper pose (45-degree rotation applied internally)
             tool_pcd, tool_mask = extract_gripper_tool_pcd(
                 pcd, gripper_pose_robot_base_6d, gripper_width,
-                tool_length=0.2,  # Expected tool length (adjust as needed)
-                tool_width=0.2,   # Expected tool width  
+                tool_length=0.15,  # Expected tool length (adjust as needed)
+                tool_width=0.02,   # Expected tool width  
                 gripper_finger_length=0.1,  # Gripper finger length (adjust for your robot)
-                safety_margin=0.002,  # Safety margin
-                global_z_threshold=0.005  # Global Z threshold (adjust as needed)
+                safety_margin=0.00,  # Safety margin
+                global_z_threshold=0.01  # Global Z threshold (adjust as needed)
             )
             
             # Get tool colors
@@ -208,6 +253,26 @@ for i in tqdm(epi_range):
             env_mask = ~tool_mask
             env_pcd = pcd[env_mask]
             env_colors = pcd_colors[env_mask]
+            
+            # Apply ENV_BOUNDARIES to environment points
+            env_in_bounds = (
+                (env_pcd[:, 0] >= ENV_BOUNDARIES['x_lower']) & (env_pcd[:, 0] <= ENV_BOUNDARIES['x_upper']) &
+                (env_pcd[:, 1] >= ENV_BOUNDARIES['y_lower']) & (env_pcd[:, 1] <= ENV_BOUNDARIES['y_upper']) &
+                (env_pcd[:, 2] >= ENV_BOUNDARIES['z_lower']) & (env_pcd[:, 2] <= ENV_BOUNDARIES['z_upper'])
+            )
+            env_pcd = env_pcd[env_in_bounds]
+            env_colors = env_colors[env_in_bounds]
+            
+            # Apply downsampling if specified
+            if downsample_obj_points is not None:
+                raw_tool_pcd_size = len(tool_pcd)
+                print(f"Raw tool point cloud size: {raw_tool_pcd_size}")
+                # Record tool point count before downsampling
+                tool_point_counts.append(raw_tool_pcd_size)
+                frame_numbers.append(t)
+                tool_pcd, tool_colors = sample_or_pad_pointcloud(tool_pcd, tool_colors, downsample_obj_points)
+            if downsample_env_points is not None:
+                env_pcd, env_colors = sample_or_pad_pointcloud(env_pcd, env_colors, downsample_env_points)
         
         # Apply color segmentation if enabled
         if apply_color_segmentation:
@@ -222,6 +287,12 @@ for i in tqdm(epi_range):
                 object_boundaries=OBJECT_BOUNDARIES,
                 env_boundaries=ENV_BOUNDARIES
             )
+            
+            # Apply downsampling if specified
+            if downsample_obj_points is not None:
+                object_pointcloud, object_colors = sample_or_pad_pointcloud(object_pointcloud, object_colors, downsample_obj_points)
+            if downsample_env_points is not None:
+                env_pointcloud, env_colors = sample_or_pad_pointcloud(env_pointcloud, env_colors, downsample_env_points)
             
             if vis_only_object:
                 # Show only object points
@@ -251,7 +322,10 @@ for i in tqdm(epi_range):
             total_points = len(pcd)
             object_ratio = len(object_pointcloud) / total_points if total_points > 0 else 0
             env_ratio = len(env_pointcloud) / total_points if total_points > 0 else 0
-            print(f"Frame {t}: Total: {total_points}, Object: {len(object_pointcloud)} ({object_ratio:.1%}), Environment: {len(env_pointcloud)} ({env_ratio:.1%})")
+            downsample_info = ""
+            if downsample_obj_points is not None or downsample_env_points is not None:
+                downsample_info = f" (downsampled to obj={downsample_obj_points}, env={downsample_env_points})"
+            print(f"Frame {t}: Total: {total_points}, Object: {len(object_pointcloud)} ({object_ratio:.1%}), Environment: {len(env_pointcloud)} ({env_ratio:.1%}){downsample_info}")
         elif use_gripper_segmentation:
             # Use gripper-based segmentation to visualize tool vs environment
             if vis_only_object:
@@ -287,7 +361,10 @@ for i in tqdm(epi_range):
             env_ratio = len(env_pcd) / total_points if total_points > 0 else 0
             ee_pose = data_dict['observations']['ee_pose'][t]
             gripper_width = ee_pose[6]
-            print(f"Frame {t}: Total: {total_points}, Tool: {len(tool_pcd)} ({tool_ratio:.1%}), Environment: {len(env_pcd)} ({env_ratio:.1%}), Gripper width: {gripper_width:.3f}")
+            downsample_info = ""
+            if downsample_obj_points is not None or downsample_env_points is not None:
+                downsample_info = f" (downsampled to obj={downsample_obj_points}, env={downsample_env_points})"
+            print(f"Frame {t}: Total: {total_points}, Tool: {len(tool_pcd)} ({tool_ratio:.1%}), Environment: {len(env_pcd)} ({env_ratio:.1%}), Gripper width: {gripper_width:.3f}{downsample_info}")
         else:
             # Original visualization without segmentation
             pcd_o3d = np2o3d(pcd, pcd_colors)
@@ -323,3 +400,30 @@ for i in tqdm(epi_range):
                 visualizer.update_triangle_mesh(f'action_{a_i}', tf=ee_target_pose_mat[a_i])
         
         visualizer.render()
+
+# Generate and save plot of tool point counts vs frame
+if len(tool_point_counts) > 0:
+    plt.figure(figsize=(12, 6))
+    plt.plot(frame_numbers, tool_point_counts, marker='o', linestyle='-', linewidth=2, markersize=4)
+    plt.xlabel('Frame Number', fontsize=12)
+    plt.ylabel('Number of Tool Points (Before Downsampling)', fontsize=12)
+    plt.title('Tool Point Cloud Size vs Frame Number', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_filename = os.path.join(data_dir, 'tool_points_vs_frame.png')
+    plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
+    print(f"\nPlot saved to: {plot_filename}")
+    
+    # Print statistics
+    print(f"\nTool Point Count Statistics:")
+    print(f"  Mean: {np.mean(tool_point_counts):.2f}")
+    print(f"  Median: {np.median(tool_point_counts):.2f}")
+    print(f"  Min: {np.min(tool_point_counts)}")
+    print(f"  Max: {np.max(tool_point_counts)}")
+    print(f"  Std Dev: {np.std(tool_point_counts):.2f}")
+    
+    plt.show()
+else:
+    print("\nNo tool point data collected. Make sure use_gripper_segmentation=True and downsample_obj_points is set.")

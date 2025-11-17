@@ -22,13 +22,22 @@ from gendp.common.cv2_util import get_extrinsic
 #             'z_upper': 0.3,
 #         }
 
+# boundaries = {
+#             'x_lower': 0.2,
+#             'x_upper': 0.8,
+#             'y_lower': -0.4,
+#             'y_upper': 0.4,
+#             'z_lower': -0.1,
+#             'z_upper': 0.5,
+#         }
+
 boundaries = {
-            'x_lower': 0.2,
-            'x_upper': 0.8,
-            'y_lower': -0.4,
-            'y_upper': 0.4,
+            'x_lower': 0.4,
+            'x_upper': 0.6,
+            'y_lower': -0.2,
+            'y_upper': 0.2,
             'z_lower': -0.1,
-            'z_upper': 0.5,
+            'z_upper': 0.4,
         }
 
 def visualize_calibration_result(iterative=False, realtime=False):
@@ -72,9 +81,9 @@ def visualize_calibration_result(iterative=False, realtime=False):
         ee_1_rot = st.Rotation.from_euler('xyz', [0.00, 0.00, 1.5708]).as_matrix()
         ee_1.rotate(ee_1_rot, center=(0, 0, 0))
         ee_1.translate(ee_pose[0])
-        floor = o3d.geometry.TriangleMesh.create_box(width=2.0, height=2.0, depth=0.01)
-        floor.translate([-1.0, -1.0, -0.01])
-        floor.paint_uniform_color([0.8, 0.8, 0.8])
+        # floor = o3d.geometry.TriangleMesh.create_box(width=2.0, height=2.0, depth=0.01)
+        # floor.translate([-1.0, -1.0, -0.01])
+        # floor.paint_uniform_color([0.8, 0.8, 0.8])
 
         if realtime:
             # Setup visualizer for real-time display
@@ -102,7 +111,7 @@ def visualize_calibration_result(iterative=False, realtime=False):
                     intrinsics = np.stack(value['intrinsics'] for value in out.values())
                     
                     # Generate new point cloud
-                    new_pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=True, boundaries=boundaries)
+                    new_pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=True, boundaries=boundaries, downsample_r=0.002)
                     print(f"Current point cloud has {len(new_pcd.points)} points after downsampling.")
                     
                     # Update point cloud geometry
@@ -129,12 +138,14 @@ def visualize_calibration_result(iterative=False, realtime=False):
             
             if iterative:
                 for i in range(colors.shape[0]):
-                    pcd = aggr_point_cloud_from_data(colors=colors[i:i+1], depths=depths[i:i+1], Ks=intrinsics[i:i+1], poses=extrinsics[i:i+1], downsample=False, boundaries=boundaries)
-                    o3d.visualization.draw_geometries([pcd, origin, ee, ee_1, floor])
+                    pcd = aggr_point_cloud_from_data(colors=colors[i:i+1], depths=depths[i:i+1], Ks=intrinsics[i:i+1], poses=extrinsics[i:i+1], downsample=False, boundaries=boundaries, downsample_r=0.002)
+                    # o3d.visualization.draw_geometries([pcd, origin, ee, ee_1, floor])
+                    o3d.visualization.draw_geometries([pcd, origin, ee, ee_1])
 
-            pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=True, boundaries=boundaries)
+            pcd = aggr_point_cloud_from_data(colors=colors, depths=depths, Ks=intrinsics, poses=extrinsics, downsample=True, boundaries=boundaries, downsample_r=0.002)
             print(f"Final point cloud has {len(pcd.points)} points after downsampling.")
-            o3d.visualization.draw_geometries([pcd, origin, ee, ee_1, floor])
+            # o3d.visualization.draw_geometries([pcd, origin, ee, ee_1, floor])
+            o3d.visualization.draw_geometries([pcd, origin, ee, ee_1])
 
             # print(np.asarray(pcd.points).shape)
             # np.save('obj_pcd/toilet_paper.npy', arr=np.asarray(pcd.points))
