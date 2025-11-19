@@ -69,7 +69,7 @@ def normalizer_from_stat(stat):
         input_stats_dict=stat
     )
 
-def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, boundary_frames=10):
+def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, boundary_frames=10, gripper_threshold=0.001):
     """
     Filter out frames where the EE pose displacement is small compared to the previous frame.
     
@@ -78,11 +78,13 @@ def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, b
         pos_threshold: minimum displacement threshold in meters for position
         rot_threshold: minimum displacement threshold in radians for rotation
         boundary_frames: number of frames at the beginning and end to always keep
+        gripper_threshold: minimum displacement threshold in meters for gripper opening
     
     Returns:
         valid_indices: boolean mask of frames to keep
     """
     T = ee_pose_raw.shape[0]
+    has_gripper = ee_pose_raw.shape[1] > 7
     
     # Always keep first and last boundary_frames
     valid_mask = np.zeros(T, dtype=bool)
@@ -107,8 +109,13 @@ def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, b
         # Compute L2 norm of wrapped differences
         euler_disp = np.linalg.norm(euler_diff)
         
-        # Keep frame if displacement is above threshold
-        if pos_disp > pos_threshold or euler_disp > rot_threshold:
+        # Gripper displacement (if available)
+        gripper_disp = 0.0
+        if has_gripper:
+            gripper_disp = abs(ee_pose_raw[i, 7] - ee_pose_raw[i-1, 7])
+        
+        # Keep frame if any displacement is above threshold
+        if pos_disp > pos_threshold or euler_disp > rot_threshold or gripper_disp > gripper_threshold:
             valid_mask[i] = True
     
     return valid_mask
@@ -118,7 +125,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         n_workers=None, max_inflight_tasks=None, fusion : Optional[Fusion]=None, robot_name='panda', expected_labels=None,
         exclude_colors=[], contact_field_model=None, contact_field_config=None, contact_field_device='cuda',
         reference_tactile_use_difference=False, filter_static_frames_enabled=True, 
-        filter_pos_threshold=0.001, filter_rot_threshold=0.01, filter_boundary_frames=10):
+        filter_pos_threshold=0.001, filter_rot_threshold=0.01, filter_boundary_frames=10, filter_gripper_threshold=0.001):
     if n_workers is None:
         n_workers = multiprocessing.cpu_count()
     if max_inflight_tasks is None:
@@ -203,7 +210,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     ee_pose_raw, 
                     pos_threshold=filter_pos_threshold, 
                     rot_threshold=filter_rot_threshold, 
-                    boundary_frames=filter_boundary_frames
+                    boundary_frames=filter_boundary_frames,
+                    gripper_threshold=filter_gripper_threshold
                 )
                 valid_indices = np.where(valid_frame_mask)[0]
                 filtered_episode_length = len(valid_indices)
@@ -405,7 +413,63 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     if history_enabled:
                         print(f"  History config: length={history_length}, tactile={tactile_history}, pose={pose_history}")
                     
-                    # Compute reference tactile from FIRST FRAME ONLY
+                    # Detect gripper closing: find first frame where gripper closes and becomes stable
+                    gripper_close_threshold = 0.06      # Gripper width threshold for "closed"
+                    gripper_change_threshold = 0.002    # Maximum change in gripper width for stability (m)
+                    gripper_stability_frames = 3        # Number of consecutive frames to confirm stability
+                    
+                    # Get gripper positions from ee_pose (8th element is gripper width)
+                    gripper_widths = gripper_pose_seq_filtered[:, 7] if gripper_pose_seq_filtered.shape[1] > 7 else np.ones(len(gripper_pose_seq_filtered)) * 0.08
+                    
+                    # Compute gripper width changes (difference between consecutive frames)
+                    gripper_changes = np.abs(np.diff(gripper_widths))  # (T-1,)
+                    
+                    # Check if gripper is already closed AND stable at the beginning
+                    if len(gripper_widths) >= gripper_stability_frames:
+                        # Check first gripper_stability_frames for closure and stability
+                        initial_widths = gripper_widths[:gripper_stability_frames]
+                        initial_changes = gripper_changes[:gripper_stability_frames-1]
+                        gripper_initially_closed_and_stable = (
+                            all(initial_widths < gripper_close_threshold) and 
+                            all(initial_changes < gripper_change_threshold)
+                        )
+                    else:
+                        gripper_initially_closed_and_stable = gripper_widths[0] < gripper_close_threshold
+                    
+                    if gripper_initially_closed_and_stable:
+                        # Gripper is already closed and stable, use first frame as reference (old behavior)
+                        grasp_reference_idx = 0
+                        contact_field_start_idx = 0
+                        print(f"  🤏 Gripper already closed and stable at start (width={gripper_widths[0]:.4f}), using frame 0 as reference")
+                    else:
+                        # Find when gripper closes and stabilizes
+                        grasp_reference_idx = None
+                        contact_field_start_idx = None
+                        
+                        for i in range(len(gripper_widths) - gripper_stability_frames):
+                            # Check if gripper is closed AND stable for stability_frames consecutive frames
+                            # Closed: all widths below threshold
+                            # Stable: all changes below threshold
+                            widths_window = gripper_widths[i:i+gripper_stability_frames]
+                            changes_window = gripper_changes[i:i+gripper_stability_frames-1]  # Changes are T-1
+                            
+                            is_closed = all(widths_window < gripper_close_threshold)
+                            is_stable = all(changes_window < gripper_change_threshold)
+                            
+                            if is_closed and is_stable:
+                                grasp_reference_idx = i  # First frame where gripper is stably closed
+                                contact_field_start_idx = i
+                                avg_width = np.mean(widths_window)
+                                max_change = np.max(changes_window) if len(changes_window) > 0 else 0
+                                print(f"  🤏 Gripper closes and stabilizes at filtered frame {i} (avg_width={avg_width:.4f}, max_change={max_change:.5f}), using as reference")
+                                break
+                        
+                        if grasp_reference_idx is None:
+                            print(f"  ⚠️  Gripper never closes and stabilizes in this episode, contact field will be all zeros")
+                            grasp_reference_idx = 0
+                            contact_field_start_idx = len(gripper_widths)  # Never start
+                    
+                    # Compute reference tactile from the grasp reference frame
                     reference_tactile_left = None
                     reference_tactile_right = None
                     
@@ -441,14 +505,15 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                                     ref_img='/home/kevin/gendp/data/ref_imgs/tactile_right_rgb.png'
                                 )
                             
-                            # Compute reference from first frame
-                            print(f"  Computing reference tactile from FIRST frame...")
-                            tactile_img_left = file['observations']['tactile']['tactile_img_left'][0]
-                            tactile_img_right = file['observations']['tactile']['tactile_img_right'][0]
+                            # Compute reference from grasp reference frame (mapped back to original indices)
+                            reference_frame_idx = valid_indices[grasp_reference_idx]
+                            print(f"  Computing reference tactile from frame {reference_frame_idx} (filtered idx {grasp_reference_idx})...")
+                            tactile_img_left = file['observations']['tactile']['tactile_img_left'][reference_frame_idx]
+                            tactile_img_right = file['observations']['tactile']['tactile_img_right'][reference_frame_idx]
                             
                             reference_tactile_left = tactile_processors['tactile_left'].process_frame(tactile_img_left)
                             reference_tactile_right = tactile_processors['tactile_right'].process_frame(tactile_img_right)
-                            print(f"  ✅ Reference tactile computed")
+                            print(f"  ✅ Reference tactile computed from grasp frame")
                     
                     # PHASE 1: Collect all processed data for the episode
                     print(f"  Phase 1: Collecting tactile and pose data for {len(aggr_src_pts_ls)} timesteps...")
@@ -536,7 +601,10 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     for t_idx in range(len(aggr_src_pts_ls)):
                         obj_pcd = obj_pts_ls[t_idx] if t_idx < len(obj_pts_ls) else np.zeros((0, 3))
                         
-                        if obj_pcd.shape[0] > 0 and len(processed_data[t_idx]) > 0:
+                        # Only compute contact field if gripper is closed (at or after contact_field_start_idx)
+                        gripper_is_closed = t_idx >= contact_field_start_idx
+                        
+                        if gripper_is_closed and obj_pcd.shape[0] > 0 and len(processed_data[t_idx]) > 0:
                             step_data = processed_data[t_idx]
                             
                             if 'tactile_data_left' in step_data and 'tactile_data_right' in step_data:
@@ -568,7 +636,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     
                     # Run batched contact field prediction
                     if len(batch_valid_indices) > 0:
-                        print(f"  Running batched contact field prediction for {len(batch_valid_indices)} valid timesteps...")
+                        print(f"  Running batched contact field prediction for {len(batch_valid_indices)} valid timesteps (frames {contact_field_start_idx}+)...")
+                        print(f"  Zero padding contact field for first {contact_field_start_idx} frames (gripper open)")
                         batch_results = predict_contact_field_batch(
                             model=contact_field_model,
                             obj_pointclouds=obj_pcd_list,
@@ -580,6 +649,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                             device=contact_field_device,
                             batch_size=16  # Process 16 timesteps at once
                         )
+                    else:
+                        print(f"  ⚠️  No valid timesteps for contact field prediction (gripper never closed)")
+                        batch_results = []
                     
                     # Reconstruct contact_field_pts_ls with results
                     result_idx = 0
@@ -1084,7 +1156,8 @@ class RealDataset(BaseImageDataset):
             filter_static_frames=True,
             filter_pos_threshold=0.001,
             filter_rot_threshold=0.01,
-            filter_boundary_frames=10
+            filter_boundary_frames=10,
+            filter_gripper_threshold=0.001
             ):
         
         super().__init__()
@@ -1171,7 +1244,7 @@ class RealDataset(BaseImageDataset):
         
         # Add frame filtering to cache string
         if filter_static_frames:
-            cache_info_str += f'_filtered_p{filter_pos_threshold}_r{filter_rot_threshold}_b{filter_boundary_frames}'
+            cache_info_str += f'_filtered_p{filter_pos_threshold}_r{filter_rot_threshold}_b{filter_boundary_frames}_g{filter_gripper_threshold}'
         
         if use_cache:
             cache_zarr_path = os.path.join(dataset_dir, f'cache{cache_info_str}.zarr.zip')
@@ -1209,6 +1282,7 @@ class RealDataset(BaseImageDataset):
                             filter_pos_threshold=filter_pos_threshold,
                             filter_rot_threshold=filter_rot_threshold,
                             filter_boundary_frames=filter_boundary_frames,
+                            filter_gripper_threshold=filter_gripper_threshold,
                             )
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:
@@ -1252,6 +1326,7 @@ class RealDataset(BaseImageDataset):
                 filter_pos_threshold=filter_pos_threshold,
                 filter_rot_threshold=filter_rot_threshold,
                 filter_boundary_frames=filter_boundary_frames,
+                filter_gripper_threshold=filter_gripper_threshold,
             )
         self.replay_buffer = replay_buffer
         if fusion is not None:

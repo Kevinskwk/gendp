@@ -100,11 +100,11 @@ shape_meta:
           z_upper: 0.5
         env_boundaries:
           x_lower: 0.4
-          x_upper: 0.6
+          x_upper: 0.65
           y_lower: -0.1
-          y_upper: 0.05
+          y_upper: 0.1
           z_lower: -0.1
-          z_upper: 0.01
+          z_upper: 0.15
         obj_boundaries:
           x_lower: 0.3
           x_upper: 0.7
@@ -114,7 +114,7 @@ shape_meta:
           z_upper: 0.25
         gripper_crop_params:
           tool_length: 0.15
-          tool_width: 0.02
+          tool_width: 0.04
           gripper_finger_length: 0.1
           safety_margin: 0.0
           global_z_threshold: 0.01
@@ -199,12 +199,13 @@ task:
     filter_pos_threshold: 0.001  # Position displacement threshold in meters
     filter_rot_threshold: 0.01  # Rotation displacement threshold in radians (~0.57 degrees)
     filter_boundary_frames: 10  # Number of frames to keep at beginning and end
+    filter_gripper_threshold: 0.001  # Gripper displacement threshold in meters
   dataset_dir: ${data_root}/data/${dataset_name}
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
 task_name: crayon_cross_contact_field
-dataset_name: crayon_cross
+dataset_name: crayon_pickup
 training:
   checkpoint_every: 250
   debug: false

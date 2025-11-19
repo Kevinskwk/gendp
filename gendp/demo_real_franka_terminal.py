@@ -102,10 +102,14 @@ def process_commands(key_counter, env, output_dir):
                 robot_state['recording'] = True
                 print('⏭️  Next stage!')
             elif command == 'backspace':
-                env.drop_episode()
-                key_counter.clear()
-                robot_state['recording'] = False
-                print('🗑️  Episode deleted!')
+                if robot_state['recording']:
+                    # End episode without saving (incr_epi=False) and don't save data
+                    robot_state['recording'] = False
+                    env.end_episode(curr_outdir=output_dir, incr_epi=False)
+                    key_counter.clear()
+                    print('🗑️  Episode discarded!')
+                else:
+                    print('ℹ️  Not recording, nothing to discard')
             elif command == 'g':
                 robot_state['gripper_pos'] = 0.0
                 print('✊ Closing gripper...')
@@ -148,10 +152,13 @@ def process_commands(key_counter, env, output_dir):
             robot_state['recording'] = True
             print('⏭️  Next stage!')
         elif key_stroke == Key.backspace:
-            env.drop_episode()
-            key_counter.clear()
-            robot_state['recording'] = False
-            print('🗑️  Episode deleted!')
+            if robot_state['recording']:
+                robot_state['recording'] = False
+                env.end_episode(curr_outdir=output_dir, incr_epi=False)
+                key_counter.clear()
+                print('🗑️  Episode discarded!')
+            else:
+                print('ℹ️  Not recording, nothing to discard')
         elif key_stroke == KeyCode(char='g'):
             robot_state['gripper_pos'] = 0.0
             print('✊ Closing gripper...')

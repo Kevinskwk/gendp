@@ -14,36 +14,121 @@ from gendp.common.data_utils import d3fields_proc
 from gendp.common.tactile_utils import TactileProcessor
 
 
-# Module-level storage for reference tactile data (persists across episode)
+# Module-level storage for reference tactile data and gripper state (persists across episode)
 _reference_tactile_data = {}
+_gripper_state = {
+    'is_closed': False,
+    'reference_set': False,
+    'gripper_history': [],  # Track recent gripper widths
+    'close_threshold': 0.06,  # Gripper width threshold for "closed"
+    'change_threshold': 0.002,  # Maximum change in gripper width for stability (m)
+    'stability_frames': 3,  # Number of consecutive frames to confirm stability
+}
 
 
 def reset_reference_tactile():
-    """Reset reference tactile data at the start of each episode."""
-    global _reference_tactile_data
+    """Reset reference tactile data and gripper state at the start of each episode."""
+    global _reference_tactile_data, _gripper_state
     _reference_tactile_data = {}
-    print("🔄 Reference tactile data reset for new episode")
+    _gripper_state = {
+        'is_closed': False,
+        'reference_set': False,
+        'gripper_history': [],
+        'close_threshold': 0.06,
+        'change_threshold': 0.002,
+        'stability_frames': 3,
+    }
+    print("🔄 Reference tactile data and gripper state reset for new episode")
 
 
-def get_or_compute_reference_tactile(sensor_name: str, tactile_frame, tactile_processor):
+def check_gripper_closed_and_stable(gripper_width: float) -> bool:
     """
-    Get stored reference tactile or compute it from the first frame.
+    Check if gripper is closed and stable based on current and historical widths.
+    Updates internal gripper state tracking.
+    
+    Args:
+        gripper_width: Current gripper width (meters)
+    
+    Returns:
+        True if gripper should be considered closed and stable, False otherwise
+    """
+    global _gripper_state
+    
+    # Add current width to history
+    _gripper_state['gripper_history'].append(gripper_width)
+    
+    # Keep only recent history (stability_frames + 1 for computing changes)
+    max_history = _gripper_state['stability_frames'] + 1
+    if len(_gripper_state['gripper_history']) > max_history:
+        _gripper_state['gripper_history'] = _gripper_state['gripper_history'][-max_history:]
+    
+    # Need at least stability_frames samples to check
+    if len(_gripper_state['gripper_history']) < _gripper_state['stability_frames']:
+        return False
+    
+    # Check if all recent widths are below close threshold
+    recent_widths = _gripper_state['gripper_history'][-_gripper_state['stability_frames']:]
+    is_closed = all(w < _gripper_state['close_threshold'] for w in recent_widths)
+    
+    # Check if all recent changes are below change threshold
+    if len(_gripper_state['gripper_history']) >= 2:
+        recent_changes = [abs(_gripper_state['gripper_history'][i] - _gripper_state['gripper_history'][i-1]) 
+                         for i in range(-_gripper_state['stability_frames'] + 1, 0)]
+        is_stable = all(change < _gripper_state['change_threshold'] for change in recent_changes)
+    else:
+        is_stable = False
+    
+    # Update closed state
+    was_closed = _gripper_state['is_closed']
+    _gripper_state['is_closed'] = is_closed and is_stable
+    
+    # Log when gripper becomes closed and stable
+    if _gripper_state['is_closed'] and not was_closed:
+        avg_width = np.mean(recent_widths)
+        max_change = max(recent_changes) if recent_changes else 0
+        print(f"  🤏 Gripper closed and stable (avg_width={avg_width:.4f}, max_change={max_change:.5f})")
+    
+    return _gripper_state['is_closed']
+
+
+def get_or_compute_reference_tactile(sensor_name: str, tactile_frame, tactile_processor, 
+                                     gripper_width: Optional[float] = None):
+    """
+    Get stored reference tactile or compute it based on gripper state.
+    
+    Reference is computed ONLY when:
+    1. Gripper is closed and stable (width < threshold, changes < threshold)
+    2. Reference has not been set yet for this episode
+    
+    If gripper is open, returns None to signal that contact field should be zero-padded.
     
     Args:
         sensor_name: Name of the sensor ('tactile_left' or 'tactile_right')
         tactile_frame: Current tactile frame (H, W, C)
         tactile_processor: TactileProcessor instance
+        gripper_width: Current gripper width (meters). If None, assumes gripper is closed.
         
     Returns:
-        Reference tactile force field (7, 9, 3)
+        Reference tactile force field (7, 9, 3) if gripper is closed, None otherwise
     """
-    global _reference_tactile_data
+    global _reference_tactile_data, _gripper_state
     
+    # If gripper_width is provided, check gripper state
+    if gripper_width is not None:
+        gripper_closed_and_stable = check_gripper_closed_and_stable(gripper_width)
+        
+        # If gripper is not closed and stable, return None (signal to use zero padding)
+        if not gripper_closed_and_stable:
+            return None
+    
+    # At this point, gripper is closed and stable (or gripper_width was not provided)
+    # Compute and store reference if not already done
     if sensor_name not in _reference_tactile_data:
-        # First time seeing this sensor - compute and store reference
+        # First time gripper is closed and stable - compute and store reference
         reference = tactile_processor.process_frame(tactile_frame)  # (7, 9, 3)
         _reference_tactile_data[sensor_name] = reference
-        print(f"✅ Reference tactile computed and stored for {sensor_name}: shape {reference.shape}")
+        _gripper_state['reference_set'] = True
+        print(f"✅ Reference tactile computed and stored for {sensor_name} at grasp: shape {reference.shape}")
     
     return _reference_tactile_data[sensor_name]
 
@@ -957,36 +1042,40 @@ def get_real_obs_dict(
             T = tactile_frames.shape[0]
             processed_frames = []
             
-            # Get or compute reference tactile (uses first frame of episode, persists across calls)
-            reference_tactile = None
-            if T > 0:
-                # This will use the stored reference if available, or compute from first frame
-                reference_tactile = get_or_compute_reference_tactile(
-                    sensor_name, tactile_frames[0], tactile_processors[sensor_name]
-                )  # (7, 9, 3)
-            
             for t_idx in range(T):
                 frame = tactile_frames[t_idx]
+                
+                # Get gripper width for state checking
+                ee_pose_8d = env_obs['ee_pose'][t_idx]  # [x,y,z,rx,ry,rz,gripper] or [x,y,z,qx,qy,qz,qw,gripper]
+                gripper_width = ee_pose_8d[7] if len(ee_pose_8d) > 7 else (ee_pose_8d[6] if len(ee_pose_8d) > 6 else None)
+                
+                # Get or compute reference tactile based on gripper state
+                # Returns None if gripper is not closed and stable
+                reference_tactile = get_or_compute_reference_tactile(
+                    sensor_name, frame, tactile_processors[sensor_name], gripper_width=gripper_width
+                )  # (7, 9, 3) or None
+                
                 # Process frame returns force field data (7, 9, 3) with [depth, dy, dx]
                 force_field = tactile_processors[sensor_name].process_frame(frame)
                 
                 # Combine with reference using configured method
                 if reference_tactile is not None:
+                    # Gripper is closed and stable - use reference
                     force_field_combined = combine_tactile_with_reference(
                         force_field, reference_tactile, use_difference=reference_tactile_use_difference
                     )  # (7, 9, 3) if difference, (7, 9, 6) if stacked
                 else:
-                    # Fallback: if no reference available
+                    # Gripper is open - use zeros for reference (effectively zero-padding contact field)
                     if reference_tactile_use_difference:
-                        # For difference mode, use current as is
-                        force_field_combined = force_field  # (7, 9, 3)
+                        # For difference mode, use zeros (no contact)
+                        force_field_combined = np.zeros_like(force_field)  # (7, 9, 3)
                     else:
-                        # For stacking mode, duplicate current
-                        force_field_combined = np.concatenate([force_field, force_field], axis=-1)  # (7, 9, 6)
+                        # For stacking mode, stack current with zeros
+                        zero_reference = np.zeros_like(force_field)
+                        force_field_combined = np.concatenate([force_field, zero_reference], axis=-1)  # (7, 9, 6)
                 
-                # Get 3D marker coordinates using robot pose
-                ee_pose_8d = env_obs['ee_pose'][t_idx]  # [x,y,z,rx,ry,rz,gripper] or [x,y,z,qx,qy,qz,qw,gripper]
-                gripper_pos = ee_pose_8d[7] if len(ee_pose_8d) > 7 else (ee_pose_8d[6] if len(ee_pose_8d) > 6 else 0.05)
+                # Get gripper position for marker coordinates
+                gripper_pos = gripper_width if gripper_width is not None else 0.05  # Default gripper width
                 
                 # Use utility function to compute marker coordinates
                 if 'left' in key:
@@ -1107,51 +1196,67 @@ def get_real_obs_dict(
                             tactile_ff_left = tactile_processors['tactile_left'].process_frame(tactile_left_frame)
                             tactile_ff_right = tactile_processors['tactile_right'].process_frame(tactile_right_frame)
                             
-                            # Get ee_pose and transform for contact field model
+                            # Get ee_pose and gripper width for state checking
                             if 'ee_pose' in env_obs and t_idx < len(env_obs['ee_pose']):
                                 ee_pose_8d = env_obs['ee_pose'][t_idx]
                                 ee_pos = ee_pose_8d[:3]
                                 ee_quat = ee_pose_8d[3:7]
-                                gripper_pos = ee_pose_8d[7] if len(ee_pose_8d) > 7 else 0.05
+                                gripper_width = ee_pose_8d[7] if len(ee_pose_8d) > 7 else 0.05
                                 
-                                # Transform the pose for contact field model
-                                # Apply z-translation of +0.14 in the EE's local frame
-                                current_rot = st.Rotation.from_quat(ee_quat)
-                                local_offset = np.array([0.0, 0.0, 0.14])  # Offset in EE frame
-                                global_offset = current_rot.apply(local_offset)  # Transform to global frame
-                                transformed_pos = ee_pos + global_offset
+                                # Check gripper state using get_or_compute_reference_tactile
+                                # This internally calls check_gripper_closed_and_stable() and updates state
+                                reference_tactile_left = get_or_compute_reference_tactile(
+                                    'tactile_left', tactile_left_frame, tactile_processors['tactile_left'], 
+                                    gripper_width=gripper_width
+                                )
+                                # Use the module-level gripper state that was just updated
+                                gripper_is_closed_and_stable = _gripper_state['is_closed']
+                                
+                                if gripper_is_closed_and_stable:
+                                    # Gripper is closed and stable - compute contact field
+                                    # Transform the pose for contact field model
+                                    # Apply z-translation of +0.14 in the EE's local frame
+                                    current_rot = st.Rotation.from_quat(ee_quat)
+                                    local_offset = np.array([0.0, 0.0, 0.14])  # Offset in EE frame
+                                    global_offset = current_rot.apply(local_offset)  # Transform to global frame
+                                    transformed_pos = ee_pos + global_offset
 
-                                # Apply z-rotation of 135 degrees in LOCAL frame (around local z-axis)
-                                z_rotation_local = st.Rotation.from_euler('z', 3*np.pi/4)
-                                transformed_rot = current_rot * z_rotation_local  # Apply rotation in local frame
-                                transformed_quat = transformed_rot.as_quat()
-                                ee_pose_7d = np.concatenate([transformed_pos, transformed_quat])
-                                
-                                #Get 3D marker coordinates
-                                tactile_coord_left, tactile_coord_right = get_tactile_marker_coordinates(
-                                    ee_pose_7d, gripper_pos
-                                )
-                                
-                                # Predict contact field using utility function
-                                contact_prob, contact_force = predict_contact_field_from_tactile_and_pointcloud(
-                                    obj_pointcloud=obj_pcd,
-                                    tactile_ff_left=tactile_ff_left,
-                                    tactile_ff_right=tactile_ff_right,
-                                    tactile_coord_left=tactile_coord_left,
-                                    tactile_coord_right=tactile_coord_right,
-                                    ee_pose_7d=ee_pose_7d,
-                                    contact_field_model=contact_field_model,
-                                    device=contact_field_device
-                                )
-                                
-                                # Augment point cloud with contact field using utility function
-                                pcd_with_contact = augment_pointcloud_with_contact_field(
-                                    full_pointcloud=full_pcd,
-                                    obj_pointcloud=obj_pcd,
-                                    contact_prob=contact_prob,
-                                    contact_force=contact_force
-                                )
-                                contact_field_pts_ls.append(pcd_with_contact)
+                                    # Apply z-rotation of 135 degrees in LOCAL frame (around local z-axis)
+                                    z_rotation_local = st.Rotation.from_euler('z', 3*np.pi/4)
+                                    transformed_rot = current_rot * z_rotation_local  # Apply rotation in local frame
+                                    transformed_quat = transformed_rot.as_quat()
+                                    ee_pose_7d = np.concatenate([transformed_pos, transformed_quat])
+                                    
+                                    # Get 3D marker coordinates
+                                    tactile_coord_left, tactile_coord_right = get_tactile_marker_coordinates(
+                                        ee_pose_7d, gripper_width
+                                    )
+                                    
+                                    # Predict contact field using utility function
+                                    contact_prob, contact_force = predict_contact_field_from_tactile_and_pointcloud(
+                                        obj_pointcloud=obj_pcd,
+                                        tactile_ff_left=tactile_ff_left,
+                                        tactile_ff_right=tactile_ff_right,
+                                        tactile_coord_left=tactile_coord_left,
+                                        tactile_coord_right=tactile_coord_right,
+                                        ee_pose_7d=ee_pose_7d,
+                                        contact_field_model=contact_field_model,
+                                        device=contact_field_device
+                                    )
+                                    
+                                    # Augment point cloud with contact field using utility function
+                                    pcd_with_contact = augment_pointcloud_with_contact_field(
+                                        full_pointcloud=full_pcd,
+                                        obj_pointcloud=obj_pcd,
+                                        contact_prob=contact_prob,
+                                        contact_force=contact_force
+                                    )
+                                    contact_field_pts_ls.append(pcd_with_contact)
+                                else:
+                                    # Gripper is open - use zero padding for contact field
+                                    zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                                    pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
+                                    contact_field_pts_ls.append(pcd_with_contact)
                             else:
                                 # No ee_pose, pad with zeros
                                 zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
