@@ -328,14 +328,20 @@ def get_init_poses(task='scraper'):
                            -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 
                            1.6146283149719238])
         ee_init = np.array([0.5, 0.242, 0.2517, 2.702, -0.458, -0.614])
-    elif task == 'crayon':
+    elif task == 'crayon_old':
         j_init = np.array([-0.1898142248392105, 0.42033371329307556, -0.0180759746581316, 
                            -1.826417088508606, -0.0848948061466217, 2.243102788925171, 
                            0.5972442030906677])
         ee_init = np.array([0.6289371252059937, -0.13435199856758118, 0.3047587275505066, 
                             3.0775118520198985, -0.03660714979931323, -0.7493871829330105])
+    elif task == 'crayon':
+        j_init = np.array([-0.24010226130485535, 0.196928933262825, 0.042084839195013046, -2.0691111087799072, -0.015080037526786327, 2.2436816692352295, -0.9613606929779053])
+        ee_init = np.array([0.5646023154258728, -0.11422417312860489, 0.33527788519859314, -3.125333787179658, 0.015434648044571952, 0.7722765841437812])
+    elif task == 'crayon_pickup':
+        j_init = np.array([-0.6027288436889648, 0.44224241375923157, 0.410679429769516, -1.7363632917404175, -0.23993955552577972, 2.1253926753997803, -1.5027179718017578])
+        ee_init = np.array([0.6354339122772217, -0.15972062945365906, 0.34067776799201965, -3.132333702428826, 0.031218095471984286, 1.4045849642585833])
     else:
-        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon'")
+        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon', 'crayon_old', 'crayon_pickup'")
     
     return j_init, ee_init
 
@@ -357,7 +363,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--n_action_steps', '-n', default=-1, type=int, help="Number of action steps to execute. -1 means invalid.")
 @click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
 @click.option('--save_viz_interval', default=30, type=int, help="Save visualization every N frames (0 to disable)")
-@click.option('--task', '-t', default='scraper', type=click.Choice(['scraper', 'crayon']), help="Task to perform (scraper or crayon)")
+@click.option('--task', '-t', default='crayon', type=click.Choice(['scraper', 'crayon', 'crayon_old', 'crayon_pickup']), help="Task to perform (scraper or crayon)")
 def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_episode,
     vis_camera_idx, vis_d3fields,
     steps_per_inference, max_duration,
@@ -710,9 +716,6 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
                             last_status_time = time.time()
                             
                             while robot_state['policy_active'] and not robot_state['stop']:
-                                # calculate timing
-                                t_cycle_end = t_start + (iter_idx + steps_per_inference) * dt
-
                                 # get obs
                                 t_obs_start = time.perf_counter()
                                 obs = env.get_obs()
@@ -763,22 +766,12 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
                                 t_action_convert_end = time.perf_counter()
                                 # print(f"⏱️  [Timing] Action conversion: {(t_action_convert_end - t_action_convert_start)*1000:.2f}ms")                                # deal with timing
                                 t_timing_start = time.perf_counter()
-                                action_timestamps = (np.arange(len(action), dtype=np.float64) + action_offset
-                                    ) * dt + obs_timestamps[-1]
-                                action_exec_latency = 0.2
+                                
+                                # Schedule actions starting from current time to ensure no actions are filtered out
                                 curr_time = time.time()
-                                is_new = action_timestamps > (curr_time + action_exec_latency)
-                                if np.sum(is_new) == 0:
-                                    # exceeded time budget, still do something
-                                    print(f"⚠️  [Warning] Exceeded time budget! Using last action only.")
-                                    env_actions = env_actions[[-1]]
-                                    # schedule on next available step
-                                    next_step_idx = int(np.ceil((curr_time - eval_t_start) / dt))
-                                    action_timestamp = eval_t_start + (next_step_idx) * dt
-                                    action_timestamps = np.array([action_timestamp])
-                                else:
-                                    env_actions = env_actions[is_new]
-                                    action_timestamps = action_timestamps[is_new]
+                                action_exec_latency = 0.01  # Small latency buffer for action scheduling
+                                action_timestamps = curr_time + action_exec_latency + (np.arange(len(action), dtype=np.float64) + action_offset) * dt
+                                
                                 t_timing_end = time.perf_counter()
                                 # print(f"⏱️  [Timing] Action timing calculation: {(t_timing_end - t_timing_start)*1000:.2f}ms")
                                 
@@ -824,22 +817,34 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
                                 t_viz_end = time.perf_counter()
                                 # print(f"⏱️  [Timing] Visualization: {(t_viz_end - t_viz_start)*1000:.2f}ms")
 
-                                # wait for execution
-                                t_wait_start = time.perf_counter()
-                                precise_wait(t_cycle_end - frame_latency)
-                                t_wait_end = time.perf_counter()
+                                # Calculate how many actions were actually scheduled
+                                num_actions_scheduled = len(env_actions)
+                                
+                                # Wait for ALL actions to complete (use last action timestamp)
+                                # Calculate when the last action will finish executing
+                                if len(action_timestamps) > 0:
+                                    t_last_action_end = action_timestamps[-1]
+                                    # Wait until the last action completes
+                                    t_wait_start = time.perf_counter()
+                                    precise_wait(t_last_action_end - frame_latency, time_func=time.time)
+                                    t_wait_end = time.perf_counter()
+                                else:
+                                    t_wait_start = time.perf_counter()
+                                    t_wait_end = time.perf_counter()
                                 
                                 # Calculate total cycle time
                                 t_cycle_total = t_wait_end - t_obs_start
                                 # print(f"⏱️  [Timing] Wait time: {(t_wait_end - t_wait_start)*1000:.2f}ms")
                                 # print(f"⏱️  [Timing] ========== TOTAL CYCLE: {t_cycle_total*1000:.2f}ms ==========\n")
                                 
-                                iter_idx += steps_per_inference
+                                # Increment by the number of actions that were actually executed
+                                # This ensures we wait for ALL actions to complete before next inference
+                                iter_idx += num_actions_scheduled
 
                                 # Print status periodically
                                 current_time = time.time()
                                 if current_time - last_status_time > 5.0:
-                                    print(f"📊 Policy Control - Iter: {iter_idx}, Episode: {episode_id}, Freq: {1/(time.perf_counter() - (current_time - 5.0)):.1f}Hz")
+                                    print(f"📊 Policy Control - Iter: {iter_idx}, Episode: {episode_id}, Actions executed: {num_actions_scheduled}, Freq: {1/(time.perf_counter() - (current_time - 5.0)):.1f}Hz")
                                     last_status_time = current_time
 
                         except KeyboardInterrupt:
