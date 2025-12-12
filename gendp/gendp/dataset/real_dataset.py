@@ -200,8 +200,9 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         feats_per_epi = list() # save it separately to avoid OOM
         with h5py.File(dataset_path) as file:
             # count total steps
-            # episode_length = file['cartesian_action'].shape[0]
-            episode_length = file['joint_action'].shape[0] - trim_tail
+            # Determine which action key to use from shape_meta
+            action_data_key = 'cartesian_action' if 'key' not in shape_meta['action'] else shape_meta['action']['key']
+            episode_length = file[action_data_key].shape[0] - trim_tail
             
             # Filter out static frames based on EE pose displacement
             if filter_static_frames_enabled:
@@ -1195,6 +1196,15 @@ class RealDataset(BaseImageDataset):
                     cf_N_env = downsampling_config.get('env_points', 512)
                     cache_info_str += f'_obj{cf_N_obj}_env{cf_N_env}'
                     # print(f"📦 Cache will include contact field point allocation: obj={cf_N_obj}, env={cf_N_env}")
+        
+        # Add include_tactile_as_pointcloud to cache string
+        if shape_meta.get('include_tactile_as_pointcloud', False):
+            cache_info_str += '_tactile_as_pc'
+            # Add tactile history configuration if enabled
+            tactile_history_config = shape_meta.get('tactile_history', {})
+            if tactile_history_config.get('enabled', False):
+                tactile_history_length = tactile_history_config.get('length', 1)
+                cache_info_str += f'_thist{tactile_history_length}'
         
         for key, attr in shape_meta['obs'].items():
             if ('type' in attr) and (attr['type'] == 'depth'):

@@ -52,12 +52,12 @@ CAMERA_NAMES = {
 }
 
 GELSIGHT_NAMES = {
-    1: 'left',
-    0: 'right'
+    0: 'left',
+    1: 'right',
 }
 
 # GELSIGHT_IDS = [14, 12]
-GELSIGHT_IDS = ['/dev/video-gs_mini_right', '/dev/video-gs_mini_left']
+GELSIGHT_IDS = ['/dev/video-gs_mini_left', '/dev/video-gs_mini_right']
 
 class RealEnvFranka:
     def __init__(self,
@@ -272,8 +272,8 @@ class RealEnvFranka:
             shm_manager=shm_manager,
             robot_ip=robot_ip,
             frequency=200,
-            Kx_scale=1.0 * 0.75,
-            Kxd_scale=np.array([2.0, 1.5, 2.0, 1.0, 1.0, 1.0]) * 0.75,
+            Kx_scale=1.0*2,
+            Kxd_scale=np.array([2.0, 1.5, 2.0, 1.0, 1.0, 1.0])*2,
             joints_init=j_init,
             joints_init_duration=3.0,
             verbose=False,
@@ -299,7 +299,9 @@ class RealEnvFranka:
         self.cam_left_extri = get_extrinsic([0.3015062294276259, -0.2731493583749173, 0.12464828611110033],
                                     # [-0.7461453297553833, 0.22962820091980163, -0.20344921784453623, 0.5908861582276331])
                                     [-0.75190061, 0.21001771, -0.1879119, 0.59600936])
-        self.cam_right_extri = get_extrinsic([0.33561416964601004, 0.5235239893129717, 0.1137736727084544],
+        # self.cam_right_extri = get_extrinsic([0.33561416964601004, 0.5235239893129717, 0.1137736727084544],
+        #                             [-0.14008225307645683, 0.7060390316876065, -0.6806702770786354, 0.13628581000362547])
+        self.cam_right_extri = get_extrinsic([0.33561416964601004-0.025, 0.5235239893129717-0.01, 0.1137736727084544-0.005],
                                     [-0.14008225307645683, 0.7060390316876065, -0.6806702770786354, 0.13628581000362547])
 
         # self.gripper = gripper
@@ -336,8 +338,8 @@ class RealEnvFranka:
         return self.realsense.is_ready and self.gelsight.is_ready and self.robot.is_ready
 
     def start(self, wait=True):
+        self.gelsight.start(wait=True)
         self.realsense.start(wait=False)
-        self.gelsight.start(wait=False)
         self.robot.start(wait=False)
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.start(wait=False)

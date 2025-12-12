@@ -1344,6 +1344,169 @@ def get_real_obs_dict(
                     aggr_pts_feats = aggr_src_pts
             else:
                 aggr_pts_feats = aggr_src_pts
+            
+            # Check if we should merge tactile data as point clouds
+            include_tactile_in_d3fields = shape_meta.get('include_tactile_as_pointcloud', False)
+            
+            if include_tactile_in_d3fields:
+                # Get tactile history configuration
+                tactile_history_config = shape_meta.get('tactile_history', {})
+                tactile_history_enabled = tactile_history_config.get('enabled', False)
+                tactile_history_length = tactile_history_config.get('length', 1)
+                
+                # Check if tactile data is available in env_obs
+                has_tactile = ('tactile_img_left' in env_obs and 'tactile_img_right' in env_obs and
+                              tactile_processors is not None and
+                              'tactile_left' in tactile_processors and 'tactile_right' in tactile_processors)
+                
+                # Debug output
+                if not has_tactile:
+                    print(f"⚠️  Tactile data not available for merging into d3fields:")
+                    print(f"   tactile_img_left in env_obs: {'tactile_img_left' in env_obs}")
+                    print(f"   tactile_img_right in env_obs: {'tactile_img_right' in env_obs}")
+                    print(f"   tactile_processors available: {tactile_processors is not None}")
+                    if tactile_processors is not None:
+                        print(f"   tactile_left processor: {'tactile_left' in tactile_processors}")
+                        print(f"   tactile_right processor: {'tactile_right' in tactile_processors}")
+                    print(f"   Available env_obs keys: {list(env_obs.keys())[:15]}...")  # Show first 15 keys
+                    print(f"   d3fields will have shape: {aggr_pts_feats.shape} (without tactile)")
+                    print(f"   Expected by model: include_tactile_as_pointcloud={include_tactile_in_d3fields}, history_length={tactile_history_length}")
+                else:
+                    print(f"📊 Tactile data available for merging (history_length={tactile_history_length})")
+                
+                if has_tactile and 'ee_pose' in env_obs:
+                    # Process tactile data for each timestep
+                    T = aggr_pts_feats.shape[0]
+                    
+                    # Store processed tactile data with history buffer
+                    tactile_history_buffer_left = []  # Store last N timesteps
+                    tactile_history_buffer_right = []
+                    
+                    merged_pts_feats_list = []
+                    
+                    for t_idx in range(T):
+                        # Process current tactile frames
+                        tactile_left_frame = env_obs['tactile_img_left'][t_idx]
+                        tactile_right_frame = env_obs['tactile_img_right'][t_idx]
+                        
+                        # Get force field data
+                        tactile_ff_left = tactile_processors['tactile_left'].process_frame(tactile_left_frame)  # (7, 9, 3)
+                        tactile_ff_right = tactile_processors['tactile_right'].process_frame(tactile_right_frame)
+                        
+                        # Get gripper state for reference tactile
+                        ee_pose_8d = env_obs['ee_pose'][t_idx]
+                        gripper_width = ee_pose_8d[7] if len(ee_pose_8d) > 7 else 0.05
+                        
+                        # Get reference tactile and check gripper state
+                        reference_tactile_left = get_or_compute_reference_tactile(
+                            'tactile_left', tactile_left_frame, tactile_processors['tactile_left'], 
+                            gripper_width=gripper_width
+                        )
+                        reference_tactile_right = get_or_compute_reference_tactile(
+                            'tactile_right', tactile_right_frame, tactile_processors['tactile_right'], 
+                            gripper_width=gripper_width
+                        )
+                        
+                        # Combine with reference
+                        if reference_tactile_left is not None:
+                            tactile_ff_left_combined = combine_tactile_with_reference(
+                                tactile_ff_left, reference_tactile_left, use_difference=reference_tactile_use_difference
+                            )
+                        else:
+                            # Gripper open - use zeros
+                            if reference_tactile_use_difference:
+                                tactile_ff_left_combined = np.zeros_like(tactile_ff_left)
+                            else:
+                                zero_reference = np.zeros_like(tactile_ff_left)
+                                tactile_ff_left_combined = np.concatenate([tactile_ff_left, zero_reference], axis=-1)
+                        
+                        if reference_tactile_right is not None:
+                            tactile_ff_right_combined = combine_tactile_with_reference(
+                                tactile_ff_right, reference_tactile_right, use_difference=reference_tactile_use_difference
+                            )
+                        else:
+                            # Gripper open - use zeros
+                            if reference_tactile_use_difference:
+                                tactile_ff_right_combined = np.zeros_like(tactile_ff_right)
+                            else:
+                                zero_reference = np.zeros_like(tactile_ff_right)
+                                tactile_ff_right_combined = np.concatenate([tactile_ff_right, zero_reference], axis=-1)
+                        
+                        # Add to history buffer
+                        tactile_history_buffer_left.append(tactile_ff_left_combined)
+                        tactile_history_buffer_right.append(tactile_ff_right_combined)
+                        
+                        # Keep only last N timesteps
+                        if len(tactile_history_buffer_left) > tactile_history_length:
+                            tactile_history_buffer_left.pop(0)
+                            tactile_history_buffer_right.pop(0)
+                        
+                        # Pad if we don't have enough history yet (at the start)
+                        while len(tactile_history_buffer_left) < tactile_history_length:
+                            tactile_history_buffer_left.insert(0, tactile_ff_left_combined)
+                            tactile_history_buffer_right.insert(0, tactile_ff_right_combined)
+                        
+                        # Concatenate history along last dimension
+                        if tactile_history_enabled and tactile_history_length > 1:
+                            # Stack history: (7, 9, C_ff_base * history_length)
+                            tactile_ff_left_with_history = np.concatenate(tactile_history_buffer_left, axis=-1)
+                            tactile_ff_right_with_history = np.concatenate(tactile_history_buffer_right, axis=-1)
+                        else:
+                            # No history
+                            tactile_ff_left_with_history = tactile_ff_left_combined
+                            tactile_ff_right_with_history = tactile_ff_right_combined
+                        
+                        # Get 3D coordinates (use current timestep coordinates only)
+                        tactile_coord_left, tactile_coord_right = compute_tactile_marker_coordinates(
+                            ee_pose_8d, gripper_width
+                        )
+                        
+                        # Flatten to point cloud format
+                        tactile_ff_left_flat = tactile_ff_left_with_history.reshape(-1, tactile_ff_left_with_history.shape[-1]).astype(np.float32)  # (63, C_ff)
+                        tactile_ff_right_flat = tactile_ff_right_with_history.reshape(-1, tactile_ff_right_with_history.shape[-1]).astype(np.float32)
+                        tactile_coord_left_flat = tactile_coord_left.reshape(-1, 3).astype(np.float32)  # (63, 3)
+                        tactile_coord_right_flat = tactile_coord_right.reshape(-1, 3).astype(np.float32)
+                        
+                        # Combine left and right
+                        tactile_ff = np.concatenate([tactile_ff_left_flat, tactile_ff_right_flat], axis=0)  # (126, C_ff)
+                        tactile_coords = np.concatenate([tactile_coord_left_flat, tactile_coord_right_flat], axis=0)  # (126, 3)
+                        
+                        # Get d3fields features for this timestep
+                        d3fields_pts_t = aggr_pts_feats[t_idx]  # (N_d3fields, C_total)
+                        
+                        # Extract components
+                        d3fields_xyz = d3fields_pts_t[:, :3].astype(np.float32)  # (N_d3fields, 3)
+                        d3fields_features = d3fields_pts_t[:, 3:].astype(np.float32)  # (N_d3fields, C_features)
+                        
+                        N_d3fields = d3fields_xyz.shape[0]
+                        N_tactile = tactile_coords.shape[0]
+                        C_features = d3fields_features.shape[1]
+                        C_ff = tactile_ff.shape[1]
+                        
+                        # Create zero-filled channels
+                        d3fields_ff_zeros = np.zeros((N_d3fields, C_ff), dtype=np.float32)
+                        tactile_features_zeros = np.zeros((N_tactile, C_features), dtype=np.float32)
+                        
+                        # Combine features
+                        d3fields_combined = np.concatenate([d3fields_xyz, d3fields_features, d3fields_ff_zeros], axis=1).astype(np.float32)
+                        tactile_combined = np.concatenate([tactile_coords, tactile_features_zeros, tactile_ff], axis=1).astype(np.float32)
+                        
+                        # Merge all points
+                        merged_pts_t = np.concatenate([d3fields_combined, tactile_combined], axis=0).astype(np.float32)
+                        merged_pts_feats_list.append(merged_pts_t)
+                    
+                    # Stack back to (T, N_total, C_total)
+                    aggr_pts_feats = np.stack(merged_pts_feats_list, axis=0)
+                    
+                    # Print summary (only once, check if this is first call)
+                    if T > 0:
+                        print(f"✅ Merged tactile into d3fields for evaluation:")
+                        print(f"   Points: {N_d3fields} (d3fields) + {N_tactile} (tactile) = {N_d3fields + N_tactile} total")
+                        print(f"   Channels: 3 (xyz) + {C_features} (d3fields features) + {C_ff} (tactile with history) = {3 + C_features + C_ff} total")
+                        if tactile_history_enabled and tactile_history_length > 1:
+                            C_ff_base = 3 if reference_tactile_use_difference else 6
+                            print(f"   Tactile history: {tactile_history_length} timesteps × {C_ff_base} base channels = {C_ff} total")
+            
             obs_dict_np[key] = aggr_pts_feats.transpose(0,2,1)
 
     return obs_dict_np

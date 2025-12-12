@@ -6,25 +6,34 @@ This script loads keypoints and moves the robot through a 2-stage trajectory:
 - Grasp: Automatically closes gripper at end of Stage 0 and waits 3 seconds
 - Stage 1: Move (with position/rotation randomization, gripper closed)
 
+Each keypoint can have its own noise levels specified in the JSON file via
+"pos_noise" (position noise in meters) and "rot_noise" (rotation noise in radians).
+If not specified, defaults are used (0.02m and 0.1rad respectively).
+
+Recording workflow:
+1. Press 'h' to home - generates new randomized keypoints and moves robot to randomized first keypoint (3 seconds)
+2. Press 'c' to start recording - begins trajectory execution using cached randomized keypoints
+3. Robot executes continuous trajectory through all stages
+4. Recording auto-stops after reaching final keypoint
+
 The robot automatically:
-- Moves between waypoints at constant speed
+- Generates new randomization each time 'h' is pressed
+- Moves smoothly between waypoints at constant speed (continuous interpolation)
 - Closes gripper after completing Stage 0 (Approach) and waits 3 seconds
 - Keeps gripper closed during Stage 1 (Move)
-- Stops recording 1 second after reaching the final keypoint
+- Stops recording 2 seconds after reaching the final keypoint
 
 Usage:
 python follow_keypoints_with_randomization.py \
     -k <keypoints_file.json> \
     -o <data_save_dir> \
     --robot_ip <ip_of_franka> \
-    --pos_noise 0.02 \
-    --rot_noise 0.1 \
     --movement_speed 0.05
 
 Commands (type and press Enter):
-- c: Start recording episode
+- h: Home to randomized first keypoint (generates new noise for all keypoints)
+- c: Start recording episode (uses cached randomized keypoints from last 'h')
 - s: Stop recording episode (or auto-stops after final keypoint)
-- h: Home to first keypoint
 - space: Manually move to next stage (optional)
 - reset: Reset to beginning of trajectory
 - q: Exit program
@@ -73,7 +82,7 @@ robot_state = {
 }
 
 def load_keypoints(keypoints_file):
-    """Load keypoints from JSON file"""
+    """Load keypoints from JSON file with per-keypoint noise levels"""
     with open(keypoints_file, 'r') as f:
         data = json.load(f)
     
@@ -84,7 +93,10 @@ def load_keypoints(keypoints_file):
             for kp in data['keypoints'][stage_key]:
                 ee_pose = np.array(kp['ee_pose'])
                 gripper_pos = kp['gripper_pos']
-                keypoints[stage_id].append((ee_pose, gripper_pos))
+                # Read per-keypoint noise levels (use defaults if not specified)
+                pos_noise = kp.get('pos_noise', 0.02)  # default 0.02m
+                rot_noise = kp.get('rot_noise', 0.1)   # default 0.1rad
+                keypoints[stage_id].append((ee_pose, gripper_pos, pos_noise, rot_noise))
     
     return keypoints, data.get('metadata', {})
 
@@ -168,7 +180,7 @@ def terminal_input_thread():
     print("ROBOT KEYPOINT FOLLOWER WITH RANDOMIZATION")
     print("="*60)
     print("Commands:")
-    print("  c       - Start recording episode")
+    print("  c       - Move to start and begin recording episode")
     print("  s       - Stop recording episode")
     print("  space   - Next stage")
     print("  h       - Home to first keypoint")
@@ -203,6 +215,7 @@ def process_commands(key_counter, env, output_dir):
                 robot_state['stop'] = True
                 print('🔴 Quitting...')
             elif command == 'c':
+                # Start recording immediately (robot should already be at home position)
                 env.start_episode(time.time(), curr_outdir=output_dir)
                 key_counter.clear()
                 robot_state['recording'] = True
@@ -253,6 +266,7 @@ def process_commands(key_counter, env, output_dir):
             robot_state['stop'] = True
             print('🔴 Quitting...')
         elif key_stroke == KeyCode(char='c'):
+            # Start recording immediately (robot should already be at home position)
             env.start_episode(time.time(), curr_outdir=output_dir)
             key_counter.clear()
             robot_state['recording'] = True
@@ -296,10 +310,10 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
         current_obs: Current robot observations
         target_pose: Target EE pose [x, y, z, rx, ry, rz]
         target_gripper: Target gripper position
-        stage_keypoints: All keypoints for current stage
+        stage_keypoints: All keypoints for current stage (each: pose, gripper, pos_noise, rot_noise)
         keypoint_idx: Current keypoint index
-        pos_noise_std: Position noise standard deviation
-        rot_noise_std: Rotation noise standard deviation
+        pos_noise_std: Position noise standard deviation for this keypoint
+        rot_noise_std: Rotation noise standard deviation for this keypoint
         randomize_per_episode: If True, use same noise for entire episode
         episode_noise_cache: Cache for episode-level noise
         movement_speed: Speed for moving between keypoints (m/s)
@@ -310,7 +324,7 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
     # Get cache key
     cache_key = (robot_state['stage'], keypoint_idx)
     
-    # Apply noise if enabled
+    # Apply noise if enabled (using per-keypoint noise levels passed as parameters)
     if pos_noise_std > 0 or rot_noise_std > 0:
         if randomize_per_episode:
             # Use cached noise for entire episode
@@ -336,18 +350,18 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
     
     if at_final_keypoint:
         # At or past the final keypoint of this stage
-        final_pose, final_gripper = stage_keypoints[-1]
+        final_pose, final_gripper, final_pos_noise, final_rot_noise = stage_keypoints[-1]
         
-        # Apply noise to final target
-        if pos_noise_std > 0 or rot_noise_std > 0:
+        # Apply noise to final target using per-keypoint noise levels
+        if final_pos_noise > 0 or final_rot_noise > 0:
             cache_key = (robot_state['stage'], num_keypoints - 1)
             if randomize_per_episode:
                 if cache_key not in episode_noise_cache:
                     episode_noise_cache[cache_key] = add_noise_to_pose(
-                        final_pose, pos_noise_std, rot_noise_std)
+                        final_pose, final_pos_noise, final_rot_noise)
                 noisy_final_pose = episode_noise_cache[cache_key]
             else:
-                noisy_final_pose = add_noise_to_pose(final_pose, pos_noise_std, rot_noise_std)
+                noisy_final_pose = add_noise_to_pose(final_pose, final_pos_noise, final_rot_noise)
         else:
             noisy_final_pose = final_pose
         
@@ -404,8 +418,8 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
             # Calculate total path length through all waypoints
             total_distance = 0.0
             for i in range(num_keypoints - 1):
-                kp1_pose, _ = stage_keypoints[i]
-                kp2_pose, _ = stage_keypoints[i + 1]
+                kp1_pose, _, _, _ = stage_keypoints[i]
+                kp2_pose, _, _, _ = stage_keypoints[i + 1]
                 segment_dist = np.linalg.norm(kp2_pose[:3] - kp1_pose[:3])
                 total_distance += segment_dist
             
@@ -418,26 +432,26 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
         # Calculate cumulative distances to determine which segment we're in
         cumulative_distances = [0.0]
         for i in range(num_keypoints - 1):
-            kp1_pose, _ = stage_keypoints[i]
-            kp2_pose, _ = stage_keypoints[i + 1]
-            # Apply noise to both keypoints
+            kp1_pose, _, kp1_pos_noise, kp1_rot_noise = stage_keypoints[i]
+            kp2_pose, _, kp2_pos_noise, kp2_rot_noise = stage_keypoints[i + 1]
+            # Apply noise to both keypoints using per-keypoint noise levels
             cache_key1 = (robot_state['stage'], i)
             cache_key2 = (robot_state['stage'], i + 1)
             
-            if pos_noise_std > 0 or rot_noise_std > 0:
+            if kp1_pos_noise > 0 or kp1_rot_noise > 0 or kp2_pos_noise > 0 or kp2_rot_noise > 0:
                 if randomize_per_episode:
                     if cache_key1 not in episode_noise_cache:
-                        episode_noise_cache[cache_key1] = add_noise_to_pose(kp1_pose, pos_noise_std, rot_noise_std)
+                        episode_noise_cache[cache_key1] = add_noise_to_pose(kp1_pose, kp1_pos_noise, kp1_rot_noise)
                     if cache_key2 not in episode_noise_cache:
-                        episode_noise_cache[cache_key2] = add_noise_to_pose(kp2_pose, pos_noise_std, rot_noise_std)
+                        episode_noise_cache[cache_key2] = add_noise_to_pose(kp2_pose, kp2_pos_noise, kp2_rot_noise)
                     noisy_kp1 = episode_noise_cache[cache_key1]
                     noisy_kp2 = episode_noise_cache[cache_key2]
                 else:
                     # For per-iteration randomization, use the same noise for both endpoints during this iteration
                     if i == 0:
-                        episode_noise_cache[cache_key1] = add_noise_to_pose(kp1_pose, pos_noise_std, rot_noise_std)
+                        episode_noise_cache[cache_key1] = add_noise_to_pose(kp1_pose, kp1_pos_noise, kp1_rot_noise)
                     noisy_kp1 = episode_noise_cache.get(cache_key1, kp1_pose)
-                    noisy_kp2 = add_noise_to_pose(kp2_pose, pos_noise_std, rot_noise_std)
+                    noisy_kp2 = add_noise_to_pose(kp2_pose, kp2_pos_noise, kp2_rot_noise)
                     episode_noise_cache[cache_key2] = noisy_kp2
             else:
                 noisy_kp1 = kp1_pose
@@ -469,8 +483,8 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
             segment_progress = 0.0
         
         # Get the two keypoints for this segment
-        kp1_pose, kp1_gripper = stage_keypoints[segment_idx]
-        kp2_pose, kp2_gripper = stage_keypoints[segment_idx + 1]
+        kp1_pose, kp1_gripper, _, _ = stage_keypoints[segment_idx]
+        kp2_pose, kp2_gripper, _, _ = stage_keypoints[segment_idx + 1]
         
         # Get noisy versions
         cache_key1 = (robot_state['stage'], segment_idx)
@@ -535,14 +549,12 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving command to executing on Robot in Sec")
 @click.option('--save_viz_interval', default=30, type=int, help="Save visualization every N frames")
-@click.option('--pos_noise', '-pn', default=0.02, type=float, help="Position noise std dev (meters)")
-@click.option('--rot_noise', '-rn', default=0.1, type=float, help="Rotation noise std dev (radians)")
 @click.option('--randomize_per_episode', is_flag=True, default=True, help="Use same randomization for entire episode")
 @click.option('--interpolation_steps', default=50, type=int, help="Number of steps to interpolate between keypoints")
 @click.option('--auto_advance', is_flag=True, default=False, help="Automatically advance through keypoints")
 @click.option('--movement_speed', default=0.05, type=float, help="Speed for moving between keypoints (m/s)")
 def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, frequency, 
-         command_latency, save_viz_interval, pos_noise, rot_noise, randomize_per_episode,
+         command_latency, save_viz_interval, randomize_per_episode,
          interpolation_steps, auto_advance, movement_speed):
     
     # Load keypoints
@@ -561,7 +573,7 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
         print(f"   Stage {stage_id} ({stage_names[stage_id]}): {len(keypoints[stage_id])} keypoints")
     print(f"💡 Gripper will close automatically after Stage 0 (Approach)")
     
-    print(f"🎲 Randomization: pos_noise={pos_noise}m, rot_noise={rot_noise}rad")
+    print(f"🎲 Using per-keypoint noise levels from JSON file")
     print(f"🔁 Randomize per episode: {randomize_per_episode}")
     print(f"🚶 Movement speed: {movement_speed} m/s (constant speed between waypoints)")
     
@@ -598,7 +610,7 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                 # Get first keypoint as home position
                 first_stage_keypoints = keypoints[0]
                 if len(first_stage_keypoints) > 0:
-                    home_pose, home_gripper = first_stage_keypoints[0]
+                    home_pose, home_gripper, _, _ = first_stage_keypoints[0]
                     home_pose_full = np.append(home_pose, home_gripper)
                     print(f"🏠 Home position set to first keypoint: pos=[{home_pose[0]:.3f}, {home_pose[1]:.3f}, {home_pose[2]:.3f}], gripper={home_gripper:.3f}")
                 else:
@@ -633,16 +645,38 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                     # Handle homing request
                     if robot_state['home_requested']:
                         if home_pose_full is not None and not robot_state['homing']:
-                            # Start homing motion
-                            current_pose_full = obs['ee_pose'][-1].copy()  # Already [x, y, z, rx, ry, rz, gripper]
+                            # Generate new randomized noise for ALL keypoints (both stages)
+                            print('🎲 Generating new randomized keypoints...')
+                            episode_noise_cache.clear()
+                            for stage_id in [0, 1]:
+                                stage_kps = keypoints[stage_id]
+                                for i in range(len(stage_kps)):
+                                    kp_pose, _, kp_pos_noise, kp_rot_noise = stage_kps[i]
+                                    if kp_pos_noise > 0 or kp_rot_noise > 0:
+                                        cache_key = (stage_id, i)
+                                        episode_noise_cache[cache_key] = add_noise_to_pose(
+                                            kp_pose, kp_pos_noise, kp_rot_noise)
                             
-                            # Generate smooth trajectory to home (3 seconds at 10Hz = 30 steps for smoother motion)
+                            # Start homing motion to RANDOMIZED first keypoint
+                            current_pose_full = obs['ee_pose'][-1].copy()
+                            
+                            # Get randomized first keypoint from cache
+                            first_kp_pose, first_kp_gripper, _, _ = keypoints[0][0]
+                            cache_key = (0, 0)
+                            if cache_key in episode_noise_cache:
+                                noisy_first_pose = episode_noise_cache[cache_key]
+                            else:
+                                noisy_first_pose = first_kp_pose
+                            
+                            noisy_home_pose_full = np.append(noisy_first_pose, first_kp_gripper)
+                            
+                            # Generate smooth trajectory to randomized home
                             robot_state['homing_trajectory'] = generate_smooth_trajectory(
-                                current_pose_full, home_pose_full, num_steps=30)
+                                current_pose_full, noisy_home_pose_full, num_steps=30)
                             robot_state['homing_step'] = 0
                             robot_state['homing'] = True
-                            print(f'🏠 Starting smooth homing motion to first keypoint...')
-                            print(f'   Current pose shape: {current_pose_full.shape}, Home pose shape: {home_pose_full.shape}')
+                            print(f'🏠 Homing to randomized first keypoint...')
+                            print(f'   Target: [{noisy_first_pose[0]:.3f}, {noisy_first_pose[1]:.3f}, {noisy_first_pose[2]:.3f}]')
                             print(f'   Generated {len(robot_state["homing_trajectory"])} waypoints')
                         
                         robot_state['home_requested'] = False
@@ -679,7 +713,7 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                             robot_state['homing'] = False
                             robot_state['homing_trajectory'] = None
                             robot_state['homing_step'] = 0
-                            print('✅ Homing motion complete')
+                            print('✅ Homing motion complete - ready to record!')
                     
                     # Auto-reset when starting new episode
                     if robot_state['recording']:
@@ -697,7 +731,7 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                         # Check if episode changed (new episode started)
                         if env.episode_id != last_episode_id:
                             last_episode_id = env.episode_id
-                            episode_noise_cache.clear()
+                            # episode_noise_cache.clear()
                             robot_state['stage'] = 0
                             robot_state['keypoint_idx'] = 0
                             robot_state['moving_to_keypoint'] = False
@@ -710,7 +744,7 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                             # If so, immediately target the next keypoint
                             first_stage_kps = keypoints[0]
                             if len(first_stage_kps) > 0:
-                                first_kp_pose, first_kp_gripper = first_stage_kps[0]
+                                first_kp_pose, first_kp_gripper, _, _ = first_stage_kps[0]
                                 current_ee = obs['ee_pose'][-1]
                                 pos_dist = np.linalg.norm(current_ee[:3] - first_kp_pose[:3])
                                 rot_dist = np.linalg.norm(current_ee[3:6] - first_kp_pose[3:6])
@@ -726,7 +760,7 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                     # Get target keypoint
                     if len(stage_keypoints) > 0:
                         kp_idx = min(robot_state['keypoint_idx'], len(stage_keypoints) - 1)
-                        target_pose, target_gripper = stage_keypoints[kp_idx]
+                        target_pose, target_gripper, target_pos_noise, target_rot_noise = stage_keypoints[kp_idx]
                         
                         # If not recording, just maintain current position
                         if not robot_state['recording']:
@@ -739,7 +773,7 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                             # Recording: compute target action with movement
                             actions, noisy_target_pose = compute_target_action(
                                 obs, target_pose, target_gripper, stage_keypoints, kp_idx,
-                                pos_noise, rot_noise, randomize_per_episode, episode_noise_cache, movement_speed
+                                target_pos_noise, target_rot_noise, randomize_per_episode, episode_noise_cache, movement_speed
                             )
                             
                             # Re-fetch stage keypoints in case stage changed during compute_target_action
