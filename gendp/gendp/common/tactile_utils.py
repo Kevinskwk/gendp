@@ -1,32 +1,37 @@
 import sys
 import cv2
 import numpy as np
+import os
 
-sys.path.append('/home/kevin/gendp/GelsightKCL')
+# automatically get the gendp path
+root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+print(f"gendp path: {root_path}")
+
+sys.path.append(os.path.join(root_path, 'GelsightKCL'))
 from A_utility import marker_center #, process_frame
 import find_marker
 
-sys.path.append("/home/kevin/gendp/gsrobotics")
+sys.path.append(os.path.join(root_path, "gsrobotics"))
 from utilities.reconstruction import Reconstruction3D
 
 """ example setting:
 left (sensor 1) setting:
-    N: 9
-    M: 7
+    N: 7
+    M: 9
     fps: 10
-    x0: 37.5
-    y0: 34.5
-    dx: 29.6
-    dy: 28.7
+    x0: 34.5
+    y0: 37.5
+    dx: 28.7
+    dy: 29.6
 
 right (sensor 0) setting:
-    N: 9
-    M: 7
+    N: 7
+    M: 9
     fps: 10
-    x0: 46
-    y0: 40.6
-    dx: 29.1
-    dy: 28.6
+    x0: 40.6
+    y0: 46
+    dx: 28.6
+    dy: 29.1
 """
 
 """
@@ -119,12 +124,19 @@ class TactileProcessor:
             dy_=self.marker_config['dy'])
         
         if ref_img is not None:
-            img = cv2.imread(ref_img)
-            print("Warming up depth estimation with reference image...")
-            for _ in range(51):
-                self.reconstruction.get_depthmap(
-                    image=img,
-                    markers_threshold=(self.marker_mask_min, self.marker_mask_max)
+            try:
+                img = cv2.imread(ref_img)
+            except Exception as e:
+                print(f"Error loading reference image from {ref_img}: {e}")
+                img = None
+            if img is None:
+                pass
+            else:
+                print("Warming up depth estimation with reference image...")
+                for _ in range(51):
+                    self.reconstruction.get_depthmap(
+                        image=img,
+                        markers_threshold=(self.marker_mask_min, self.marker_mask_max)
                 )
             print("Warming up done.")
 
