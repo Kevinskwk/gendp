@@ -169,8 +169,8 @@ class TactileProcessor:
             for j in range(marker_positions.shape[1]):
                 pos = marker_positions[i, j]
                 x, y = int(round(pos[0])), int(round(pos[1]))
-                if 0 <= y < w and 0 <= x < h:
-                    sampled_depths[i, j] = depth_map[x, y]
+                if 0 <= y < h and 0 <= x < w:
+                    sampled_depths[i, j] = depth_map[y, x]
                 else:
                     sampled_depths[i, j] = 0
 
