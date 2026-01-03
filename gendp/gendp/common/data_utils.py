@@ -195,7 +195,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     if "N_obj" in shape_meta['info'] and "N_env" in shape_meta['info']:
         N_obj = shape_meta['info']['N_obj']
         N_env = shape_meta['info']['N_env']
-        print(f"Using separate point counts: N_obj={N_obj}, N_env={N_env}")
+        # print(f"Using separate point counts: N_obj={N_obj}, N_env={N_env}")
     else:
         # Legacy behavior: split N_gripper in half
         N_obj = None
@@ -251,7 +251,11 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     bg_feats_ls = []
     # for t in tqdm(range(T), desc=f'Computing D3Fields'):
     for t in range(T):
-        # print()
+        # Tune extrinsics
+        # extri = extri_seq[t]
+        # pose = np.linalg.inv(extri[2])
+        # pose[0:3, 3] += np.array([-0.025, -0.01, -0.005])  # Adjust position
+        # extri[2] = np.linalg.inv(pose)
         obs = {
             'color': color_seq[t],
             'depth': depth_seq[t],

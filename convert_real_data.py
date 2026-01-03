@@ -6,6 +6,7 @@ This script converts HDF5 files with tactile images to the format expected by
 the contact field training dataset. The output consists of two pickle files per episode:
 1. Main file (episode_name.pkl) containing observations with robot states and tactile data
 2. Contact file (episode_name_contact.pkl) containing object/env point clouds and contact vectors
+3. Wrench plot (episode_name_wrench.png) showing net wrench over time from force estimation
 
 USAGE:
     # Basic conversion
@@ -17,6 +18,8 @@ USAGE:
     
     # With semantic segmentation (more robust than color-based)
     python convert_real_data.py --data_dir /path/to/hdf5_files --output_dir ./data/real_episodes --use_semantic_segmentation
+    
+    # The script will automatically generate wrench plots showing force and moment components over time
 """
 
 import argparse
@@ -55,7 +58,8 @@ from force_estimator import (
     AnalyticalForceEstimator, 
     create_force_estimator,
     estimate_tool_normals,
-    smooth_normals
+    smooth_normals,
+    plot_wrench_history
 )
 
 
@@ -124,7 +128,7 @@ ENV_BOUNDARIES = {
 CONTACT_Z_THRESHOLD = 0.015  # Contact when object is within this distance to z=0.01 plane
 TACTILE_CHANGE_THRESHOLD = 0.001  # Threshold for detecting tactile change (normal force)
 CONTACT_FORCE_SCALE = 100  # Scale factor for converting tactile to contact force magnitude
-CONTACT_MODE = 'threshold'  # 'single', 'top_k', or 'threshold'
+CONTACT_MODE = 'top_k'  # 'single', 'top_k', or 'threshold'
 CONTACT_TOP_K = 5  # For 'top_k' mode
 CONTACT_DEPTH_THRESHOLD = 0.015  # For 'threshold' mode
 
@@ -278,9 +282,6 @@ def detect_contact_with_tactile(obj_points: np.ndarray,
                    np.abs(mean_shear_x_right) + np.abs(mean_shear_y_right) +
                    np.abs(torque_left) + np.abs(torque_right))
     
-    # print("DEBUG: Tactile mean shear left (x,y):", mean_shear_x_left, mean_shear_y_left)
-    # print("DEBUG: Tactile current sum:", current_sum)
-    
     # Check for tactile change if reference frame is available
     has_tactile_change = False
     if prev_tactile_left is not None and prev_tactile_right is not None:
@@ -300,7 +301,6 @@ def detect_contact_with_tactile(obj_points: np.ndarray,
         
         # Check if difference exceeds threshold
         tactile_change = np.abs(current_sum - ref_sum)
-        # print("DEBUG: tactile_change:", tactile_change)
         has_tactile_change = tactile_change > tactile_threshold
     else:
         # No reference frame - just check if current sum exceeds threshold
@@ -394,7 +394,7 @@ def compute_contact_vectors(obj_points: np.ndarray,
     )
     
     if not has_contact:
-        return np.array([]).reshape(0, 8)
+        return np.array([]).reshape(0, 8), None
     
     # Transform coordinates from world frame to gripper frame
     tactile_coord_left_gripper = transform_to_gripper_frame(tactile_coord_left, ee_pose_7d)
@@ -420,11 +420,17 @@ def compute_contact_vectors(obj_points: np.ndarray,
             contact_prob_weights = None
             if prob_weights is not None and len(prob_weights) > 0:
                 contact_prob_weights = prob_weights[contact_indices]
-            
+
+            # Scale tactile forces into calibrated unit (N)
+            DEPTH_SCALE = 100
+            SHEAR_SCALE = 20
+            tactile_force_left_scaled = (tactile_force_left - prev_tactile_left) * np.array([DEPTH_SCALE, SHEAR_SCALE, SHEAR_SCALE])
+            tactile_force_right_scaled = (tactile_force_right - prev_tactile_right) * np.array([DEPTH_SCALE, SHEAR_SCALE, SHEAR_SCALE])
+
             # Compute with analytical estimator
             wrench, contact_forces = force_estimator.compute_contact_forces_from_tactile(
-                tactile_force_left,
-                tactile_force_right,
+                tactile_force_left_scaled,
+                tactile_force_right_scaled,
                 tactile_coord_left_gripper,
                 tactile_coord_right_gripper,
                 contact_points_gripper,  # (M, 3)
@@ -432,10 +438,16 @@ def compute_contact_vectors(obj_points: np.ndarray,
                 prob_weights=contact_prob_weights
             )
         else:
+            # Scale tactile forces into calibrated unit (N)
+            DEPTH_SCALE = 100
+            SHEAR_SCALE = 20
+            tactile_force_left_scaled = (tactile_force_left - prev_tactile_left) * np.array([DEPTH_SCALE, SHEAR_SCALE, SHEAR_SCALE])
+            tactile_force_right_scaled = (tactile_force_right - prev_tactile_right) * np.array([DEPTH_SCALE, SHEAR_SCALE, SHEAR_SCALE])
+
             # Simple estimator
             wrench, contact_forces = force_estimator.compute_contact_forces_from_tactile(
-                tactile_force_left,
-                tactile_force_right,
+                tactile_force_left_scaled,
+                tactile_force_right_scaled,
                 tactile_coord_left_gripper,
                 tactile_coord_right_gripper,
                 contact_points_gripper  # (M, 3)
@@ -484,9 +496,11 @@ def compute_contact_vectors(obj_points: np.ndarray,
         
         contact_vectors = np.array(contact_vectors)  # (M, 8)
     
-    print(f"DEBUG: Detected {len(contact_vectors)} contact point(s) with forces: {[np.linalg.norm(cv[6]) for cv in contact_vectors]}")
-    
-    return contact_vectors
+    # Return both contact vectors and wrench (if force_estimator was used)
+    if force_estimator is not None:
+        return contact_vectors, wrench
+    else:
+        return contact_vectors, None
 
 
 def convert_hdf5_to_dataset(hdf5_path: str,
@@ -515,7 +529,6 @@ def convert_hdf5_to_dataset(hdf5_path: str,
         max_steps: Maximum number of steps to process
         fusion: D3Fields Fusion object for semantic segmentation
         kin_helper: Kinematics helper for robot state
-        config: Optional configuration dictionary for reference tactile and other settings
         include_front_rgb: Whether to include front RGB camera image in the output (default: True)
         force_estimator_config: Dictionary with force estimator settings:
             - 'method': 'simple' or 'analytical'
@@ -564,6 +577,7 @@ def convert_hdf5_to_dataset(hdf5_path: str,
     object_point_clouds = []
     env_point_clouds = []
     contact_vectors_list = []
+    wrench_history = []  # Track wrench over time
     
     # Point cloud boundaries for filtering
     boundaries = {
@@ -790,10 +804,10 @@ def convert_hdf5_to_dataset(hdf5_path: str,
         min_z = np.min(object_pointcloud[:, 2]) if len(object_pointcloud) > 0 else float('inf')
         is_close = min_z < CONTACT_Z_THRESHOLD
         
-        # Reset reference frame when object is not close to ground plane
+        # Update reference frame when object is not close to ground plane
         if not is_close:
-            prev_tactile_left = None
-            prev_tactile_right = None
+            prev_tactile_left = force_field_left.copy()
+            prev_tactile_right = force_field_right.copy()
         
         # Extract normals from object point cloud if using analytical estimator
         obj_normals = None
@@ -831,7 +845,7 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             epsilon=force_estimator_epsilon
         )
         
-        contact_vecs = compute_contact_vectors(
+        contact_vecs, wrench = compute_contact_vectors(
             object_pointcloud,
             force_field_left,
             force_field_right,
@@ -849,16 +863,9 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             prob_weights=None  # TODO: Extract contact probabilities if available
         )
         
-        # Update reference tactile frame (only if object is close)
-        # This becomes the reference for the next frame's contact detection
-        if is_close:
-            if prev_tactile_left is None:
-                # First time object gets close - set initial reference
-                print("DEBUG: Setting reference tactile frame at step", step_idx)
-                prev_tactile_left = force_field_left.copy()
-                prev_tactile_right = force_field_right.copy()
-            # Note: We keep the same reference until object moves away
-            # The reference is NOT updated every frame, only reset when object leaves
+        # Store wrench for plotting
+        if wrench is not None:
+            wrench_history.append(wrench)
         
         # Convert force fields to tensors (store RAW data - dataset.py will handle reference processing)
         force_field_left_tensor = torch.from_numpy(force_field_left).float()
@@ -922,6 +929,15 @@ def convert_hdf5_to_dataset(hdf5_path: str,
     print(f"  - Environment point clouds: {len(env_point_clouds)} timesteps, shape {env_pcd_sampled.shape}")
     print(f"  - Contact vectors: {len(contact_vectors_list)} timesteps")
     
+    # Plot wrench history if available
+    if len(wrench_history) > 0:
+        wrench_plot_path = output_dir / f"{episode_name}_wrench.png"
+        plot_wrench_history(
+            wrench_history,
+            str(wrench_plot_path),
+            title=f"Net Wrench Over Time - {episode_name}"
+        )
+    
     return str(main_file_path), str(contact_file_path)
 
 
@@ -930,7 +946,6 @@ def main():
     parser.add_argument('--hdf5_paths', nargs='+', help='Paths to HDF5 files to convert')
     parser.add_argument('--data_dir', type=str, help='Directory containing HDF5 files')
     parser.add_argument('--output_dir', type=str, required=True, help='Output directory for converted files')
-    parser.add_argument('--config', type=str, default=None, help='Path to config YAML file for reference tactile and other settings')
     parser.add_argument('--max_steps', type=int, default=None, help='Maximum number of steps to process per episode')
     parser.add_argument('--num_object_points', type=int, default=256, help='Number of points for object point cloud')
     parser.add_argument('--num_env_points', type=int, default=512, help='Number of points for environment point cloud')
@@ -943,7 +958,7 @@ def main():
     parser.add_argument('--disable_tactile_gpu', action='store_true', help='Disable GPU for tactile processing')
     parser.add_argument('--verify', action='store_true', help='Verify converted files with ContactFieldDataset')
     parser.add_argument('--tactile_ref_img_left', type=str, default='./data/ref_imgs/tactile_left_rgb.png', help='Path to reference tactile image for left gripper')
-    parser.add_argument('--tactile_ref_img_right', type=str, default='./data/ref_imgs/tactile_right_rgb.png', help='Path to reference tactile image for right gripper')
+    parser.add_argument('--tactile_ref_img_right', type=str, default='./data/ref_imgs/tactile_right_rgb_old.png', help='Path to reference tactile image for right gripper')
     parser.add_argument('--force_estimator', type=str, default='simple', choices=['simple', 'analytical'], 
                        help='Force estimation method: simple (pseudo-inverse) or analytical (cvxpy optimization)')
     parser.add_argument('--force_lambda', type=float, default=0.01, help='Regularization weight for analytical force estimator')
@@ -995,24 +1010,6 @@ def main():
     print(f"\n📁 Output directories:")
     print(f"  Train: {train_dir}")
     print(f"  Test:  {test_dir}")
-    
-    # Load config file if specified
-    config = None
-    if args.config:
-        print(f"Loading configuration from {args.config}...")
-        with open(args.config, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        # Print reference tactile settings if enabled
-        ref_config = config.get('data', {}).get('reference_tactile', {})
-        if ref_config.get('enabled', False):
-            print("Reference tactile processing enabled:")
-            print(f"  - Method: {ref_config.get('method', 'median')}")
-            print(f"  - Steps: {ref_config.get('n_steps', 5)}")
-            print(f"  - Use difference: {ref_config.get('use_difference', True)}")
-    else:
-        # Config will be None if not specified
-        config = None
     
     print(f"\n⚙️  Force Estimator Configuration:")
     print(f"  Method: {args.force_estimator}")

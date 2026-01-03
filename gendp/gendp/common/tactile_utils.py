@@ -73,7 +73,9 @@ class TactileProcessor:
                  marker_mask_max=70,
                  # Scaling and clipping parameters for contact field inference
                  apply_scaling=False,  # Set to True to enable scaling/clipping for contact field
-                 scale_factor=0.15,    # Scale DOWN real-world data to match pre-training distribution
+                 shear_scale=0.02,
+                 depth_scale=0.1,
+                #  scale_factor=0.15,    # Scale DOWN real-world data to match pre-training distribution
                  clip_range=(-10.0, 10.0)):
         
         self.marker_config = marker_config
@@ -85,7 +87,8 @@ class TactileProcessor:
         # Pre-training: raw values ×1000 → range ~[-3, 3]
         # Real-world: raw values are already large → need to scale DOWN by ~0.15 to match
         self.apply_scaling = apply_scaling
-        self.scale_factor = scale_factor
+        self.shear_scale = shear_scale
+        self.depth_scale = depth_scale
         self.clip_range = clip_range
         
         # Pre-clipping thresholds (based on 99.5th percentile to remove extreme outliers)
@@ -249,10 +252,10 @@ class TactileProcessor:
         # Pre-training 99th percentiles: depth ~1.19, dx ~1.77, dy ~1.24 (after ×1000 scaling)
         # Real-world 99th percentiles: depth ~10.77, dx ~6.11, dy ~19.93
         # Use same scale factor (0.15) for all channels
-        depth = depth * self.scale_factor
-        dy = dy * self.scale_factor
-        dx = dx * self.scale_factor
-        
+        depth = depth * self.depth_scale
+        dy = dy * self.shear_scale
+        dx = dx * self.shear_scale
+
         # Step 3: Final clip to model input range
         # Ensures all values are in [-10, 10] as expected by the model
         depth = np.clip(depth, self.clip_range[0], self.clip_range[1])

@@ -10,6 +10,8 @@ import numpy as np
 import open3d as o3d
 from typing import Tuple, List, Optional
 from abc import ABC, abstractmethod
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 
 
 def skew_symmetric(v: np.ndarray) -> np.ndarray:
@@ -93,25 +95,70 @@ class ForceEstimator(ABC):
     Provides a unified interface for different force estimation methods.
     """
     
-    @abstractmethod
     def compute_net_wrench(self,
                           tactile_force_left: np.ndarray,
                           tactile_force_right: np.ndarray,
                           tactile_coord_left: np.ndarray,
-                          tactile_coord_right: np.ndarray) -> np.ndarray:
+                          tactile_coord_right: np.ndarray,
+                          outlier_threshold: float = 3.0) -> np.ndarray:
         """
-        Calculate the net wrench from tactile sensor data.
+        Calculate the net wrench from tactile sensor data with outlier filtering.
         
         Args:
             tactile_force_left: (7, 9, 3) left tactile force field [fx, fy, fz]
             tactile_force_right: (7, 9, 3) right tactile force field [fx, fy, fz]
             tactile_coord_left: (7, 9, 3) left tactile marker coordinates in gripper frame
             tactile_coord_right: (7, 9, 3) right tactile marker coordinates in gripper frame
+            outlier_threshold: Threshold in MAD units for outlier detection (default: 3.0)
             
         Returns:
             (6,) wrench vector [Fx, Fy, Fz, Mx, My, Mz]
         """
-        pass
+        # Flatten the tactile arrays
+        forces_left = tactile_force_left.reshape(-1, 3)  # (63, 3)
+        forces_right = tactile_force_right.reshape(-1, 3)  # (63, 3)
+        coords_left = tactile_coord_left.reshape(-1, 3)  # (63, 3)
+        coords_right = tactile_coord_right.reshape(-1, 3)  # (63, 3)
+        
+        # Combine left and right
+        all_forces = np.vstack([forces_left, forces_right])  # (126, 3)
+        all_coords = np.vstack([coords_left, coords_right])  # (126, 3)
+        
+        # Filter outliers using Median Absolute Deviation (MAD) method
+        # This is more robust than z-score for non-normal distributions
+        force_magnitudes = np.linalg.norm(all_forces, axis=1)  # (126,)
+        median = np.median(force_magnitudes)
+        mad = np.median(np.abs(force_magnitudes - median))
+        
+        # Modified z-score = 0.6745 * (x - median) / MAD
+        # Use threshold to identify outliers (typically 3.0 or 3.5)
+        if mad > 1e-8:  # Avoid division by zero
+            modified_z_scores = 0.6745 * (force_magnitudes - median) / mad
+            inlier_mask = np.abs(modified_z_scores) <= outlier_threshold
+        else:
+            # If MAD is too small, all values are similar - keep all
+            inlier_mask = np.ones(len(force_magnitudes), dtype=bool)
+        
+        # Filter forces and coordinates
+        filtered_forces = all_forces[inlier_mask]
+        filtered_coords = all_coords[inlier_mask]
+        
+        # Debug: report outliers if any were filtered
+        n_outliers = np.sum(~inlier_mask)
+        if n_outliers > 0:
+            print(f"DEBUG: Filtered {n_outliers}/{len(all_forces)} outlier force measurements")
+        
+        # Calculate total force: F_total = sum(f_jk)
+        F_total = np.sum(filtered_forces, axis=0)  # (3,)
+        
+        # Calculate total moment: M_total = sum(p_jk × f_jk)
+        M_total = np.zeros(3)
+        for p, f in zip(filtered_coords, filtered_forces):
+            M_total += np.cross(p, f)
+        
+        # Return 6D wrench [F, M]
+        wrench = np.concatenate([F_total, M_total])
+        return wrench
     
     @abstractmethod
     def estimate_contact_forces(self,
@@ -159,8 +206,10 @@ class ForceEstimator(ABC):
             tactile_force_left,
             tactile_force_right,
             tactile_coord_left,
-            tactile_coord_right
+            tactile_coord_right,
+            outlier_threshold=100,
         )
+        print("DEBUG: Computed wrench:", wrench)
         
         # Estimate forces at contact points
         forces = self.estimate_contact_forces(wrench, contact_points, **kwargs)
@@ -179,45 +228,6 @@ class SimpleForceEstimator(ForceEstimator):
     def __init__(self):
         """Initialize the force estimator."""
         pass
-    
-    def compute_net_wrench(self,
-                          tactile_force_left: np.ndarray,
-                          tactile_force_right: np.ndarray,
-                          tactile_coord_left: np.ndarray,
-                          tactile_coord_right: np.ndarray) -> np.ndarray:
-        """
-        Calculate the net wrench from tactile sensor data.
-        
-        Args:
-            tactile_force_left: (7, 9, 3) left tactile force field [fx, fy, fz]
-            tactile_force_right: (7, 9, 3) right tactile force field [fx, fy, fz]
-            tactile_coord_left: (7, 9, 3) left tactile marker coordinates in gripper frame
-            tactile_coord_right: (7, 9, 3) right tactile marker coordinates in gripper frame
-            
-        Returns:
-            (6,) wrench vector [Fx, Fy, Fz, Mx, My, Mz]
-        """
-        # Flatten the tactile arrays
-        forces_left = tactile_force_left.reshape(-1, 3)  # (63, 3)
-        forces_right = tactile_force_right.reshape(-1, 3)  # (63, 3)
-        coords_left = tactile_coord_left.reshape(-1, 3)  # (63, 3)
-        coords_right = tactile_coord_right.reshape(-1, 3)  # (63, 3)
-        
-        # Combine left and right
-        all_forces = np.vstack([forces_left, forces_right])  # (126, 3)
-        all_coords = np.vstack([coords_left, coords_right])  # (126, 3)
-        
-        # Calculate total force: F_total = sum(f_jk)
-        F_total = np.sum(all_forces, axis=0)  # (3,)
-        
-        # Calculate total moment: M_total = sum(p_jk × f_jk)
-        M_total = np.zeros(3)
-        for p, f in zip(all_coords, all_forces):
-            M_total += np.cross(p, f)
-        
-        # Return 6D wrench [F, M]
-        wrench = np.concatenate([F_total, M_total])
-        return wrench
     
     def construct_grasp_matrix(self, contact_points: np.ndarray) -> np.ndarray:
         """
@@ -312,45 +322,6 @@ class AnalyticalForceEstimator(ForceEstimator):
                 "cvxpy is required for AnalyticalForceEstimator. "
                 "Install it with: pip install cvxpy"
             )
-    
-    def compute_net_wrench(self,
-                          tactile_force_left: np.ndarray,
-                          tactile_force_right: np.ndarray,
-                          tactile_coord_left: np.ndarray,
-                          tactile_coord_right: np.ndarray) -> np.ndarray:
-        """
-        Calculate the net wrench from tactile sensor data.
-        
-        Args:
-            tactile_force_left: (7, 9, 3) left tactile force field [fx, fy, fz]
-            tactile_force_right: (7, 9, 3) right tactile force field [fx, fy, fz]
-            tactile_coord_left: (7, 9, 3) left tactile marker coordinates in gripper frame
-            tactile_coord_right: (7, 9, 3) right tactile marker coordinates in gripper frame
-            
-        Returns:
-            (6,) wrench vector [Fx, Fy, Fz, Mx, My, Mz]
-        """
-        # Flatten the tactile arrays
-        forces_left = tactile_force_left.reshape(-1, 3)  # (63, 3)
-        forces_right = tactile_force_right.reshape(-1, 3)  # (63, 3)
-        coords_left = tactile_coord_left.reshape(-1, 3)  # (63, 3)
-        coords_right = tactile_coord_right.reshape(-1, 3)  # (63, 3)
-        
-        # Combine left and right
-        all_forces = np.vstack([forces_left, forces_right])  # (126, 3)
-        all_coords = np.vstack([coords_left, coords_right])  # (126, 3)
-        
-        # Calculate total force: F_total = sum(f_jk)
-        F_total = np.sum(all_forces, axis=0)  # (3,)
-        
-        # Calculate total moment: M_total = sum(p_jk × f_jk)
-        M_total = np.zeros(3)
-        for p, f in zip(all_coords, all_forces):
-            M_total += np.cross(p, f)
-        
-        # Return 6D wrench [F, M]
-        wrench = np.concatenate([F_total, M_total])
-        return wrench
     
     def construct_grasp_matrix(self, 
                               voxel_pcd: np.ndarray, 
@@ -494,3 +465,80 @@ def create_force_estimator(method: str = 'simple', **kwargs) -> ForceEstimator:
     else:
         raise ValueError(f"Unknown force estimation method: {method}")
 
+def plot_wrench_history(wrenches: List[np.ndarray], 
+                        output_path: str,
+                        title: str = "Net Wrench Over Time"):
+    """
+    Plot the net wrench (force and moment) over time.
+    
+    Args:
+        wrenches: List of (6,) wrench vectors [Fx, Fy, Fz, Mx, My, Mz]
+        output_path: Path to save the plot
+        title: Title for the plot
+    """
+    if len(wrenches) == 0:
+        print("Warning: No wrench data to plot")
+        return
+    
+    wrenches_array = np.array(wrenches)  # (T, 6)
+    timesteps = np.arange(len(wrenches))
+    
+    # Create figure with subplots
+    fig = plt.figure(figsize=(14, 10))
+    gs = GridSpec(3, 2, figure=fig, hspace=0.3, wspace=0.3)
+    
+    fig.suptitle(title, fontsize=16, fontweight='bold')
+    
+    # Force components (top row)
+    ax_fx = fig.add_subplot(gs[0, 0])
+    ax_fx.plot(timesteps, wrenches_array[:, 0], 'r-', linewidth=2, label='Fx')
+    ax_fx.set_ylabel('Force (N)', fontsize=12)
+    ax_fx.set_title('Force X', fontsize=14, fontweight='bold')
+    ax_fx.grid(True, alpha=0.3)
+    ax_fx.legend()
+    
+    ax_fy = fig.add_subplot(gs[0, 1])
+    ax_fy.plot(timesteps, wrenches_array[:, 1], 'g-', linewidth=2, label='Fy')
+    ax_fy.set_ylabel('Force (N)', fontsize=12)
+    ax_fy.set_title('Force Y', fontsize=14, fontweight='bold')
+    ax_fy.grid(True, alpha=0.3)
+    ax_fy.legend()
+    
+    ax_fz = fig.add_subplot(gs[1, 0])
+    ax_fz.plot(timesteps, wrenches_array[:, 2], 'b-', linewidth=2, label='Fz')
+    ax_fz.set_ylabel('Force (N)', fontsize=12)
+    ax_fz.set_xlabel('Timestep', fontsize=12)
+    ax_fz.set_title('Force Z', fontsize=14, fontweight='bold')
+    ax_fz.grid(True, alpha=0.3)
+    ax_fz.legend()
+    
+    # Moment components (bottom row)
+    ax_mx = fig.add_subplot(gs[1, 1])
+    ax_mx.plot(timesteps, wrenches_array[:, 3], 'c-', linewidth=2, label='Mx')
+    ax_mx.set_ylabel('Moment (Nm)', fontsize=12)
+    ax_mx.set_xlabel('Timestep', fontsize=12)
+    ax_mx.set_title('Moment X', fontsize=14, fontweight='bold')
+    ax_mx.grid(True, alpha=0.3)
+    ax_mx.legend()
+    
+    ax_my = fig.add_subplot(gs[2, 0])
+    ax_my.plot(timesteps, wrenches_array[:, 4], 'm-', linewidth=2, label='My')
+    ax_my.set_ylabel('Moment (Nm)', fontsize=12)
+    ax_my.set_xlabel('Timestep', fontsize=12)
+    ax_my.set_title('Moment Y', fontsize=14, fontweight='bold')
+    ax_my.grid(True, alpha=0.3)
+    ax_my.legend()
+    
+    ax_mz = fig.add_subplot(gs[2, 1])
+    ax_mz.plot(timesteps, wrenches_array[:, 5], 'y-', linewidth=2, label='Mz')
+    ax_mz.set_ylabel('Moment (Nm)', fontsize=12)
+    ax_mz.set_xlabel('Timestep', fontsize=12)
+    ax_mz.set_title('Moment Z', fontsize=14, fontweight='bold')
+    ax_mz.grid(True, alpha=0.3)
+    ax_mz.legend()
+    
+    # Save figure
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Wrench plot saved to: {output_path}")
