@@ -29,7 +29,7 @@ MASTER_GRIPPER_POSITION_CLOSE = 0.01244
 PUPPET_GRIPPER_POSITION_OPEN = 0.05800
 PUPPET_GRIPPER_POSITION_CLOSE = 0.01844
 
-# Gripper joint limits (qpos[6])gendp.
+# Gripper joint limits (qpos[6])
 MASTER_GRIPPER_JOINT_OPEN = 0.3083
 MASTER_GRIPPER_JOINT_CLOSE = -0.6842
 PUPPET_GRIPPER_JOINT_OPEN = 1.4910
@@ -61,7 +61,7 @@ MASTER_GRIPPER_JOINT_MID = (MASTER_GRIPPER_JOINT_OPEN + MASTER_GRIPPER_JOINT_CLO
 
 def save_dict_to_hdf5(dic, config_dict, filename, attr_dict=None):
     """
-    ....
+    Save dictionary to HDF5 file.
     """
     with h5py.File(filename, 'w') as h5file:
         if attr_dict is not None:
@@ -71,11 +71,10 @@ def save_dict_to_hdf5(dic, config_dict, filename, attr_dict=None):
 
 def recursively_save_dict_contents_to_group(h5file, path, dic, config_dict):
     """
-    ....
+    Recursively save dictionary contents to HDF5 group.
     """
     for key, item in dic.items():
         if isinstance(item, np.ndarray):
-            # h5file[path + key] = item
             if key not in config_dict:
                 config_dict[key] = {}
             dset = h5file.create_dataset(path + key, shape=item.shape, **config_dict[key])
@@ -89,21 +88,18 @@ def recursively_save_dict_contents_to_group(h5file, path, dic, config_dict):
 
 def load_dict_from_hdf5(filename):
     """
-    ....
+    Load dictionary from HDF5 file.
     """
-    # with h5py.File(filename, 'r') as h5file:
-    #     return recursively_load_dict_contents_from_group(h5file, '/')
     h5file = h5py.File(filename, 'r')
     return recursively_load_dict_contents_from_group(h5file, '/'), h5file
 
 def recursively_load_dict_contents_from_group(h5file, path):
     """
-    ....
+    Recursively load dictionary contents from HDF5 group.
     """
     ans = {}
     for key, item in h5file[path].items():
         if isinstance(item, h5py._hl.dataset.Dataset):
-            # ans[key] = np.array(item)
             ans[key] = item
         elif isinstance(item, h5py._hl.group.Group):
             ans[key] = recursively_load_dict_contents_from_group(h5file, path + key + '/')
@@ -144,10 +140,175 @@ def vis_distill_feats(pts, feats):
         pts_o3d = np2o3d(pts, color=colors)
         o3d.visualization.draw_geometries([pts_o3d])
 
+def estimate_plane_height(pcd, percentile=10, ransac_iterations=100, distance_threshold=0.01, boundaries=None):
+    """
+    Estimate the height of a flat background plane from point cloud.
+    
+    Args:
+        pcd: Point cloud (N, 3)
+        percentile: Percentile of z values to consider as plane candidates (default: 10 for bottom points)
+        ransac_iterations: Number of RANSAC iterations for plane fitting
+        distance_threshold: RANSAC inlier distance threshold in meters
+        boundaries: Optional dict with x_lower, x_upper, y_lower, y_upper, z_lower, z_upper to filter points
+        
+    Returns:
+        plane_height: Estimated z-coordinate of the plane
+    """
+    if pcd.shape[0] == 0:
+        return 0.0
+    
+    # Filter points within boundaries if provided (typically env_boundaries)
+    if boundaries is not None:
+        x_mask = (pcd[:, 0] >= boundaries['x_lower']) & (pcd[:, 0] <= boundaries['x_upper'])
+        y_mask = (pcd[:, 1] >= boundaries['y_lower']) & (pcd[:, 1] <= boundaries['y_upper'])
+        z_mask = (pcd[:, 2] >= boundaries['z_lower']) & (pcd[:, 2] <= boundaries['z_upper'])
+        mask = x_mask & y_mask & z_mask
+        pcd = pcd[mask]
+        
+        if pcd.shape[0] == 0:
+            print("Warning: No points found within boundaries for plane estimation")
+            return 0.0
+    
+    # Method 1: Simple percentile-based estimation
+    # Get lower percentile of z values (likely to be on the plane)
+    z_values = pcd[:, 2]
+    plane_height_percentile = np.percentile(z_values, percentile)
+    
+    # Method 2: RANSAC plane fitting for more robust estimation
+    try:
+        # Select points near the lower percentile for plane fitting
+        z_threshold = np.percentile(z_values, 25)  # Bottom 25% of points
+        candidate_points = pcd[z_values <= z_threshold]
+        
+        if candidate_points.shape[0] < 3:
+            return plane_height_percentile
+        
+        # Simple RANSAC for horizontal plane (assuming plane is approximately horizontal)
+        best_inliers = 0
+        best_height = plane_height_percentile
+        
+        for _ in range(ransac_iterations):
+            # Randomly sample 3 points
+            if candidate_points.shape[0] < 3:
+                break
+            idx = np.random.choice(candidate_points.shape[0], 3, replace=False)
+            sample_points = candidate_points[idx]
+            
+            # Fit plane through these points (compute average z)
+            plane_z = np.mean(sample_points[:, 2])
+            
+            # Count inliers (points close to this plane height)
+            distances = np.abs(candidate_points[:, 2] - plane_z)
+            inliers = np.sum(distances < distance_threshold)
+            
+            if inliers > best_inliers:
+                best_inliers = inliers
+                best_height = plane_z
+        
+        # If RANSAC found a good plane, use it; otherwise fall back to percentile
+        if best_inliers > max(10, candidate_points.shape[0] * 0.1):
+            return best_height
+        else:
+            return plane_height_percentile
+            
+    except Exception as e:
+        # Fall back to percentile method if RANSAC fails
+        print(f"Plane fitting failed, using percentile method: {e}")
+        return plane_height_percentile
+
+
+def segment_obj_by_gripper_crop(all_pcd, gripper_pose, gripper_width, gripper_crop_params, reference_frame='world', env_boundaries=None):
+    """
+    Segment object points using gripper-based cropping.
+    
+    Args:
+        all_pcd: Full point cloud (N, 3)
+        gripper_pose: Gripper pose array (6 or 7 elements)
+        gripper_width: Current gripper opening width
+        gripper_crop_params: Dict with cropping parameters
+        reference_frame: 'world' or 'robot'
+        env_boundaries: Optional dict with environment boundaries for plane estimation
+        
+    Returns:
+        obj_pcd: Object point cloud (M, 3)
+    """
+    
+    # Extract gripper width from the pose (assuming it's the 7th element, or use a default)
+    if len(gripper_pose) >= 7:
+        gripper_width = gripper_pose[6]
+        gripper_pose_6d = gripper_pose[:6]
+    else:
+        gripper_width = gripper_width if gripper_width is not None else 0.05
+        gripper_pose_6d = gripper_pose
+    
+    # Transform gripper pose to world frame if needed
+    if reference_frame == 'robot':
+        gripper_pose_world = gripper_pose_6d.copy()
+    else:
+        gripper_pose_world = gripper_pose_6d.copy()
+    
+    # Automatically estimate global z threshold from plane if requested
+    global_z_threshold = gripper_crop_params.get('global_z_threshold', None)
+    auto_estimate_plane = gripper_crop_params.get('auto_estimate_plane', False)
+    plane_margin = gripper_crop_params.get('plane_margin', 0.005)  # Safety margin above plane
+    
+    if auto_estimate_plane and all_pcd.shape[0] > 0:
+        t_start_plane = time.time()
+        plane_height = estimate_plane_height(
+            all_pcd,
+            percentile=gripper_crop_params.get('plane_percentile', 10),
+            ransac_iterations=gripper_crop_params.get('ransac_iterations', 100),
+            distance_threshold=gripper_crop_params.get('ransac_distance_threshold', 0.01),
+            boundaries=env_boundaries  # Use env_boundaries to filter points for plane estimation
+        )
+        global_z_threshold = plane_height + plane_margin
+        # print(f"  [Timing] estimate_plane_height: {time.time() - t_start_plane:.4f}s, plane_height={plane_height:.4f}")
+    
+    # Apply gripper-based cropping to object points
+    obj_pcd, obj_mask = extract_gripper_tool_pcd(
+        all_pcd, gripper_pose_world, gripper_width,
+        tool_length=gripper_crop_params['tool_length'],
+        tool_width=gripper_crop_params['tool_width'], 
+        gripper_finger_length=gripper_crop_params['gripper_finger_length'],
+        safety_margin=gripper_crop_params['safety_margin'],
+        global_z_threshold=global_z_threshold
+    )
+
+    return obj_pcd, obj_mask
+
+
+def segment_obj_by_color_crop(all_pcd, fusion, hsv_lower, hsv_upper):
+    """
+    Segment object points using HSV color-based cropping.
+    
+    Args:
+        all_pcd: Full point cloud (N, 3)
+        fusion: D3Fields fusion object with color information
+        hsv_lower: Lower bound for HSV range (3,)
+        hsv_upper: Upper bound for HSV range (3,)
+        
+    Returns:
+        obj_pcd: Object point cloud (M, 3)
+    """
+    # Get RGB colors for all points
+    pcd_tensor = torch.from_numpy(all_pcd).to(device=fusion.device, dtype=fusion.dtype)
+    eval_res = fusion.eval(pcd_tensor, return_names=['color'])
+    colors_rgb = eval_res['color'].detach().cpu().numpy()  # (N, 3), values in [0, 1]
+    
+    # Convert RGB to HSV
+    colors_rgb_uint8 = (colors_rgb * 255).astype(np.uint8)
+    colors_hsv = cv2.cvtColor(colors_rgb_uint8.reshape(1, -1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
+    
+    # Create mask based on HSV range
+    mask = np.all((colors_hsv >= hsv_lower) & (colors_hsv <= hsv_upper), axis=1)
+    
+    obj_pcd = all_pcd[mask]
+    return obj_pcd, mask
+
 def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq,
                   robot_base_pose_in_world_seq = None, teleop_robot = None, qpos_seq=None, expected_labels=None,
                   tool_names=[None], exclude_threshold=0.01, exclude_colors=[], use_seg=False, use_obj_bg_seg=False,
-                  gripper_pose_seq=None, use_gripper_crop=False, gripper_crop_params=None, include_rgb=False):
+                  gripper_pose_seq=None, seg_method='gripper_crop', seg_params=None, include_rgb=False):
     # shape_meta: (dict) shape meta data for d3fields
     # color_seq: (np.ndarray) (T, V, H, W, C)
     # depth_seq: (np.ndarray) (T, V, H, W)
@@ -158,10 +319,17 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     # offsets: (list) list of offsets
     # finger_poses: (dict) dict of finger poses, mapping from finger name to (T, 6)
     # expected_labels: (list) list of expected labels
-    # use_obj_bg_seg: (bool) if True, segment pcd into object and background parts using text queries
+    # use_obj_bg_seg: (bool) if True, segment pcd into object and background parts
     # gripper_pose_seq: (np.ndarray) gripper poses of shape (T, 7) or (T, 6) for gripper-based cropping
-    # use_gripper_crop: (bool) if True, further crop object points using gripper pose when use_obj_bg_seg is True
-    # gripper_crop_params: (dict) parameters for gripper cropping (tool_length, tool_width, etc.)
+    # seg_method: (str) segmentation method when use_obj_bg_seg=True. Options:
+    #   - 'gripper_crop': Crop using gripper pose and tool dimensions (default)
+    #   - 'color_crop': Crop based on HSV color range
+    #   - 'sam' or 'text_query': Text-based segmentation using D3Fields text queries
+    #   - 'd3field_feat': Crop based on D3Fields feature threshold
+    # seg_params: (dict) parameters for the selected segmentation method:
+    #   For 'gripper_crop': {'tool_length', 'tool_width', 'gripper_finger_length', 'safety_margin', 'global_z_threshold', 'auto_estimate_plane', ...}
+    #   For 'color_crop': {'hsv_lower': [h, s, v], 'hsv_upper': [h, s, v]}
+    #   For 'd3field_feat': {'feat_threshold': float, 'use_any': bool}
     boundaries = shape_meta['info']['boundaries']
     
     # Support separate boundaries for object and environment
@@ -169,7 +337,6 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     if 'obj_boundaries' in shape_meta['info'] and 'env_boundaries' in shape_meta['info']:
         obj_boundaries = shape_meta['info']['obj_boundaries']
         env_boundaries = shape_meta['info']['env_boundaries']
-        print(f"Using separate boundaries: obj={obj_boundaries}, env={env_boundaries}")
     else:
         # Legacy behavior: use same boundaries for both
         obj_boundaries = boundaries
@@ -195,7 +362,6 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     if "N_obj" in shape_meta['info'] and "N_env" in shape_meta['info']:
         N_obj = shape_meta['info']['N_obj']
         N_env = shape_meta['info']['N_env']
-        # print(f"Using separate point counts: N_obj={N_obj}, N_env={N_env}")
     else:
         # Legacy behavior: split N_gripper in half
         N_obj = None
@@ -207,18 +373,49 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     resize_ratio = shape_meta['info']['resize_ratio']
     reference_frame = shape_meta['info']['reference_frame'] if 'reference_frame' in shape_meta['info'] else 'world'
     
-    # Set default gripper cropping parameters
-    if gripper_crop_params is None:
+    # Set default segmentation parameters based on method
+    if seg_params is None:
+        seg_params = {}
+    
+    # Set default parameters for each segmentation method
+    if seg_method == 'gripper_crop':
+        default_gripper_params = {
+            'tool_length': 0.2,
+            'tool_width': 0.2,
+            'gripper_finger_length': 0.1,
+            'safety_margin': 0.002,
+            'global_z_threshold': 0.01,
+            'auto_estimate_plane': False,  # If True, automatically estimate plane height from pcd
+            'plane_margin': 0.012,  # Safety margin above detected plane (meters)
+            'plane_percentile': 20,  # Percentile of z values for plane estimation
+            'ransac_iterations': 50,  # RANSAC iterations for plane fitting
+            'ransac_distance_threshold': 0.01  # RANSAC inlier threshold (meters)
+        }
+        # Merge with shape_meta if available
         if 'gripper_crop_params' in shape_meta['info']:
-            gripper_crop_params = shape_meta['info']['gripper_crop_params']
-        else:
-            gripper_crop_params = {
-                'tool_length': 0.2,
-                'tool_width': 0.2,
-                'gripper_finger_length': 0.1,
-                'safety_margin': 0.002,
-                'global_z_threshold': 0.01
-            }
+            default_gripper_params.update(shape_meta['info']['gripper_crop_params'])
+        # Merge with provided seg_params
+        default_gripper_params.update(seg_params)
+        seg_params = default_gripper_params
+    elif seg_method == 'color_crop':
+        default_color_params = {
+            'hsv_lower': np.array([0, 50, 50]),
+            'hsv_upper': np.array([10, 255, 255])
+        }
+        default_color_params.update(seg_params)
+        seg_params = default_color_params
+    elif seg_method == 'd3field_feat':
+        default_feat_params = {
+            'feat_threshold': 0.5,
+            'use_any': True
+        }
+        default_feat_params.update(seg_params)
+        seg_params = default_feat_params
+    elif seg_method == 'sam':
+        # SAM parameters (future implementation)
+        pass
+    else:
+        raise ValueError(f"Unknown segmentation method: {seg_method}")
     
     num_bots = robot_base_pose_in_world_seq.shape[1] if len(robot_base_pose_in_world_seq.shape) == 4 else 1
     robot_base_pose_in_world_seq = robot_base_pose_in_world_seq.reshape(robot_base_pose_in_world_seq.shape[0], num_bots, 4, 4)
@@ -251,6 +448,8 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     bg_feats_ls = []
     # for t in tqdm(range(T), desc=f'Computing D3Fields'):
     for t in range(T):
+        t_frame_start = time.time()
+        
         # Tune extrinsics
         # extri = extri_seq[t]
         # pose = np.linalg.inv(extri[2])
@@ -263,7 +462,9 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             'K': intri_seq[t],
         }
         
+        t_start_update = time.time()
         fusion.update(obs, update_dino=(use_dino or distill_dino or use_obj_bg_seg))
+        t_update = time.time() - t_start_update
         
         # compute robot pcd
         if 'panda' in teleop_robot.robot_name:
@@ -276,18 +477,6 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             sparse_num_pts = [int(0.5 * N_gripper), int(0.5 * N_gripper)]
         else:
             raise RuntimeError('unsupported')
-
-        # DEPRECATED: use qpos_seq instead
-        # if qpos_seq[t].shape[0] == 8 and 'panda' in teleop_robot.robot_name:
-        #     # NOTE: tentative fix for panda
-        #     curr_qpos = np.concatenate([qpos_seq[t], qpos_seq[t][7:8]])
-        # elif qpos_seq[t].shape[0] == 7 and 'trossen_vx300s' in teleop_robot.robot_name:
-        #     # NOTE: tentative fix for vx300s
-        #     gripper_joint_norm = PUPPET_GRIPPER_JOINT_NORMALIZE_FN(qpos_seq[t][6])
-        #     gripper_pos_unnorm = PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN(gripper_joint_norm)
-        #     curr_qpos = np.concatenate([qpos_seq[t][:6], np.array([gripper_pos_unnorm, -gripper_pos_unnorm])])
-        # else:
-        #     curr_qpos = qpos_seq[t]
 
         curr_qpos = qpos_seq[t]
         qpos_dim = curr_qpos.shape[0] // num_bots
@@ -336,95 +525,208 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             ee_feats = ee_eval_res['dino_feats']
             if include_rgb:
                 ee_colors = ee_eval_res['color']
-        
-        if use_seg:
-            fusion.text_queries_for_inst_mask(query_texts, query_thresholds, boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
-        
         if use_obj_bg_seg:
             # Calculate target points for each part (excluding end-effector points)
             # Use explicit N_obj and N_env if provided, otherwise use legacy split
             if N_obj is not None and N_env is not None:
                 obj_target_pts = N_obj
                 bg_target_pts = N_env
-                # print(f"Using contact field point allocation: obj={obj_target_pts}, env={bg_target_pts}, ee={ee_pcd.shape[0]}, total={obj_target_pts + bg_target_pts + ee_pcd.shape[0]}")
             else:
                 # Legacy behavior: split remaining points in half
                 obj_target_pts = (N_total) // 2
                 bg_target_pts = (N_total - ee_pcd.shape[0]) - obj_target_pts
-                # print(f"Using legacy point allocation: obj={obj_target_pts}, env={bg_target_pts}, ee={ee_pcd.shape[0]}")
 
             # Apply gripper-based cropping to object points if requested
-            if use_gripper_crop and gripper_pose_seq is not None:
-                all_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
-                # Get gripper pose for current timestep
-                gripper_pose = gripper_pose_seq[t]
-                
-                # Extract gripper width from the pose (assuming it's the 7th element, or use a default)
-                if len(gripper_pose) >= 7:
-                    gripper_width = gripper_pose[6]
-                    gripper_pose_6d = gripper_pose[:6]
-                else:
-                    gripper_width = 0.05  # Default gripper width
-                    gripper_pose_6d = gripper_pose
-                
-                # Transform gripper pose to world frame if needed
-                if reference_frame == 'robot':
-                    # If gripper pose is in robot frame, transform to world frame for cropping
-                    gripper_pose_world = gripper_pose_6d.copy()
-                else:
-                    # Gripper pose is already in world frame
-                    gripper_pose_world = gripper_pose_6d.copy()
-                
-                # Apply gripper-based cropping to object points
-                obj_pcd, obj_mask = extract_gripper_tool_pcd(
-                    all_pcd, gripper_pose_world, gripper_width,
-                    tool_length=gripper_crop_params['tool_length'],
-                    tool_width=gripper_crop_params['tool_width'], 
-                    gripper_finger_length=gripper_crop_params['gripper_finger_length'],
-                    safety_margin=gripper_crop_params['safety_margin'],
-                    global_z_threshold=gripper_crop_params['global_z_threshold']
-                )
-
-                # Update object points and features to only include tool points
-                # if len(obj_tool_pcd) > 0:
-                # Use env_boundaries for environment point extraction
-                bg_pcd = fusion.extract_pcd_in_box(boundaries=env_boundaries, downsample=True, downsample_r=0.002, excluded_pts=np.concatenate([robot_pcd, obj_pcd], axis=0), exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
-
-            else:
-                # Perform text-based segmentation for object/background separation
+            # Step 1: Extract all points and features ONCE for ALL segmentation methods (except SAM)
+            if seg_method == 'sam':
+                t_start_sam = time.time()
+                # SAM/text-based segmentation for object/background separation
                 # Use obj_boundaries for object segmentation query
                 fusion.text_queries_for_inst_mask(query_texts, query_thresholds, obj_boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
                 
                 # Extract object and background point clouds separately with their respective boundaries
                 obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=obj_boundaries)  # Object instances
                 bg_pcd = fusion.extract_masked_pcd([0], boundaries=env_boundaries)  # Background (instance 0)
+                print(f"[Timing] SAM segmentation: {time.time() - t_start_sam:.4f}s")
+                
+                # For SAM, we don't have pre-extracted features, will extract later
+                all_feats = None
+                all_pts = None
+                all_colors_list = None
+            else:
+                # For all other methods: extract all points within boundaries
+                t_start_extract = time.time()
+                all_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.004, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
+                t_extract = time.time() - t_start_extract
+                
+                # Extract features for ALL points at once (before segmentation)
+                t_start_feat = time.time()
+                all_feat_list, all_pts_list, _, all_colors_list = fusion.select_features_from_pcd(
+                    all_pcd, -1, per_instance=False, use_seg=False, use_dino=True, include_rgb=include_rgb
+                )
+                t_feat = time.time() - t_start_feat
+                
+                # Combine features and points
+                all_feats = torch.concat(all_feat_list, axis=0).detach().cpu().numpy() if all_feat_list else np.zeros((0, 1024), dtype=np.float32)
+                all_pts = np.concatenate(all_pts_list, axis=0) if all_pts_list else np.zeros((0, 3), dtype=np.float32)
+                
+                # If distill_dino is enabled, distill features once here before segmentation
+                if distill_dino and all_feats.shape[0] > 0:
+                    all_feats_tensor = torch.from_numpy(all_feats).to(device=fusion.device, dtype=fusion.dtype)
+                    all_feats = fusion.eval_dist_to_sel_feats(all_feats_tensor, obj_name=distill_obj).detach().cpu().numpy()
+            
+            # Step 2: Apply segmentation method to get object/background masks
+            if seg_method == 'gripper_crop' and gripper_pose_seq is not None:
+                gripper_pose = gripper_pose_seq[t]
+                gripper_width = gripper_pose[6] if len(gripper_pose) >= 7 else None
+                
+                # Get object points using gripper crop
+                obj_pcd, obj_mask = segment_obj_by_gripper_crop(all_pts, gripper_pose, gripper_width, seg_params, reference_frame, env_boundaries)
+                
+                bg_mask = ~obj_mask
+                bg_pcd = all_pts[bg_mask]
+            
+            elif seg_method == 'color_crop':
+                # Get object points using color crop
+                obj_pcd, obj_mask = segment_obj_by_color_crop(all_pts, fusion, seg_params['hsv_lower'], seg_params['hsv_upper'])
+                
+                bg_mask = ~obj_mask
+                bg_pcd = all_pts[bg_mask]
+            
+            elif seg_method == 'd3field_feat':
+                # Apply threshold to determine object points (features are already distilled if distill_dino=True)
+                if all_feats.shape[0] > 0:
+                    if seg_params['use_any']:
+                        # Point is object if ANY distilled feature exceeds threshold
+                        obj_mask = np.any(all_feats > seg_params['feat_threshold'], axis=1)
+                    else:
+                        # Point is object if ALL distilled features exceed threshold
+                        obj_mask = np.all(all_feats > seg_params['feat_threshold'], axis=1)
+                    bg_mask = ~obj_mask
+                    
+                    # Split points based on mask
+                    obj_pcd = all_pts[obj_mask]
+                    bg_pcd = all_pts[bg_mask]
+                else:
+                    obj_mask = np.zeros(all_pts.shape[0], dtype=bool)
+                    bg_mask = np.ones(all_pts.shape[0], dtype=bool)
+                    obj_pcd = np.zeros((0, 3), dtype=np.float32)
+                    bg_pcd = all_pts
 
-            # bg_pcd is all pcd within bounding box excluding obj pcd
-            # print('obj_pcd:', obj_pcd.shape)
-            # print('bg_pcd:', bg_pcd.shape)
+            elif seg_method == 'sam':
+                # Already handled in Step 1, obj_pcd and bg_pcd are set
+                # Create dummy masks since we don't have feature correspondence for SAM
+                obj_mask = None
+                bg_mask = None
             
-            # Handle empty object point cloud gracefully
-            if obj_pcd.shape[0] == 0:
-                print(f'Warning: no object points found, using zero-padded point cloud')
-                # Create empty feature lists directly without calling select_features_from_pcd
-                # Match the dtype of fusion (typically float16)
-                obj_feat_list = [torch.zeros((obj_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
-                obj_pts_list = [np.zeros((obj_target_pts, 3), dtype=np.float32)]
-                obj_colors_list = [torch.zeros((obj_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
+            else:  # Default to gripper_crop
+                # Default method: gripper-based cropping (features already extracted above)
+                if gripper_pose_seq is not None:
+                    gripper_pose = gripper_pose_seq[t]
+                    gripper_width = gripper_pose[6] if len(gripper_pose) >= 7 else None
+                    obj_pcd, obj_mask = segment_obj_by_gripper_crop(all_pts, gripper_pose, gripper_width, seg_params, reference_frame, env_boundaries)
+                    
+                    bg_mask = ~obj_mask
+                    bg_pcd = all_pts[bg_mask]
+                else:
+                    print("Warning: gripper_pose_seq not provided, cannot use default gripper_crop method")
+                    obj_mask = np.zeros(all_pts.shape[0], dtype=bool)
+                    bg_mask = np.ones(all_pts.shape[0], dtype=bool)
+                    obj_pcd = np.zeros((0, 3), dtype=np.float32)
+                    bg_pcd = all_pts
+
+            # Step 3: Use pre-computed features with masks (for all methods except SAM)
+            # For methods with masks (gripper_crop, color_crop, d3field_feat, default), reuse features
+            if seg_method != 'sam' and obj_mask is not None and bg_mask is not None:
+                # We have pre-extracted features and masks, use them directly
+                obj_feats_from_mask = all_feats[obj_mask] if obj_mask.sum() > 0 else np.zeros((0, 1024), dtype=np.float32)
+                bg_feats_from_mask = all_feats[bg_mask] if bg_mask.sum() > 0 else np.zeros((0, 1024), dtype=np.float32)
+                
+                if include_rgb and all_colors_list:
+                    all_colors = torch.concat(all_colors_list, axis=0)
+                    obj_colors_from_mask = all_colors[obj_mask] if obj_mask.sum() > 0 else torch.zeros((0, 3), dtype=fusion.dtype, device=fusion.device)
+                    bg_colors_from_mask = all_colors[bg_mask] if bg_mask.sum() > 0 else torch.zeros((0, 3), dtype=fusion.dtype, device=fusion.device)
+                else:
+                    obj_colors_from_mask = None
+                    bg_colors_from_mask = None
+                
+                use_precomputed_features = True
             else:
-                # Extract features for object normally, including RGB
-                obj_feat_list, obj_pts_list, _, obj_colors_list = fusion.select_features_from_pcd(obj_pcd, obj_target_pts, per_instance=True, use_seg=False, use_dino=True, include_rgb=include_rgb)
-            
-            # Handle empty background point cloud gracefully
-            if bg_pcd.shape[0] == 0:
-                print(f'Warning: no background points found, using zero-padded point cloud')
-                # Match the dtype of fusion (typically float16)
-                bg_feat_list = [torch.zeros((bg_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
-                bg_pts_list = [np.zeros((bg_target_pts, 3), dtype=np.float32)]
-                bg_colors_list = [torch.zeros((bg_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
+                # SAM method: will extract features normally
+                use_precomputed_features = False
+
+            # For methods with pre-computed features, resample to target size
+            if use_precomputed_features:
+                t_start_resample = time.time()
+                # Use pre-computed features and resample to target size
+                if obj_pcd.shape[0] == 0:
+                    print(f'Warning: no object points found, using zero-padded point cloud')
+                    obj_feat_list = [torch.zeros((obj_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                    obj_pts_list = [np.zeros((obj_target_pts, 3), dtype=np.float32)]
+                    obj_colors_list = [torch.zeros((obj_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
+                else:
+                    # Resample the pre-segmented object points and features to target size
+                    if obj_pcd.shape[0] >= obj_target_pts:
+                        # Downsample
+                        indices = np.random.choice(obj_pcd.shape[0], obj_target_pts, replace=False)
+                    else:
+                        # Upsample
+                        indices = np.random.choice(obj_pcd.shape[0], obj_target_pts, replace=True)
+                    
+                    obj_pts_list = [obj_pcd[indices]]
+                    obj_feat_list = [torch.from_numpy(obj_feats_from_mask[indices]).to(device=fusion.device, dtype=fusion.dtype)]
+                    
+                    if include_rgb and obj_colors_from_mask is not None:
+                        obj_colors_list = [obj_colors_from_mask[indices]]
+                    else:
+                        obj_colors_list = []
+                
+                if bg_pcd.shape[0] == 0:
+                    print(f'Warning: no background points found, using zero-padded point cloud')
+                    bg_feat_list = [torch.zeros((bg_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                    bg_pts_list = [np.zeros((bg_target_pts, 3), dtype=np.float32)]
+                    bg_colors_list = [torch.zeros((bg_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
+                else:
+                    # Resample the pre-segmented background points and features to target size
+                    if bg_pcd.shape[0] >= bg_target_pts:
+                        # Downsample
+                        indices = np.random.choice(bg_pcd.shape[0], bg_target_pts, replace=False)
+                    else:
+                        # Upsample
+                        indices = np.random.choice(bg_pcd.shape[0], bg_target_pts, replace=True)
+                    
+                    bg_pts_list = [bg_pcd[indices]]
+                    bg_feat_list = [torch.from_numpy(bg_feats_from_mask[indices]).to(device=fusion.device, dtype=fusion.dtype)]
+                    
+                    if include_rgb and bg_colors_from_mask is not None:
+                        bg_colors_list = [bg_colors_from_mask[indices]]
+                    else:
+                        bg_colors_list = []
+                t_resample = time.time() - t_start_resample
             else:
-                # Extract features for background normally
-                bg_feat_list, bg_pts_list, _, bg_colors_list = fusion.select_features_from_pcd(bg_pcd, bg_target_pts, per_instance=True, use_seg=False, use_dino=True, include_rgb=include_rgb)
+                # For other methods, extract features normally
+                # Handle empty object point cloud gracefully
+                if obj_pcd.shape[0] == 0:
+                    print(f'Warning: no object points found, using zero-padded point cloud')
+                    # Create empty feature lists directly without calling select_features_from_pcd
+                    # Match the dtype of fusion (typically float16)
+                    obj_feat_list = [torch.zeros((obj_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                    obj_pts_list = [np.zeros((obj_target_pts, 3), dtype=np.float32)]
+                    obj_colors_list = [torch.zeros((obj_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
+                else:
+                    # Extract features for object normally, including RGB
+                    obj_feat_list, obj_pts_list, _, obj_colors_list = fusion.select_features_from_pcd(obj_pcd, obj_target_pts, per_instance=True, use_seg=False, use_dino=True, include_rgb=include_rgb)
+                
+                # Handle empty background point cloud gracefully
+                if bg_pcd.shape[0] == 0:
+                    print(f'Warning: no background points found, using zero-padded point cloud')
+                    # Match the dtype of fusion (typically float16)
+                    bg_feat_list = [torch.zeros((bg_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                    bg_pts_list = [np.zeros((bg_target_pts, 3), dtype=np.float32)]
+                    bg_colors_list = [torch.zeros((bg_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
+                else:
+                    # Extract features for background normally
+                    bg_feat_list, bg_pts_list, _, bg_colors_list = fusion.select_features_from_pcd(bg_pcd, bg_target_pts, per_instance=True, use_seg=False, use_dino=True, include_rgb=include_rgb)
             
             # Store object and background data separately
             obj_src_pts = np.concatenate(obj_pts_list, axis=0) if obj_pts_list else np.zeros((0, 3), dtype=np.float32)
@@ -447,16 +749,8 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 src_colors_list = obj_colors_list + bg_colors_list
             else:
                 src_colors_list = []
-        elif use_seg:
-            obj_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=boundaries)
-            src_feat_list, src_pts_list, _, src_colors_list = fusion.select_features_from_pcd(obj_pcd, N_gripper, per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino), include_rgb=include_rgb)
-            # Initialize empty variables for non-obj_bg_seg case
-            obj_src_pts = np.zeros((0, 3), dtype=np.float32)
-            obj_src_feats = np.zeros((0, 1024), dtype=np.float32)
-            bg_src_pts = np.zeros((0, 3), dtype=np.float32)
-            bg_src_feats = np.zeros((0, 1024), dtype=np.float32)
         else:
-            obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
+            obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.004, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
             src_feat_list, src_pts_list, _, src_colors_list = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino), include_rgb=include_rgb)
             # Initialize empty variables for non-obj_bg_seg case
             obj_src_pts = np.zeros((0, 3), dtype=np.float32)
@@ -473,45 +767,21 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         else:
             aggr_colors = None
         
-        # only to adjust point number when using segmentation
-        if use_seg:
-            max_obj_pts_num = max_pts_num - ee_pcd.shape[0]
-            if aggr_src_pts.shape[0] > max_obj_pts_num:
-                aggr_src_pts = aggr_src_pts[:max_obj_pts_num]
-                aggr_feats = aggr_feats[:max_obj_pts_num] if (use_dino or distill_dino or use_obj_bg_seg) else None
-                aggr_colors = aggr_colors[:max_obj_pts_num] if aggr_colors is not None else None
-            elif aggr_src_pts.shape[0] < max_obj_pts_num:
-                aggr_src_pts = np.pad(aggr_src_pts, ((0,max_obj_pts_num-aggr_src_pts.shape[0]),(0,0)), mode='constant')
-                aggr_feats = np.pad(aggr_feats, ((0,max_obj_pts_num-aggr_feats.shape[0]),(0,0)), mode='constant') if (use_dino or distill_dino or use_obj_bg_seg) else None
-                aggr_colors = np.pad(aggr_colors, ((0,max_obj_pts_num-aggr_colors.shape[0]),(0,0)), mode='constant') if aggr_colors is not None else None
-        
         aggr_src_pts = np.concatenate([aggr_src_pts, ee_pcd], axis=0)
-        aggr_feats = np.concatenate([aggr_feats, ee_feats.detach().cpu().numpy()], axis=0) if (use_dino or distill_dino or use_obj_bg_seg) else None
+        
+        # Handle feature concatenation based on distill_dino setting
+        if distill_dino:
+            # Distill EE features first
+            ee_feats_distilled = fusion.eval_dist_to_sel_feats(ee_feats, obj_name=distill_obj,).detach().cpu().numpy()
+            # aggr_feats already contains distilled features (from pre-segmentation distillation)
+            aggr_feats = np.concatenate([aggr_feats, ee_feats_distilled], axis=0) if (use_dino or distill_dino or use_obj_bg_seg) else None
+        else:
+            # Use raw DINO features
+            aggr_feats = np.concatenate([aggr_feats, ee_feats.detach().cpu().numpy()], axis=0) if (use_dino or distill_dino or use_obj_bg_seg) else None
+        
         # Concatenate RGB colors with ee colors (ee gets actual RGB from images)
         if aggr_colors is not None:
             aggr_colors = np.concatenate([aggr_colors, ee_colors.detach().cpu().numpy()], axis=0)
-        
-        if distill_dino:
-            aggr_feats = fusion.eval_dist_to_sel_feats(torch.concat(src_feat_list + [ee_feats], axis=0),
-                                                       obj_name=distill_obj,).detach().cpu().numpy()
-            # Also apply distillation to separate object/background features if using segmentation
-            if use_obj_bg_seg:
-                # Apply distillation to end-effector features first
-                ee_feats_distilled = fusion.eval_dist_to_sel_feats(ee_feats, obj_name=distill_obj,).detach().cpu().numpy()
-                
-                if len(obj_feat_list) > 0:
-                    obj_src_feats = fusion.eval_dist_to_sel_feats(torch.concat(obj_feat_list, axis=0),
-                                                                  obj_name=distill_obj,).detach().cpu().numpy()
-                else:
-                    # If no object features, create empty array with correct distilled dimension
-                    obj_src_feats = np.zeros((0, ee_feats_distilled.shape[1]))
-                    
-                if len(bg_feat_list) > 0:
-                    bg_src_feats = fusion.eval_dist_to_sel_feats(torch.concat(bg_feat_list, axis=0),
-                                                                 obj_name=distill_obj,).detach().cpu().numpy()
-                else:
-                    # If no background features, create empty array with correct distilled dimension
-                    bg_src_feats = np.zeros((0, ee_feats_distilled.shape[1]))
         
         # Store object and background data for separate return
         if use_obj_bg_seg:
@@ -556,22 +826,24 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         if reference_frame == 'world':
             pass
         elif reference_frame == 'robot':
-            # aggr_src_pts = (np.linalg.inv(robot_base_pose_in_world) @ np.concatenate([aggr_src_pts, np.ones((aggr_src_pts.shape[0], 1))], axis=-1).T).T[:, :3]
             aggr_src_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([aggr_src_pts, np.ones((aggr_src_pts.shape[0], 1))], axis=-1).T).T[:, :3]
-        
-        # decomp as part
-        new_aggr_src_pts = []
-        N_per_part = N_gripper // aggr_src_pts.shape[1]
-        for i in range(aggr_src_pts.shape[0] // N_per_part):
-            # only decomp the first instance
-            if i == 0:
-                aggr_src_pts_part = aggr_src_pts[i*N_per_part:(i+1)*N_per_part]
-        
         
         # save to list
         aggr_src_pts_ls.append(aggr_src_pts.astype(np.float32))
         aggr_feats_ls.append(aggr_feats.astype(np.float32) if (use_dino or distill_dino or use_obj_bg_seg) else None)
         aggr_colors_ls.append(aggr_colors.astype(np.float32) if aggr_colors is not None else None)
+        
+        # t_total = time.time() - t_frame_start
+        # print(f"[Frame {t}] Total: {t_total:.3f}s", end="")
+        # if t_update > 0.02:
+        #     print(f" | fusion.update: {t_update:.3f}s", end="")
+        # if 't_extract' in locals() and t_extract > 0.02:
+        #     print(f" | extract_pcd: {t_extract:.3f}s", end="")
+        # if 't_feat' in locals() and t_feat > 0.02:
+        #     print(f" | extract_feats: {t_feat:.3f}s", end="")
+        # if 't_resample' in locals() and t_resample > 0.02:
+        #     print(f" | resample: {t_resample:.3f}s", end="")
+        # print()  # newline
     
     if use_obj_bg_seg:
         return aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls, aggr_colors_ls
@@ -621,14 +893,11 @@ def d3fields_proc_for_vis(fusion, shape_meta, color_seq, depth_seq, extri_seq, i
     depth_seq = new_depth_seq
     intri_seq = new_intri_seq
     T, V, H, W, C = color_seq.shape
-    # assert H == 240 and W == 320 and C == 3
     aggr_src_pts_ls = []
     aggr_feats_ls = []
     aggr_raw_feats_ls = []
     rob_mesh_ls = []
-    # for t in tqdm(range(T), desc=f'Computing D3Fields'):
     for t in range(T):
-        # print()
         obs = {
             'color': color_seq[t],
             'depth': depth_seq[t],
@@ -664,12 +933,10 @@ def d3fields_proc_for_vis(fusion, shape_meta, color_seq, depth_seq, extri_seq, i
             # convert to numpy array
             robot_pcd = np.concatenate(robot_pcd_ls, axis=0)
             
-            obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
+            obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.004, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
         else:
-            obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.002, exclude_colors=exclude_colors)
-        # res = fusion.eval(obj_pcd)
-        # src_pts_list = [obj_pcd]
-        # src_feat_list = [res['dino_feats']]
+            obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.004, exclude_colors=exclude_colors)
+        
         src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, N_total, per_instance=True, use_seg=False, use_dino=(use_dino or distill_dino))
         
         aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
@@ -688,7 +955,6 @@ def d3fields_proc_for_vis(fusion, shape_meta, color_seq, depth_seq, extri_seq, i
         if reference_frame == 'world':
             pass
         elif reference_frame == 'robot':
-            # aggr_src_pts = (np.linalg.inv(robot_base_pose_in_world) @ np.concatenate([aggr_src_pts, np.ones((aggr_src_pts.shape[0], 1))], axis=-1).T).T[:, :3]
             aggr_src_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([aggr_src_pts, np.ones((aggr_src_pts.shape[0], 1))], axis=-1).T).T[:, :3]
         
         # save to list
@@ -702,169 +968,8 @@ def d3fields_proc_for_vis(fusion, shape_meta, color_seq, depth_seq, extri_seq, i
         return aggr_src_pts_ls, aggr_feats_ls, aggr_raw_feats_ls, rob_mesh_ls
     return aggr_src_pts_ls, aggr_feats_ls, rob_mesh_ls
 
-# basically the same as d3fields_proc, but to keep the original code clean, we create a new function
-def d3fields_proc_for_tsne(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq,
-                          robot_base_pose_in_world_seq = None, teleop_robot = None, qpos_seq=None, exclude_threshold=0.01,
-                          exclude_colors=[], return_raw_feats=True):
-    # shape_meta: (dict) shape meta data for d3fields
-    # color_seq: (np.ndarray) (T, V, H, W, C)
-    # depth_seq: (np.ndarray) (T, V, H, W)
-    # extri_seq: (np.ndarray) (T, V, 4, 4)
-    # intri_seq: (np.ndarray) (T, V, 3, 3)
-    # robot_name: (str) name of robot
-    # meshes: (list) list of meshes
-    # offsets: (list) list of offsets
-    # finger_poses: (dict) dict of finger poses, mapping from finger name to (T, 6)
-    # expected_labels: (list) list of expected labels
-    boundaries = shape_meta['info']['boundaries']
-    use_dino = False
-    distill_dino = shape_meta['info']['distill_dino'] if 'distill_dino' in shape_meta['info'] else False
-    distill_obj = shape_meta['info']['distill_obj'] if 'distill_obj' in shape_meta['info'] else False
-    N_total = shape_meta['shape'][1]
-    
-    resize_ratio = shape_meta['info']['resize_ratio']
-    reference_frame = shape_meta['info']['reference_frame'] if 'reference_frame' in shape_meta['info'] else 'world'
-    
-    num_bots = robot_base_pose_in_world_seq.shape[1] if len(robot_base_pose_in_world_seq.shape) == 4 else 1
-    robot_base_pose_in_world_seq = robot_base_pose_in_world_seq.reshape(robot_base_pose_in_world_seq.shape[0], num_bots, 4, 4)
 
-    H, W = color_seq.shape[2:4]
-    resize_H = int(H * resize_ratio)
-    resize_W = int(W * resize_ratio)
-    
-    new_color_seq = np.zeros((color_seq.shape[0], color_seq.shape[1], resize_H, resize_W, color_seq.shape[-1]), dtype=np.uint8)
-    new_depth_seq = np.zeros((depth_seq.shape[0], depth_seq.shape[1], resize_H, resize_W), dtype=np.float32)
-    new_intri_seq = np.zeros((intri_seq.shape[0], intri_seq.shape[1], 3, 3), dtype=np.float32)
-    for t in range(color_seq.shape[0]):
-        for v in range(color_seq.shape[1]):
-            new_color_seq[t,v] = cv2.resize(color_seq[t,v], (resize_W, resize_H), interpolation=cv2.INTER_NEAREST)
-            new_depth_seq[t,v] = cv2.resize(depth_seq[t,v], (resize_W, resize_H), interpolation=cv2.INTER_NEAREST)
-            new_intri_seq[t,v] = intri_seq[t,v] * resize_ratio
-            new_intri_seq[t,v,2,2] = 1.
-    color_seq = new_color_seq
-    depth_seq = new_depth_seq
-    intri_seq = new_intri_seq
-    T, V, H, W, C = color_seq.shape
-    # assert H == 240 and W == 320 and C == 3
-    aggr_src_pts_ls = []
-    aggr_feats_ls = []
-    aggr_raw_feats_ls = []
-    rob_mesh_ls = []
-    # for t in tqdm(range(T), desc=f'Computing D3Fields'):
-    for t in range(T):
-        # print()
-        obs = {
-            'color': color_seq[t],
-            'depth': depth_seq[t],
-            'pose': extri_seq[t][:,:3,:],
-            'K': intri_seq[t],
-        }
-        
-        fusion.update(obs, update_dino=(use_dino or distill_dino))
-        
-        grid, _ = create_init_grid(boundaries, step_size=0.005) # (N, 3)
-        grid = grid.to(device=fusion.device, dtype=fusion.dtype)
-        # res = fusion.eval(obj_pcd)
-        # src_pts_list = [obj_pcd]
-        # src_feat_list = [res['dino_feats']]
-        # with torch.no_grad():
-        #     grid_eval_res = fusion.batch_eval(grid, return_names=['dino_feats'])
-        
-        # grid_feats = grid_eval_res['dino_feats']
-        
-        src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(grid.detach().cpu().numpy(), -1, per_instance=False, use_seg=False, use_dino=(use_dino or distill_dino))
-        aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
-        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino) else None # (N, 1024)
-        
-        if return_raw_feats:
-            if aggr_feats is not None:
-                aggr_raw_feats = aggr_feats.copy()
-                aggr_raw_feats_ls.append(aggr_raw_feats)
-        
-        if distill_dino:
-            aggr_feats = fusion.eval_dist_to_sel_feats(torch.concat(src_feat_list, axis=0),
-                                                       obj_name=distill_obj,).detach().cpu().numpy()
-        
-        
-        # # transform to reference frame
-        # if reference_frame == 'world':
-        #     pass
-        # elif reference_frame == 'robot':
-        #     # aggr_src_pts = (np.linalg.inv(robot_base_pose_in_world) @ np.concatenate([aggr_src_pts, np.ones((aggr_src_pts.shape[0], 1))], axis=-1).T).T[:, :3]
-        #     aggr_src_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([aggr_src_pts, np.ones((aggr_src_pts.shape[0], 1))], axis=-1).T).T[:, :3]
-        
-        # save to list
-        aggr_src_pts_ls.append(aggr_src_pts.astype(np.float32))
-        if use_dino or distill_dino:
-            aggr_feats_ls.append(aggr_feats.astype(np.float32))
-    
-    if return_raw_feats:
-        return aggr_src_pts_ls, aggr_feats_ls, aggr_raw_feats_ls, rob_mesh_ls
-    return aggr_src_pts_ls, aggr_feats_ls, rob_mesh_ls
-
-def vis_actions(raw_actions):
-    # (T, 7)
-    import open3d as o3d
-    import transforms3d
-
-    visualizer = o3d.visualization.Visualizer()
-    visualizer.create_window()
-    visualizer.add_geometry(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1))
-    # add a random mesh
-    visualizer.add_geometry(o3d.geometry.TriangleMesh.create_sphere(radius=0.05))
-    action_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
-    action_mesh_pts = np.asarray(action_mesh.vertices).copy()
-    visualizer.add_geometry(action_mesh)
-    for t in range(raw_actions.shape[0]):
-        pos = raw_actions[t, :3]
-        rot_euler = raw_actions[t, 3:6]
-        rot_mat = transforms3d.euler.euler2mat(rot_euler[0], rot_euler[1], rot_euler[2])
-        if t == 0:
-            print('rot_mat: ', rot_mat)
-        action_mesh_pts_new = rot_mat @ action_mesh_pts.T + pos.reshape(-1, 1)
-        action_mesh_pts_new = action_mesh_pts_new.T
-        action_mesh.vertices = o3d.utility.Vector3dVector(action_mesh_pts_new)
-        visualizer.update_geometry(action_mesh)
-        visualizer.poll_events()
-        visualizer.update_renderer()
-        if t == 0:
-            visualizer.run()
-        time.sleep(0.03)
-    visualizer.destroy_window()
-
-def vis_post_actions(actions):
-    # (T, 10)
-    import open3d as o3d
-    import torch
-    import pytorch3d
-
-    visualizer = o3d.visualization.Visualizer()
-    visualizer.create_window()
-    visualizer.add_geometry(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1))
-    # add a random mesh
-    visualizer.add_geometry(o3d.geometry.TriangleMesh.create_sphere(radius=0.05))
-    action_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
-    action_mesh_pts = np.asarray(action_mesh.vertices).copy()
-    visualizer.add_geometry(action_mesh)
-    for t in range(actions.shape[0]):
-        pos = actions[t, :3]
-        rot_6d = actions[t, 3:9]
-        rot_mat = pytorch3d.transforms.rotation_6d_to_matrix(torch.from_numpy(rot_6d).unsqueeze(0)).squeeze(0).numpy()
-        if t == 0:
-            print('rot_6d: ', rot_6d)
-            print('rot_mat: ', rot_mat)
-        action_mesh_pts_new = rot_mat @ action_mesh_pts.T + pos.reshape(-1, 1)
-        action_mesh_pts_new = action_mesh_pts_new.T
-        action_mesh.vertices = o3d.utility.Vector3dVector(action_mesh_pts_new)
-        visualizer.update_geometry(action_mesh)
-        visualizer.poll_events()
-        visualizer.update_renderer()
-        if t == 0:
-            visualizer.run()
-        time.sleep(0.03)
-    visualizer.destroy_window()
-
-def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action=False):
+def convert_actions(raw_actions, rotation_transformer, action_key, delta_action=False):
     """
     Convert raw actions to the desired format.
     
@@ -877,8 +982,7 @@ def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action
     """
     act_num, act_dim = raw_actions.shape
     is_bimanual = (act_dim == 14)
-    # vis_actions(raw_actions[:,:7])
-    # vis_actions(raw_actions[:,7:])
+    
     if is_bimanual:
         raw_actions = raw_actions.reshape(act_num * 2, act_dim // 2)
     
@@ -930,10 +1034,9 @@ def _convert_actions(raw_actions, rotation_transformer, action_key, delta_action
         proc_act_dim = raw_actions.shape[-1]
         raw_actions = raw_actions.reshape(act_num, proc_act_dim * 2)
     actions = raw_actions
-    # vis_post_actions(actions[:,10:])
     return actions
 
-def _convert_ee_pose_obs(raw_ee_pose, rotation_transformer, with_gripper=False):
+def convert_ee_pose_obs(raw_ee_pose, rotation_transformer, with_gripper=False):
     """
     Convert ee_pose observation from [pos(3), euler(3), gripper(1)] to [pos(3), rot6d(6)].
     
@@ -1007,11 +1110,10 @@ def get_contact_field(pcd, contact_points,
     # Initialize contact probability and force fields
     contact_probabilities = np.zeros(pcd.shape[0])
     contact_forces = np.zeros((pcd.shape[0], 3))
-    # print(len(valid_positions), ' valid contact points found.')
 
     # For each valid contact point
     for i, (contact_pos, contact_force, force_mag, closest_idx) in enumerate(
-        zip(valid_positions, valid_forces, valid_force_magnitudes, contact_to_pcd_indices)):
+        zip(valid_positions, valid_forces, valid_force_mags, contact_to_pcd_indices)):
         
         # Set contact probability at closest point
         # Use normalized force magnitude as base probability
@@ -1022,7 +1124,6 @@ def get_contact_field(pcd, contact_points,
             contact_probabilities[closest_idx], 
             base_probability
         )
-        # print(f'Contact {i+1}/{len(valid_positions)}: Closest PCD Index {closest_idx}, Base Probability {base_probability:.4f}')
         
         # Weighted average for force vectors (in case of overlapping influences)
         current_prob = contact_probabilities[closest_idx]

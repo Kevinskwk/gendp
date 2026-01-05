@@ -1122,9 +1122,13 @@ class Fusion():
             # align instance mask id to the first frame
             print(self.curr_obs_torch['mask_label'])
             self.align_instance_mask_v3(queries, boundaries, expected_labels, voxel_size=voxel_size, merge_iou=merge_iou)
-            self.curr_obs_torch[f'mask'] = self.xmem_process(self.curr_obs_torch['color'], self.curr_obs_torch['mask']).to(dtype=self.dtype)
+            # Convert tensor to numpy array for xmem_process
+            color_np = (self.curr_obs_torch['color'].detach().cpu().numpy() * 255).astype(np.uint8)
+            self.curr_obs_torch[f'mask'] = self.xmem_process(color_np, self.curr_obs_torch['mask']).to(dtype=self.dtype)
         elif self.xmem_first_mask_loaded and not use_sam:
-            self.curr_obs_torch[f'mask'] = self.xmem_process(self.curr_obs_torch['color'], None).to(dtype=self.dtype) # [num_cam, H, W, num_instance]
+            # Convert tensor to numpy array for xmem_process
+            color_np = (self.curr_obs_torch['color'].detach().cpu().numpy() * 255).astype(np.uint8)
+            self.curr_obs_torch[f'mask'] = self.xmem_process(color_np, None).to(dtype=self.dtype) # [num_cam, H, W, num_instance]
         elif self.xmem_first_mask_loaded and use_sam:
             raise NotImplementedError
             query_mask = torch.zeros((self.num_cam, self.H, self.W), device=self.device)
@@ -1139,7 +1143,9 @@ class Fusion():
             query_mask = instance2onehot(query_mask, len(self.track_ids)) # [num_cam, H, W, num_instance]
             query_mask = self.align_with_prev_mask(query_mask) # [num_cam, H, W, num_instance]
             query_mask = onehot2instance(query_mask) # [num_cam, H, W]
-            self.curr_obs_torch[f'mask'] = self.xmem_process(self.curr_obs_torch['color'], query_mask).to(dtype=self.dtype) # [num_cam, H, W, num_instance]
+            # Convert tensor to numpy array for xmem_process
+            color_np = (self.curr_obs_torch['color'].detach().cpu().numpy() * 255).astype(np.uint8)
+            self.curr_obs_torch[f'mask'] = self.xmem_process(color_np, query_mask).to(dtype=self.dtype) # [num_cam, H, W, num_instance]
             self.curr_obs_torch[f'mask_conf'] = mask_confs
             # self.curr_obs_torch[f'mask'] = query_mask # [num_cam, H, W]
     

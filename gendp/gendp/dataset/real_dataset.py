@@ -31,7 +31,7 @@ from gendp.common.sampler import (
 from gendp.common.kinematics_utils import KinHelper
 from gendp.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
-from gendp.common.data_utils import d3fields_proc, _convert_actions, _convert_ee_pose_obs, load_dict_from_hdf5, modify_hdf5_from_dict
+from gendp.common.data_utils import d3fields_proc, convert_actions, convert_ee_pose_obs, load_dict_from_hdf5, modify_hdf5_from_dict
 from gendp.common.tactile_utils import TactileProcessor
 from gendp.dataset.base_dataset import BaseImageDataset
 from gendp.codecs.imagecodecs_numcodecs import register_codecs, Jpeg2k
@@ -200,10 +200,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         feats_per_epi = list() # save it separately to avoid OOM
         with h5py.File(dataset_path) as file:
             # count total steps
-            # Determine which action key to use from shape_meta
-            action_data_key = 'cartesian_action' if 'key' not in shape_meta['action'] else shape_meta['action']['key']
-            episode_length = file[action_data_key].shape[0] - trim_tail
-            
+            episode_length = file['timestamp'].shape[0] - trim_tail
+
             # Filter out static frames based on EE pose displacement
             if filter_static_frames_enabled:
                 ee_pose_raw = file['observations']['ee_pose'][:episode_length]
@@ -245,7 +243,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 
                 if key == 'action':
                     delta_action = shape_meta['action'].get('delta', False)
-                    this_data = _convert_actions(
+                    this_data = convert_actions(
                         raw_actions=this_data,
                         rotation_transformer=rotation_transformer,
                         action_key=data_key,
@@ -257,7 +255,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     # Convert ee_pose from [pos(3), euler(3), gripper(1)] to [pos(3), rot6d(6)]
                     # print(f"Converting ee_pose: input shape {this_data.shape}, expected output shape {(filtered_episode_length,) + tuple(shape_meta['obs'][key]['shape'])}")
                     # if ee_pose shape_meta is 10, then it includes gripper opening
-                    this_data = _convert_ee_pose_obs(this_data, rotation_transformer, with_gripper=(shape_meta['obs'][key]['shape'][0]==10))
+                    this_data = convert_ee_pose_obs(this_data, rotation_transformer, with_gripper=(shape_meta['obs'][key]['shape'][0]==10))
                     # print(f"After conversion: {this_data.shape}")
                     assert this_data.shape == (filtered_episode_length,) + tuple(shape_meta['obs'][key]['shape']), \
                         f"EE pose shape mismatch: {this_data.shape} vs expected {(filtered_episode_length,) + tuple(shape_meta['obs'][key]['shape'])}"
@@ -377,7 +375,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         exclude_threshold=0.01,
                         use_obj_bg_seg=True,
                         gripper_pose_seq=gripper_pose_seq_filtered,
-                        use_gripper_crop=True,
+                        seg_method='gripper_crop',
                     )
                     
                     # Unpack object and background point clouds
@@ -488,8 +486,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                                     setting_left = shape_meta['tactile_settings']['tactile_left']
                                 tactile_processors['tactile_left'] = TactileProcessor(
                                     width=320, height=240, marker_config=setting_left, use_gpu=True,
-                                    apply_scaling=True,
-                                    scale_factor=0.15,
+                                    # apply_scaling=True,
                                     clip_range=(-10.0, 10.0),
                                     ref_img='/home/kevin/gendp/data/ref_imgs/tactile_left_rgb.png'
                                 )
@@ -500,8 +497,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                                     setting_right = shape_meta['tactile_settings']['tactile_right']
                                 tactile_processors['tactile_right'] = TactileProcessor(
                                     width=320, height=240, marker_config=setting_right, use_gpu=True,
-                                    apply_scaling=True,
-                                    scale_factor=0.15,
+                                    # apply_scaling=True,
                                     clip_range=(-10.0, 10.0),
                                     ref_img='/home/kevin/gendp/data/ref_imgs/tactile_right_rgb.png'
                                 )
@@ -763,8 +759,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         height=240,
                         marker_config=setting,
                         use_gpu=True,
-                        apply_scaling=True,       # Match contact field preprocessing
-                        scale_factor=0.15,        # Scale DOWN real-world data to match pre-training
+                        # apply_scaling=True,       # Match contact field preprocessing
                         clip_range=(-10.0, 10.0)  # Final clip range after scaling
                     )
                 

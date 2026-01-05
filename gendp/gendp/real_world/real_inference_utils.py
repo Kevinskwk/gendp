@@ -1148,7 +1148,7 @@ def get_real_obs_dict(
                     exclude_colors=exclude_colors,
                     use_obj_bg_seg=True,
                     gripper_pose_seq=env_obs['ee_pose'] if 'ee_pose' in env_obs else None,
-                    use_gripper_crop=True,
+                    seg_method='gripper_crop',
                     include_rgb=include_rgb,
                 )
                 aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls, aggr_colors_ls = obj_bg_result

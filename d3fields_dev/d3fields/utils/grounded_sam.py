@@ -408,8 +408,13 @@ def grounded_instance_sam_new_ver(image,
                                   box_thresholds,
                                   merge_all=False,
                                   device="cuda"):
-    # :param image: [H, W, 3] BGR
+    # :param image: [H, W, 3] BGR numpy array or torch tensor (normalized [0,1])
     assert len(image.shape) == 3
+    
+    # Convert torch tensor to numpy array if needed
+    if torch.is_tensor(image):
+        image = (image.detach().cpu().numpy() * 255).astype(np.uint8)
+    
     # cfg
     text_threshold = 0.25
     device = "cuda:0"

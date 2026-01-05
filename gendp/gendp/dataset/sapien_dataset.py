@@ -25,7 +25,7 @@ import scipy.spatial.transform as st
 from gendp.common.pytorch_util import dict_apply
 from gendp.common.replay_buffer import ReplayBuffer
 from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
-from gendp.common.data_utils import d3fields_proc, _convert_actions, get_contact_field
+from gendp.common.data_utils import d3fields_proc, convert_actions, get_contact_field
 from gendp.model.common.rotation_transformer import RotationTransformer
 from gendp.common.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
@@ -119,7 +119,7 @@ def _convert_sapein_to_dp_replay(store, shape_meta, dataset_dir, rotation_transf
                     lowdim_data_dict[key] = list()
                 this_data = file[data_key][()]
                 if key == 'action':
-                    this_data = _convert_actions(
+                    this_data = convert_actions(
                         raw_actions=this_data,
                         rotation_transformer=rotation_transformer,
                         action_key=data_key,
