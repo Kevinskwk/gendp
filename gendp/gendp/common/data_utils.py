@@ -252,6 +252,14 @@ def segment_obj_by_gripper_crop(all_pcd, gripper_pose, gripper_width, gripper_cr
     auto_estimate_plane = gripper_crop_params.get('auto_estimate_plane', False)
     plane_margin = gripper_crop_params.get('plane_margin', 0.005)  # Safety margin above plane
     
+    if gripper_width > 0.07:
+    # when gripper is open wide
+        tool_length = 0.01
+        tool_width = 0.01
+    else:
+        tool_length = gripper_crop_params['tool_length']
+        tool_width = gripper_crop_params['tool_width']
+
     if auto_estimate_plane and all_pcd.shape[0] > 0:
         t_start_plane = time.time()
         plane_height = estimate_plane_height(
@@ -267,8 +275,8 @@ def segment_obj_by_gripper_crop(all_pcd, gripper_pose, gripper_width, gripper_cr
     # Apply gripper-based cropping to object points
     obj_pcd, obj_mask = extract_gripper_tool_pcd(
         all_pcd, gripper_pose_world, gripper_width,
-        tool_length=gripper_crop_params['tool_length'],
-        tool_width=gripper_crop_params['tool_width'], 
+        tool_length=tool_length,
+        tool_width=tool_width,
         gripper_finger_length=gripper_crop_params['gripper_finger_length'],
         safety_margin=gripper_crop_params['safety_margin'],
         global_z_threshold=global_z_threshold
@@ -553,28 +561,28 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 all_feats = None
                 all_pts = None
                 all_colors_list = None
+                feat_dim = 0
             else:
                 # For all other methods: extract all points within boundaries
                 t_start_extract = time.time()
                 all_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.004, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
-                t_extract = time.time() - t_start_extract
                 
                 # Extract features for ALL points at once (before segmentation)
                 t_start_feat = time.time()
                 all_feat_list, all_pts_list, _, all_colors_list = fusion.select_features_from_pcd(
                     all_pcd, -1, per_instance=False, use_seg=False, use_dino=True, include_rgb=include_rgb
                 )
-                t_feat = time.time() - t_start_feat
                 
                 # Combine features and points
-                all_feats = torch.concat(all_feat_list, axis=0).detach().cpu().numpy() if all_feat_list else np.zeros((0, 1024), dtype=np.float32)
+                all_feats = torch.concat(all_feat_list, axis=0).detach().cpu().numpy() if all_feat_list else np.zeros((0, feat_dim), dtype=np.float32)
                 all_pts = np.concatenate(all_pts_list, axis=0) if all_pts_list else np.zeros((0, 3), dtype=np.float32)
                 
                 # If distill_dino is enabled, distill features once here before segmentation
                 if distill_dino and all_feats.shape[0] > 0:
                     all_feats_tensor = torch.from_numpy(all_feats).to(device=fusion.device, dtype=fusion.dtype)
                     all_feats = fusion.eval_dist_to_sel_feats(all_feats_tensor, obj_name=distill_obj).detach().cpu().numpy()
-            
+                feat_dim = all_feats.shape[1] if all_feats.shape[0] > 0 else 0
+
             # Step 2: Apply segmentation method to get object/background masks
             if seg_method == 'gripper_crop' and gripper_pose_seq is not None:
                 gripper_pose = gripper_pose_seq[t]
@@ -635,12 +643,24 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                     obj_pcd = np.zeros((0, 3), dtype=np.float32)
                     bg_pcd = all_pts
 
+            # Apply env_boundaries mask to background points
+            if bg_mask.sum() > 0:
+                x_mask = (all_pts[:, 0] >= env_boundaries['x_lower']) & (all_pts[:, 0] <= env_boundaries['x_upper'])
+                y_mask = (all_pts[:, 1] >= env_boundaries['y_lower']) & (all_pts[:, 1] <= env_boundaries['y_upper'])
+                z_mask = (all_pts[:, 2] >= env_boundaries['z_lower']) & (all_pts[:, 2] <= env_boundaries['z_upper'])
+                bg_mask = bg_mask & x_mask & y_mask & z_mask
+            
+                # Apply env_boundaries mask to background points, features, and colors
+                bg_pcd = all_pts[bg_mask]
+            else:
+                bg_pcd = np.zeros((0, 3), dtype=np.float32)
+
             # Step 3: Use pre-computed features with masks (for all methods except SAM)
             # For methods with masks (gripper_crop, color_crop, d3field_feat, default), reuse features
             if seg_method != 'sam' and obj_mask is not None and bg_mask is not None:
                 # We have pre-extracted features and masks, use them directly
-                obj_feats_from_mask = all_feats[obj_mask] if obj_mask.sum() > 0 else np.zeros((0, 1024), dtype=np.float32)
-                bg_feats_from_mask = all_feats[bg_mask] if bg_mask.sum() > 0 else np.zeros((0, 1024), dtype=np.float32)
+                obj_feats_from_mask = all_feats[obj_mask] if obj_mask.sum() > 0 else np.zeros((0, all_feats.shape[1]), dtype=np.float32)
+                bg_feats_from_mask = all_feats[bg_mask] if bg_mask.sum() > 0 else np.zeros((0, all_feats.shape[1]), dtype=np.float32)
                 
                 if include_rgb and all_colors_list:
                     all_colors = torch.concat(all_colors_list, axis=0)
@@ -661,7 +681,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 # Use pre-computed features and resample to target size
                 if obj_pcd.shape[0] == 0:
                     print(f'Warning: no object points found, using zero-padded point cloud')
-                    obj_feat_list = [torch.zeros((obj_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                    obj_feat_list = [torch.zeros((obj_target_pts, feat_dim), dtype=fusion.dtype, device=fusion.device)]
                     obj_pts_list = [np.zeros((obj_target_pts, 3), dtype=np.float32)]
                     obj_colors_list = [torch.zeros((obj_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
                 else:
@@ -683,7 +703,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 
                 if bg_pcd.shape[0] == 0:
                     print(f'Warning: no background points found, using zero-padded point cloud')
-                    bg_feat_list = [torch.zeros((bg_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                    bg_feat_list = [torch.zeros((bg_target_pts, feat_dim), dtype=fusion.dtype, device=fusion.device)]
                     bg_pts_list = [np.zeros((bg_target_pts, 3), dtype=np.float32)]
                     bg_colors_list = [torch.zeros((bg_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
                 else:
@@ -710,7 +730,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                     print(f'Warning: no object points found, using zero-padded point cloud')
                     # Create empty feature lists directly without calling select_features_from_pcd
                     # Match the dtype of fusion (typically float16)
-                    obj_feat_list = [torch.zeros((obj_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                    obj_feat_list = [torch.zeros((obj_target_pts, feat_dim), dtype=fusion.dtype, device=fusion.device)]
                     obj_pts_list = [np.zeros((obj_target_pts, 3), dtype=np.float32)]
                     obj_colors_list = [torch.zeros((obj_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
                 else:
@@ -721,7 +741,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 if bg_pcd.shape[0] == 0:
                     print(f'Warning: no background points found, using zero-padded point cloud')
                     # Match the dtype of fusion (typically float16)
-                    bg_feat_list = [torch.zeros((bg_target_pts, 1024), dtype=fusion.dtype, device=fusion.device)]
+                    bg_feat_list = [torch.zeros((bg_target_pts, feat_dim), dtype=fusion.dtype, device=fusion.device)]
                     bg_pts_list = [np.zeros((bg_target_pts, 3), dtype=np.float32)]
                     bg_colors_list = [torch.zeros((bg_target_pts, 3), dtype=fusion.dtype, device=fusion.device)] if include_rgb else []
                 else:
@@ -730,10 +750,10 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             
             # Store object and background data separately
             obj_src_pts = np.concatenate(obj_pts_list, axis=0) if obj_pts_list else np.zeros((0, 3), dtype=np.float32)
-            obj_src_feats = torch.concat(obj_feat_list, axis=0).detach().cpu().numpy() if obj_feat_list else np.zeros((0, 1024), dtype=np.float32)
+            obj_src_feats = torch.concat(obj_feat_list, axis=0).detach().cpu().numpy() if obj_feat_list else np.zeros((0, feat_dim), dtype=np.float32)
             bg_src_pts = np.concatenate(bg_pts_list, axis=0) if bg_pts_list else np.zeros((0, 3), dtype=np.float32)
-            bg_src_feats = torch.concat(bg_feat_list, axis=0).detach().cpu().numpy() if bg_feat_list else np.zeros((0, 1024), dtype=np.float32)
-            
+            bg_src_feats = torch.concat(bg_feat_list, axis=0).detach().cpu().numpy() if bg_feat_list else np.zeros((0, feat_dim), dtype=np.float32)
+
             # Process RGB colors if enabled
             if include_rgb:
                 # Object colors: actual RGB values from images (N_obj, 3)
@@ -754,12 +774,12 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             src_feat_list, src_pts_list, _, src_colors_list = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino), include_rgb=include_rgb)
             # Initialize empty variables for non-obj_bg_seg case
             obj_src_pts = np.zeros((0, 3), dtype=np.float32)
-            obj_src_feats = np.zeros((0, 1024), dtype=np.float32)
+            obj_src_feats = np.zeros((0, feat_dim), dtype=np.float32)
             bg_src_pts = np.zeros((0, 3), dtype=np.float32)
-            bg_src_feats = np.zeros((0, 1024), dtype=np.float32)
+            bg_src_feats = np.zeros((0, feat_dim), dtype=np.float32)
         
         aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
-        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino or use_obj_bg_seg) else None # (N, 1024)
+        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino or use_obj_bg_seg) else None # (N, feat_dim)
         
         # Process RGB colors if enabled
         if include_rgb and len(src_colors_list) > 0:
@@ -940,8 +960,8 @@ def d3fields_proc_for_vis(fusion, shape_meta, color_seq, depth_seq, extri_seq, i
         src_feat_list, src_pts_list, _ = fusion.select_features_from_pcd(obj_pcd, N_total, per_instance=True, use_seg=False, use_dino=(use_dino or distill_dino))
         
         aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
-        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino) else None # (N, 1024)
-        
+        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino) else None # (N, feats_dim)
+
         if return_raw_feats:
             if aggr_feats is not None:
                 aggr_raw_feats = aggr_feats.copy()
