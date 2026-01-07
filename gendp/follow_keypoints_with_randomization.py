@@ -94,7 +94,15 @@ def load_keypoints(keypoints_file):
                 ee_pose = np.array(kp['ee_pose'])
                 gripper_pos = kp['gripper_pos']
                 # Read per-keypoint noise levels (use defaults if not specified)
-                pos_noise = kp.get('pos_noise', 0.02)  # default 0.02m
+                pos_noise = kp.get('pos_noise', 0.02)  # default 0.02m or [0.02, 0.02, 0.02]
+                # Convert scalar to 3D array if needed
+                if isinstance(pos_noise, (int, float)):
+                    pos_noise = np.array([pos_noise, pos_noise, pos_noise])
+                else:
+                    pos_noise = np.array(pos_noise)
+                    if pos_noise.shape != (3,):
+                        raise ValueError(f"pos_noise must be scalar or 3D array, got shape {pos_noise.shape}")
+                
                 rot_noise = kp.get('rot_noise', 0.1)   # default 0.1rad
                 keypoints[stage_id].append((ee_pose, gripper_pos, pos_noise, rot_noise))
     
@@ -106,7 +114,7 @@ def add_noise_to_pose(ee_pose, pos_noise_std, rot_noise_std):
     
     Args:
         ee_pose: [x, y, z, rx, ry, rz] in Euler angles (XYZ convention)
-        pos_noise_std: Standard deviation for position noise (meters)
+        pos_noise_std: Standard deviation for position noise (meters) - scalar or [x_std, y_std, z_std]
         rot_noise_std: Standard deviation for rotation noise (radians)
     
     Returns:
@@ -114,8 +122,16 @@ def add_noise_to_pose(ee_pose, pos_noise_std, rot_noise_std):
     """
     noisy_pose = ee_pose.copy()
     
-    # Add position noise
-    pos_noise = np.random.normal(0, pos_noise_std, size=3)
+    # Add position noise - support both scalar and 3D array
+    if isinstance(pos_noise_std, (int, float)):
+        pos_noise = np.random.normal(0, pos_noise_std, size=3)
+    else:
+        # pos_noise_std is [x_std, y_std, z_std]
+        pos_noise = np.array([
+            np.random.normal(0, pos_noise_std[0]),
+            np.random.normal(0, pos_noise_std[1]),
+            np.random.normal(0, pos_noise_std[2])
+        ])
     noisy_pose[:3] += pos_noise
     
     # Add rotation noise
@@ -325,7 +341,8 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
     cache_key = (robot_state['stage'], keypoint_idx)
     
     # Apply noise if enabled (using per-keypoint noise levels passed as parameters)
-    if pos_noise_std > 0 or rot_noise_std > 0:
+    pos_noise_enabled = np.any(pos_noise_std > 0) if isinstance(pos_noise_std, np.ndarray) else pos_noise_std > 0
+    if pos_noise_enabled or rot_noise_std > 0:
         if randomize_per_episode:
             # Use cached noise for entire episode
             if cache_key not in episode_noise_cache:
@@ -353,7 +370,8 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
         final_pose, final_gripper, final_pos_noise, final_rot_noise = stage_keypoints[-1]
         
         # Apply noise to final target using per-keypoint noise levels
-        if final_pos_noise > 0 or final_rot_noise > 0:
+        final_pos_noise_enabled = np.any(final_pos_noise > 0) if isinstance(final_pos_noise, np.ndarray) else final_pos_noise > 0
+        if final_pos_noise_enabled or final_rot_noise > 0:
             cache_key = (robot_state['stage'], num_keypoints - 1)
             if randomize_per_episode:
                 if cache_key not in episode_noise_cache:
@@ -438,7 +456,9 @@ def compute_target_action(current_obs, target_pose, target_gripper, stage_keypoi
             cache_key1 = (robot_state['stage'], i)
             cache_key2 = (robot_state['stage'], i + 1)
             
-            if kp1_pos_noise > 0 or kp1_rot_noise > 0 or kp2_pos_noise > 0 or kp2_rot_noise > 0:
+            kp1_pos_noise_enabled = np.any(kp1_pos_noise > 0) if isinstance(kp1_pos_noise, np.ndarray) else kp1_pos_noise > 0
+            kp2_pos_noise_enabled = np.any(kp2_pos_noise > 0) if isinstance(kp2_pos_noise, np.ndarray) else kp2_pos_noise > 0
+            if kp1_pos_noise_enabled or kp1_rot_noise > 0 or kp2_pos_noise_enabled or kp2_rot_noise > 0:
                 if randomize_per_episode:
                     if cache_key1 not in episode_noise_cache:
                         episode_noise_cache[cache_key1] = add_noise_to_pose(kp1_pose, kp1_pos_noise, kp1_rot_noise)
@@ -652,7 +672,8 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                                 stage_kps = keypoints[stage_id]
                                 for i in range(len(stage_kps)):
                                     kp_pose, _, kp_pos_noise, kp_rot_noise = stage_kps[i]
-                                    if kp_pos_noise > 0 or kp_rot_noise > 0:
+                                    kp_pos_noise_enabled = np.any(kp_pos_noise > 0) if isinstance(kp_pos_noise, np.ndarray) else kp_pos_noise > 0
+                                    if kp_pos_noise_enabled or kp_rot_noise > 0:
                                         cache_key = (stage_id, i)
                                         episode_noise_cache[cache_key] = add_noise_to_pose(
                                             kp_pose, kp_pos_noise, kp_rot_noise)

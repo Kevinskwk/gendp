@@ -3,7 +3,7 @@ Terminal-based evaluation for real Franka robot with contact field support.
 This script evaluates policies that use contact field observations.
 
 Usage:
-python eval_real_franka_terminal_contact_field.py -i <ckpt_path> -o <save_dir> --robot_ip <ip_of_franka> --contact_field_ckpt <contact_field_ckpt_path>
+python eval_real_franka_terminal_contact_field.py -i <ckpt_path> -o <save_dir> --robot_ip <ip_of_franka>
 
 ================ Human in control ==============
 Commands (type and press Enter):
@@ -338,8 +338,8 @@ def get_init_poses(task='scraper'):
         j_init = np.array([-0.24010226130485535, 0.196928933262825, 0.042084839195013046, -2.0691111087799072, -0.015080037526786327, 2.2436816692352295, -0.9613606929779053])
         ee_init = np.array([0.5646023154258728, -0.11422417312860489, 0.33527788519859314, -3.125333787179658, 0.015434648044571952, 0.7722765841437812])
     elif task == 'crayon_pickup':
-        j_init = np.array([-0.6027288436889648, 0.44224241375923157, 0.410679429769516, -1.7363632917404175, -0.23993955552577972, 2.1253926753997803, -1.5027179718017578])
-        ee_init = np.array([0.6354339122772217, -0.15972062945365906, 0.34067776799201965, -3.132333702428826, 0.031218095471984286, 1.4045849642585833])
+        j_init = np.array([-0.02994604781270027, 0.2991308569908142, -0.004555299412459135, -1.751071572303772, -0.06488428264856339, 2.0103297233581543, -0.827126145362854])
+        ee_init = np.array([0.6353483200073242, -0.034808311611413956, 0.40055933594703674, 3.1242419555642567, 0.06814992618484839, 0.8098764046141207])
     else:
         raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon', 'crayon_old', 'crayon_pickup'")
     
@@ -351,7 +351,6 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--input_dir', '-i', required=True, help='Path to checkpoint')
 @click.option('--output', '-o', required=True, help='Directory to save recording')
 @click.option('--robot_ip', '-ri ', default="192.168.1.143", help="Franka's IP address ")
-@click.option('--contact_field_ckpt', '-cf', required=True, help='Path to contact field model checkpoint')
 @click.option('--match_dataset', '-m', default=None, help='Dataset used to overlay and adjust initial condition')
 @click.option('--match_episode', '-me', default=None, type=int, help='Match specific episode from the match dataset')
 @click.option('--vis_camera_idx', default=0, type=int, help="Which RealSense camera to visualize.")
@@ -364,7 +363,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
 @click.option('--save_viz_interval', default=30, type=int, help="Save visualization every N frames (0 to disable)")
 @click.option('--task', '-t', default='crayon', type=click.Choice(['scraper', 'crayon', 'crayon_old', 'crayon_pickup']), help="Task to perform (scraper or crayon)")
-def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_episode,
+def main(input_dir, output, robot_ip, match_dataset, match_episode,
     vis_camera_idx, vis_d3fields,
     steps_per_inference, max_duration,
     frequency, command_latency, n_action_steps, init_joints, save_viz_interval, task):
@@ -386,13 +385,6 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
                 episode_first_frame_map[episode_idx] = frames[0]
     print(f"Loaded initial frame for {len(episode_first_frame_map)} episodes")
     
-    # Load contact field model
-    print(f"Loading contact field model from {contact_field_ckpt}...")
-    contact_field_device = 'cuda'
-    contact_field_model, contact_field_config = load_model_and_config_from_checkpoint(contact_field_ckpt, device=contact_field_device)
-    print(f"✅ Contact field model loaded successfully")
-    # contact_field_model = None
-    
     # load checkpoint
     ckpt_path = input_dir
     payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
@@ -404,6 +396,14 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
 
     num_bots = 1
+
+    # Load contact field model
+    contact_field_ckpt = cfg.task.dataset.contact_field_checkpoint_path
+    print(f"Loading contact field model from {contact_field_ckpt}...")
+    contact_field_device = 'cuda'
+    contact_field_model, contact_field_config = load_model_and_config_from_checkpoint(contact_field_ckpt, device=contact_field_device)
+    print(f"✅ Contact field model loaded successfully")
+    # contact_field_model = None
 
     # hacks for method-specific setup.
     action_offset = 0
@@ -647,6 +647,8 @@ def main(input_dir, output, robot_ip, contact_field_ckpt, match_dataset, match_e
                                         print(f'🏠 Starting smooth homing motion for task "{task}" (joint mode, 20 steps)...')
                                     elif action_mode == 'eef':
                                         # Home end-effector pose: [x, y, z, rx, ry, rz, gripper]
+                                        # Add a bit of randomness to the home pose
+                                        ee_init_base += np.random.randn(6) * 0.02
                                         ee_init = np.append(ee_init_base, robot_state['gripper_pos'])
                                         current_ee = obs['ee_pose'][-1].copy()
                                         current_ee[-1] = robot_state['gripper_pos']

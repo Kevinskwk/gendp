@@ -456,7 +456,6 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     bg_feats_ls = []
     # for t in tqdm(range(T), desc=f'Computing D3Fields'):
     for t in range(T):
-        t_frame_start = time.time()
         
         # Tune extrinsics
         # extri = extri_seq[t]
@@ -472,7 +471,6 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         
         t_start_update = time.time()
         fusion.update(obs, update_dino=(use_dino or distill_dino or use_obj_bg_seg))
-        t_update = time.time() - t_start_update
         
         # compute robot pcd
         if 'panda' in teleop_robot.robot_name:
@@ -564,11 +562,9 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 feat_dim = 0
             else:
                 # For all other methods: extract all points within boundaries
-                t_start_extract = time.time()
                 all_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.004, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
                 
                 # Extract features for ALL points at once (before segmentation)
-                t_start_feat = time.time()
                 all_feat_list, all_pts_list, _, all_colors_list = fusion.select_features_from_pcd(
                     all_pcd, -1, per_instance=False, use_seg=False, use_dino=True, include_rgb=include_rgb
                 )
@@ -772,11 +768,9 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         else:
             obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.004, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
             src_feat_list, src_pts_list, _, src_colors_list = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino), include_rgb=include_rgb)
-            # Initialize empty variables for non-obj_bg_seg case
-            obj_src_pts = np.zeros((0, 3), dtype=np.float32)
-            obj_src_feats = np.zeros((0, feat_dim), dtype=np.float32)
-            bg_src_pts = np.zeros((0, 3), dtype=np.float32)
-            bg_src_feats = np.zeros((0, feat_dim), dtype=np.float32)
+            if distill_dino:
+                all_feats_tensor = torch.concat(src_feat_list, axis=0)
+                src_feat_list = [fusion.eval_dist_to_sel_feats(all_feats_tensor, obj_name=distill_obj)]
         
         aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
         aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino or use_obj_bg_seg) else None # (N, feat_dim)

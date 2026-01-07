@@ -206,6 +206,7 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                 enable_multi_cam_vis=True,
                 record_raw_video=True,
                 thread_per_video=3,
+                video_capture_fps=15,
                 video_crf=21,
                 shm_manager=shm_manager) as env:
                 
@@ -260,8 +261,8 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                     )
                     
                     # Save visualization images periodically
-                    if save_viz_interval > 0:
-                        save_visualization_images(vis_img, output_dir, iter_idx, save_viz_interval)
+                    # if save_viz_interval > 0:
+                    #     save_visualization_images(vis_img, output_dir, iter_idx, save_viz_interval)
                     
                     # Execute robot actions
                     joint_pos = obs['full_joint_pos']

@@ -79,34 +79,6 @@ robot_state = {
     'homing_step': 0  # Current step in homing trajectory
 }
 
-def get_task_init_poses(task='scraper'):
-    """
-    Get initial poses for different tasks.
-    
-    Args:
-        task: Task name ('scraper' or 'crayon')
-    
-    Returns:
-        tuple: (joint_init, ee_init) - both 7D arrays with last element for gripper
-    """
-    if task == 'scraper':
-        # Scraper task init pose
-        joint_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, 
-                               -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 
-                               1.6146283149719238])
-        ee_init = np.array([0.5, 0.242, 0.2517, 2.702, -0.458, -0.614])
-    elif task == 'crayon':
-        # Crayon task init pose
-        joint_init = np.array([-0.1898142248392105, 0.42033371329307556, -0.0180759746581316, 
-                               -1.826417088508606, -0.0848948061466217, 2.243102788925171, 
-                               0.5972442030906677])
-        ee_init = np.array([0.6289371252059937, -0.13435199856758118, 0.3047587275505066, 
-                           3.0775118520198985, -0.03660714979931323, -0.7493871829330105])
-    else:
-        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon'")
-    
-    return joint_init, ee_init
-
 def obs_dict_np_to_o3d(obs_dict_np):
     from matplotlib import cm
     cmap = cm.get_cmap('viridis')
@@ -348,19 +320,25 @@ def get_init_poses(task='scraper'):
     Returns:
         Tuple of (joint_init, ee_init)
     """
-    if task.lower() == 'scraper':
+    if task == 'scraper':
         j_init = np.array([0.765608012676239, 0.3609752953052521, -0.2664286494255066, 
                            -2.0539345741271973, -0.5605860948562622, 2.080862522125244, 
                            1.6146283149719238])
         ee_init = np.array([0.5, 0.242, 0.2517, 2.702, -0.458, -0.614])
-    elif task.lower() == 'crayon':
+    elif task == 'crayon_old':
         j_init = np.array([-0.1898142248392105, 0.42033371329307556, -0.0180759746581316, 
                            -1.826417088508606, -0.0848948061466217, 2.243102788925171, 
                            0.5972442030906677])
         ee_init = np.array([0.6289371252059937, -0.13435199856758118, 0.3047587275505066, 
                             3.0775118520198985, -0.03660714979931323, -0.7493871829330105])
+    elif task == 'crayon':
+        j_init = np.array([-0.24010226130485535, 0.196928933262825, 0.042084839195013046, -2.0691111087799072, -0.015080037526786327, 2.2436816692352295, -0.9613606929779053])
+        ee_init = np.array([0.5646023154258728, -0.11422417312860489, 0.33527788519859314, -3.125333787179658, 0.015434648044571952, 0.7722765841437812])
+    elif task == 'crayon_pickup':
+        j_init = np.array([-0.02994604781270027, 0.2991308569908142, -0.004555299412459135, -1.751071572303772, -0.06488428264856339, 2.0103297233581543, -0.827126145362854])
+        ee_init = np.array([0.6353483200073242, -0.034808311611413956, 0.40055933594703674, 3.1242419555642567, 0.06814992618484839, 0.8098764046141207])
     else:
-        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon'")
+        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon', 'crayon_old', 'crayon_pickup'")
     
     return j_init, ee_init
 
@@ -403,9 +381,6 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                     str(match_video_path), num_frames=1)
                 episode_first_frame_map[episode_idx] = frames[0]
     print(f"Loaded initial frame for {len(episode_first_frame_map)} episodes")
-    
-    # Get initial poses for the specified task
-    task_joint_init, task_ee_init = get_task_init_poses(task)
     print(f"🎯 Using {task} task initial poses")
     
     # load checkpoint
@@ -556,6 +531,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
 
                     obs_dict = dict_apply(obs_dict_np, 
                         lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
+                    print("obs_dict keys:", obs_dict.keys())
                     result = policy.predict_action(obs_dict)
                     action = result['action'][0].detach().to('cpu').numpy()
                     del result
@@ -641,26 +617,31 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             if robot_state['move_to_init']:
                                 # Initialize trajectory on first call
                                 if robot_state['homing_trajectory'] is None:
+                                    # Get task-specific init poses
+                                    j_init_base, ee_init_base = get_init_poses(task)
+
                                     if action_mode == 'joint':
                                         # Initial joint configuration from task
-                                        j_init = np.concatenate([task_joint_init, [robot_state['gripper_pos']]])
+                                        j_init = np.append(j_init_base, robot_state['gripper_pos'])
                                         current_joint = obs['full_joint_pos'][-1, :8].copy()
                                         current_joint[-1] = robot_state['gripper_pos']
                                         # Generate smooth trajectory (2 seconds at 10Hz = 20 steps)
                                         robot_state['homing_trajectory'] = generate_smooth_trajectory(
                                             current_joint, j_init, num_steps=20)
                                         robot_state['homing_step'] = 0
-                                        print(f'🏠 Starting smooth homing motion to {task} task pose (joint mode, 20 steps)...')
+                                        print(f'🏠 Starting smooth homing motion for task "{task}" (joint mode, 20 steps)...')
                                     elif action_mode == 'eef':
                                         # Home end-effector pose from task
-                                        ee_init = np.concatenate([task_ee_init, [robot_state['gripper_pos']]])
+                                        # Add a bit of randomness to the home pose
+                                        ee_init_base += np.random.randn(6) * 0.02
+                                        ee_init = np.append(ee_init_base, robot_state['gripper_pos'])
                                         current_ee = obs['ee_pose'][-1].copy()
                                         current_ee[-1] = robot_state['gripper_pos']
                                         # Generate smooth trajectory (2 seconds at 10Hz = 20 steps)
                                         robot_state['homing_trajectory'] = generate_smooth_trajectory(
                                             current_ee, ee_init, num_steps=20)
                                         robot_state['homing_step'] = 0
-                                        print(f'🏠 Starting smooth homing motion to {task} task pose (EEF mode, 20 steps)...')
+                                        print(f'🏠 Starting smooth homing motion for task "{task}" (EEF mode, 20 steps)...')
                                 
                                 # Execute current step of trajectory
                                 if robot_state['homing_step'] < len(robot_state['homing_trajectory']):
@@ -767,7 +748,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                 t_action_convert_start = time.perf_counter()
                                 # Get current end-effector pose for delta action conversion
                                 current_ee_pose = obs['ee_pose'][-1] if delta_action else None
-                                print("action:", action)
+                                # print("action:", action)
                                 env_actions = policy_action_to_env_action(action, action_mode, num_bots, 
                                                                           delta_action=delta_action, 
                                                                           current_ee_pose=current_ee_pose)
@@ -776,22 +757,27 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                 
                                 # deal with timing
                                 t_timing_start = time.perf_counter()
-                                action_timestamps = (np.arange(len(action), dtype=np.float64) + action_offset
-                                    ) * dt + obs_timestamps[-1]
-                                action_exec_latency = 0.2
+                                # action_timestamps = (np.arange(len(action), dtype=np.float64) + action_offset
+                                #     ) * dt + obs_timestamps[-1]
+                                # action_exec_latency = 0.2
+                                # curr_time = time.time()
+                                # is_new = action_timestamps > (curr_time + action_exec_latency)
+                                # if np.sum(is_new) == 0:
+                                #     # exceeded time budget, still do something
+                                #     print(f"⚠️  [Warning] Exceeded time budget! Using last action only.")
+                                #     env_actions = env_actions[[-1]]
+                                #     # schedule on next available step
+                                #     next_step_idx = int(np.ceil((curr_time - eval_t_start) / dt))
+                                #     action_timestamp = eval_t_start + (next_step_idx) * dt
+                                #     action_timestamps = np.array([action_timestamp])
+                                # else:
+                                #     env_actions = env_actions[is_new]
+                                #     action_timestamps = action_timestamps[is_new]
+                                
                                 curr_time = time.time()
-                                is_new = action_timestamps > (curr_time + action_exec_latency)
-                                if np.sum(is_new) == 0:
-                                    # exceeded time budget, still do something
-                                    print(f"⚠️  [Warning] Exceeded time budget! Using last action only.")
-                                    env_actions = env_actions[[-1]]
-                                    # schedule on next available step
-                                    next_step_idx = int(np.ceil((curr_time - eval_t_start) / dt))
-                                    action_timestamp = eval_t_start + (next_step_idx) * dt
-                                    action_timestamps = np.array([action_timestamp])
-                                else:
-                                    env_actions = env_actions[is_new]
-                                    action_timestamps = action_timestamps[is_new]
+                                action_exec_latency = 0.01  # Small latency buffer for action scheduling
+                                action_timestamps = curr_time + action_exec_latency + (np.arange(len(action), dtype=np.float64) + action_offset) * dt
+
                                 t_timing_end = time.perf_counter()
                                 # print(f"⏱️  [Timing] Action timing calculation: {(t_timing_end - t_timing_start)*1000:.2f}ms")
                                 
@@ -838,16 +824,31 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                 # print(f"⏱️  [Timing] Visualization: {(t_viz_end - t_viz_start)*1000:.2f}ms")
 
                                 # wait for execution
-                                t_wait_start = time.perf_counter()
-                                precise_wait(t_cycle_end - frame_latency)
-                                t_wait_end = time.perf_counter()
+                                # t_wait_start = time.perf_counter()
+                                # precise_wait(t_cycle_end - frame_latency)
+                                # t_wait_end = time.perf_counter()
+
+                                num_actions_scheduled = len(env_actions)
                                 
+                                # Wait for ALL actions to complete (use last action timestamp)
+                                # Calculate when the last action will finish executing
+                                if len(action_timestamps) > 0:
+                                    t_last_action_end = action_timestamps[-1]
+                                    # Wait until the last action completes
+                                    t_wait_start = time.perf_counter()
+                                    precise_wait(t_last_action_end - frame_latency, time_func=time.time)
+                                    t_wait_end = time.perf_counter()
+                                else:
+                                    t_wait_start = time.perf_counter()
+                                    t_wait_end = time.perf_counter()
+
                                 # Calculate total cycle time
                                 t_cycle_total = t_wait_end - t_obs_start
                                 # print(f"⏱️  [Timing] Wait time: {(t_wait_end - t_wait_start)*1000:.2f}ms")
                                 # print(f"⏱️  [Timing] ========== TOTAL CYCLE: {t_cycle_total*1000:.2f}ms ==========\n")
                                 
-                                iter_idx += steps_per_inference
+                                # iter_idx += steps_per_inference
+                                iter_idx += num_actions_scheduled
 
                                 # Print status periodically
                                 current_time = time.time()
