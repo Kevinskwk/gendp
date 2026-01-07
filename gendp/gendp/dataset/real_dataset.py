@@ -722,8 +722,11 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             for key in tactile_keys:
                 # key is like "tactile_left_force_field" or "tactile_right_force_field"
                 # Extract base name: "tactile_left_force_field" -> "tactile_left"
-                tactile_img_key = key.replace('_force_field', '')
-                tactile_keys.append(tactile_img_key)
+                base_key = key.replace('_force_field', '')
+                # Map to image key: "tactile_left" -> "tactile_img_left"
+                tactile_img_key = base_key.replace('tactile_', 'tactile_img_')
+                # tactile_img_key = key.replace('_force_field', '')
+                # tactile_keys.append(tactile_img_key)
                 # Check if the key exists in observations
                 if 'tactile' not in file['observations'] or tactile_img_key not in file['observations']['tactile']:
                     print(f"Warning: {tactile_img_key} not found in observations, skipping...")
