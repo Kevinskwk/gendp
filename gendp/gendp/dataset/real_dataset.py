@@ -722,10 +722,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
             for key in tactile_keys:
                 # key is like "tactile_left_force_field" or "tactile_right_force_field"
                 # Extract base name: "tactile_left_force_field" -> "tactile_left"
-                base_key = key.replace('_force_field', '')
-                # Map to image key: "tactile_left" -> "tactile_img_left"
-                tactile_img_key = base_key.replace('tactile_', 'tactile_img_')
-                
+                tactile_img_key = key.replace('_force_field', '')
+                tactile_keys.append(tactile_img_key)
                 # Check if the key exists in observations
                 if 'tactile' not in file['observations'] or tactile_img_key not in file['observations']['tactile']:
                     print(f"Warning: {tactile_img_key} not found in observations, skipping...")
@@ -1153,7 +1151,15 @@ class RealDataset(BaseImageDataset):
             filter_pos_threshold=0.001,
             filter_rot_threshold=0.01,
             filter_boundary_frames=10,
-            filter_gripper_threshold=0.001
+            filter_gripper_threshold=0.001,
+            # Data augmentation parameters
+            augmentation_enabled=False,
+            augmentation_translation_enabled=False,
+            augmentation_translation_range_x=0.0,
+            augmentation_translation_range_y=0.0,
+            augmentation_translation_range_z=0.0,
+            augmentation_mirror_enabled=False,
+            augmentation_probability=0.5
             ):
         
         super().__init__()
@@ -1426,6 +1432,24 @@ class RealDataset(BaseImageDataset):
         self.use_legacy_normalizer = use_legacy_normalizer
         self.dataset_dir = dataset_dir
         self.key_first_k = key_first_k
+        
+        # Data augmentation settings
+        self.augmentation_enabled = augmentation_enabled
+        self.augmentation_translation_enabled = augmentation_translation_enabled
+        self.augmentation_translation_range_x = augmentation_translation_range_x
+        self.augmentation_translation_range_y = augmentation_translation_range_y
+        self.augmentation_translation_range_z = augmentation_translation_range_z
+        self.augmentation_mirror_enabled = augmentation_mirror_enabled
+        self.augmentation_probability = augmentation_probability
+        self.augmentation_rng = np.random.RandomState(seed)
+        
+        if self.augmentation_enabled:
+            print(f"✅ Data augmentation enabled (probability={augmentation_probability}):")
+            if self.augmentation_translation_enabled:
+                print(f"   - Translation: x=±{augmentation_translation_range_x}m, "
+                      f"y=±{augmentation_translation_range_y}m, z=±{augmentation_translation_range_z}m")
+            if self.augmentation_mirror_enabled:
+                print(f"   - Mirror: axis=y")
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -1522,6 +1546,130 @@ class RealDataset(BaseImageDataset):
 
     def __len__(self) -> int:
         return len(self.sampler)
+    
+    def _apply_translation_augmentation(self, obs_dict, action, translation):
+        """
+        Apply translation augmentation to observations and actions.
+        
+        Args:
+            obs_dict: Dictionary of observations
+            action: Action array (T, action_dim)
+            translation: Translation vector [dx, dy, dz]
+        
+        Returns:
+            Augmented obs_dict and action
+        """
+        dx, dy, dz = translation
+        
+        # Augment low-dim observations (ee_pose)
+        for key in self.lowdim_keys:
+            if 'pose' in key or 'pos' in key:
+                # Add translation to position (first 3 dims)
+                obs_dict[key][:, :3] += np.array([dx, dy, dz], dtype=np.float32)
+        
+        # Augment spatial data (point clouds)
+        for key in self.spatial_keys:
+            # Point cloud format: (T, C, N) where first 3 channels are xyz
+            obs_dict[key][:, :3, :] += np.array([dx, dy, dz], dtype=np.float32).reshape(1, 3, 1)
+        
+        # Augment tactile coordinates if they exist
+        for key in self.tactile_coord_keys:
+            if key in obs_dict:
+                # Tactile coord format: (T, 3, H, W) for 2D or (T, 3, N) for 1D
+                obs_dict[key][:, :3] += np.array([dx, dy, dz], dtype=np.float32).reshape(1, 3, 1, 1) if obs_dict[key].ndim == 4 else np.array([dx, dy, dz], dtype=np.float32).reshape(1, 3, 1)
+        
+        # Augment actions
+        is_delta = self.shape_meta['action'].get('delta', False)
+        if is_delta:
+            # For delta actions, translation is already relative, no change needed
+            pass
+        else:
+            # For absolute actions, add translation to position
+            action[:, :3] += np.array([dx, dy, dz], dtype=np.float32)
+        
+        return obs_dict, action
+    
+    def _apply_mirror_augmentation(self, obs_dict, action):
+        """
+        Apply y axis mirror augmentation to observations and actions.
+        
+        Args:
+            obs_dict: Dictionary of observations
+            action: Action array (T, action_dim)
+        
+        Returns:
+            Augmented obs_dict and action
+        """
+        axis_idx = 1  # Always mirror across y-axis
+        # Augment low-dim observations (ee_pose)
+        for key in self.lowdim_keys:
+            if 'pose' in key:
+                # Mirror position
+                obs_dict[key][:, axis_idx] *= -1
+                
+                # Mirror rotation (rot6d format: 9 dims total, first 3 = pos, next 6 = rot6d)
+                if obs_dict[key].shape[-1] >= 9:
+                    # For rot6d representation, we need to flip the appropriate rotation columns
+                    # rot6d is two column vectors of a rotation matrix [c1, c2]
+                    # Mirroring around Y means flipping X and Z components of these vectors
+                    # Flip X component (indices 3, 6)
+                    obs_dict[key][:, 3] *= -1  # First column X
+                    obs_dict[key][:, 6] *= -1  # Second column X
+                    # Flip Z component (indices 5, 8)
+                    obs_dict[key][:, 5] *= -1  # First column Z
+                    obs_dict[key][:, 8] *= -1  # Second column Z
+            elif 'pos' in key:
+                # Just mirror position
+                obs_dict[key][:, axis_idx] *= -1
+        
+        # Augment spatial data (point clouds)
+        for key in self.spatial_keys:
+            # Mirror position (first 3 channels are xyz)
+            obs_dict[key][:, axis_idx, :] *= -1
+        
+        # Augment tactile coordinates
+        for key in self.tactile_coord_keys:
+            if key in obs_dict:
+                # Mirror position coordinates
+                obs_dict[key][:, axis_idx] *= -1
+        
+        # Augment tactile force fields - mirror force directions
+        for key in self.tactile_keys:
+            if key in obs_dict:
+                # Force field format: (T, C, H, W) or (T, C, N)
+                # First 3 channels of force field are force directions (fx, fy, fz)
+                # Need to check the exact structure - it might be [contact_prob, fx, fy, fz, ...]
+                # Based on the code, tactile has 6 or 9 channels: [current_forces(3), reference_forces(3), coords(3)]
+                # or just [forces(6)] = [current(3), reference(3)]
+                # We need to flip the force component along the mirror axis
+                if obs_dict[key].shape[1] >= 3:
+                    # Flip current force along mirror axis (assuming first 3 channels are forces)
+                    obs_dict[key][:, axis_idx] *= -1
+                if obs_dict[key].shape[1] >= 6:
+                    # Flip reference force along mirror axis (channels 3-5)
+                    obs_dict[key][:, 3 + axis_idx] *= -1
+        
+        # Augment actions
+        is_delta = self.shape_meta['action'].get('delta', False)
+        
+        # Mirror position/translation
+        action[:, axis_idx] *= -1
+        
+        # Mirror rotation
+        # For delta actions with rotvec (axis-angle), mirror the appropriate component
+        if is_delta and action.shape[-1] >= 6:
+            # Delta rotvec format: [dx, dy, dz, rot_x, rot_y, rot_z, gripper]
+            # Mirroring around Y means flipping X and Z rotation components
+            action[:, 3] *= -1  # rot_x
+            action[:, 5] *= -1  # rot_z
+        elif not is_delta and action.shape[-1] >= 9:
+            # Absolute action with rot6d: same as obs_dict pose
+            action[:, 3] *= -1
+            action[:, 6] *= -1
+            action[:, 5] *= -1
+            action[:, 8] *= -1
+        
+        return obs_dict, action
 
     def _sample_to_data(self, sample):
         # to save RAM, only return first n_obs_steps of OBS
@@ -1616,6 +1764,35 @@ class RealDataset(BaseImageDataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(idx)
         data = self._sample_to_data(sample)
+        
+        # Apply data augmentation (only during training, not validation)
+        # Note: validation dataset is created with opposite train_mask, so we can use train_mask to check
+        if self.augmentation_enabled and np.any(self.train_mask):
+            # Randomly decide whether to apply augmentation
+            if self.augmentation_rng.random() < self.augmentation_probability:
+                obs_dict = {k: v.numpy() for k, v in data['obs'].items()}
+                action = data['action'].numpy()
+                
+                # Apply translation augmentation
+                if self.augmentation_translation_enabled:
+                    # Sample random translation
+                    dx = self.augmentation_rng.uniform(-self.augmentation_translation_range_x, 
+                                                       self.augmentation_translation_range_x)
+                    dy = self.augmentation_rng.uniform(-self.augmentation_translation_range_y, 
+                                                       self.augmentation_translation_range_y)
+                    dz = self.augmentation_rng.uniform(-self.augmentation_translation_range_z, 
+                                                       self.augmentation_translation_range_z)
+                    translation = np.array([dx, dy, dz], dtype=np.float32)
+                    obs_dict, action = self._apply_translation_augmentation(obs_dict, action, translation)
+                
+                # Apply mirror augmentation
+                if self.augmentation_mirror_enabled:
+                    obs_dict, action = self._apply_mirror_augmentation(obs_dict, action)
+                
+                # Convert back to tensors
+                data['obs'] = dict_apply(obs_dict, torch.from_numpy)
+                data['action'] = torch.from_numpy(action)
+        
         return data
 
 def update_ee_pose():
