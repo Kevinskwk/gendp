@@ -11,7 +11,7 @@ checkpoint:
     mode: max
     monitor_key: test_mean_score
 dataloader:
-  batch_size: 128
+  batch_size: 64
   num_workers: 8
   persistent_workers: true
   pin_memory: true
@@ -24,8 +24,9 @@ ema:
   min_value: 0.0
   power: 0.75
   update_after_step: 0
-exp_name: n_obs_steps_3_delta_ee_no_joint_horizon_24
-horizon: 24
+# exp_name: n_obs_steps_6_delta_ee_no_joint_horizon_16
+exp_name: n_obs_steps_3_delta_ee_no_joint_horizon_24_depthweight
+horizon: 24 # 16
 keypoint_visible_rate: 1.0
 logging:
   group: null
@@ -40,7 +41,7 @@ logging:
   - franka
   - realsense
   - default
-n_action_steps: 12
+n_action_steps: 12 # 8
 n_latency_steps: 0
 n_obs_steps: 3
 name: train_diffusion_unet_hybrid
@@ -77,13 +78,15 @@ shape_meta:
     #   - 9
     d3fields:
       shape:
-      - 12 # C (5 original + 3 RGB + 4 contact field channels: contact_prob + fx + fy + fz)
+      # - 12 # C (5 original + 3 RGB + 4 contact field channels: contact_prob + fx + fy + fz)
+      - 11 # C (4 original + 3 RGB + 4 contact field channels: contact_prob + fx + fy + fz)
       - 868 # N (256 obj + 512 env + 100 ee = 868 total points)
       type: spatial
       info:
         reference_frame: robot
         distill_dino: true
-        distill_obj: crayon_new
+        # distill_obj: crayon_new
+        distill_obj: pencil_real
         view_keys:
         - camera_front
         - camera_left
@@ -103,7 +106,8 @@ shape_meta:
           x_upper: 0.65
           y_lower: -0.1
           y_upper: 0.05
-          z_lower: -0.03
+          # z_lower: -0.03
+          z_lower: 0.14
           z_upper: 0.17
         obj_boundaries:
           x_lower: 0.3
@@ -192,7 +196,8 @@ task:
     reference_tactile_use_difference: true
     # Contact field model settings
     # contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/joint_tools_mixed_focal_0.9_0.75_nobias_ref_diff_hist_smoothpc_pcd512_directional_20251101_171937/last.ckpt  # Path to contact field checkpoint
-    contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_focal_0.9_0.75_force_mag_dir_ada_weight_hist5_smoothpc_pcd256+512_20251109_122716/last.ckpt  # Path to contact field checkpoint
+    # contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_focal_0.9_0.75_force_mag_dir_ada_weight_hist5_smoothpc_pcd256+512_20251109_122716/last.ckpt  # Path to contact field checkpoint
+    contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_1109_real_scraper_qp_dynamic_ref_20251231_170754/last.ckpt  # Path to contact field checkpoint
     contact_field_device: cuda  # Device for contact field inference
     # Frame filtering settings
     filter_static_frames: true  # Enable filtering of static frames
@@ -200,12 +205,22 @@ task:
     filter_rot_threshold: 0.01  # Rotation displacement threshold in radians (~0.57 degrees)
     filter_boundary_frames: 10  # Number of frames to keep at beginning and end
     filter_gripper_threshold: 0.001  # Gripper displacement threshold in meters
+    filter_gripper_window: 3
+    # Data augmentation settings
+    augmentation_enabled: false  # Enable data augmentation
+    augmentation_translation_enabled: true  # Enable translation augmentation
+    augmentation_translation_range_x: 0.02  # Translation range in x-axis (meters)
+    augmentation_translation_range_y: 0.03  # Translation range in y-axis (meters)
+    augmentation_translation_range_z: 0.01  # Translation range in z-axis (meters)
+    augmentation_mirror_enabled: false  # Enable mirror augmentation
+    augmentation_probability: 0.5  # Probability of applying augmentation (0.0-1.0)
   dataset_dir: ${data_root}/data/${dataset_name}
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
 task_name: crayon_cross_contact_field
-dataset_name: crayon_pickup_new
+# dataset_name: crayon_pickup_new
+dataset_name: pencil_pickup
 training:
   checkpoint_every: 250
   debug: false

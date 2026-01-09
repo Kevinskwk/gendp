@@ -69,7 +69,7 @@ def normalizer_from_stat(stat):
         input_stats_dict=stat
     )
 
-def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, boundary_frames=10, gripper_threshold=0.001):
+def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, boundary_frames=10, gripper_threshold=0.001, gripper_window=3):
     """
     Filter out frames where the EE pose displacement is small compared to the previous frame.
     
@@ -84,12 +84,13 @@ def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, b
         valid_indices: boolean mask of frames to keep
     """
     T = ee_pose_raw.shape[0]
-    has_gripper = ee_pose_raw.shape[1] > 7
+    has_gripper = ee_pose_raw.shape[1] >= 7
     
     # Always keep first and last boundary_frames
     valid_mask = np.zeros(T, dtype=bool)
     valid_mask[:boundary_frames] = True
     valid_mask[-boundary_frames:] = True
+    prev_gripper_disp = np.zeros(gripper_window)
     
     # Compute position displacement for middle frames
     for i in range(boundary_frames, T - boundary_frames):
@@ -112,10 +113,14 @@ def filter_static_frames(ee_pose_raw, pos_threshold=0.001, rot_threshold=0.01, b
         # Gripper displacement (if available)
         gripper_disp = 0.0
         if has_gripper:
-            gripper_disp = abs(ee_pose_raw[i, 7] - ee_pose_raw[i-1, 7])
+            gripper_disp = abs(ee_pose_raw[i, -1] - ee_pose_raw[i-1, -1])
+        
+        # Update previous gripper displacements
+        prev_gripper_disp = np.roll(prev_gripper_disp, -1)
+        prev_gripper_disp[-1] = gripper_disp
         
         # Keep frame if any displacement is above threshold
-        if pos_disp > pos_threshold or euler_disp > rot_threshold or gripper_disp > gripper_threshold:
+        if pos_disp > pos_threshold or euler_disp > rot_threshold or np.max(prev_gripper_disp) > gripper_threshold:
             valid_mask[i] = True
     
     return valid_mask
@@ -125,7 +130,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         n_workers=None, max_inflight_tasks=None, fusion : Optional[Fusion]=None, robot_name='panda', expected_labels=None,
         exclude_colors=[], contact_field_model=None, contact_field_config=None, contact_field_device='cuda',
         reference_tactile_use_difference=False, filter_static_frames_enabled=True, 
-        filter_pos_threshold=0.001, filter_rot_threshold=0.01, filter_boundary_frames=10, filter_gripper_threshold=0.001):
+        filter_pos_threshold=0.001, filter_rot_threshold=0.01, filter_boundary_frames=10, filter_gripper_threshold=0.001, filter_gripper_window=3):
     if n_workers is None:
         n_workers = multiprocessing.cpu_count()
     if max_inflight_tasks is None:
@@ -210,7 +215,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     pos_threshold=filter_pos_threshold, 
                     rot_threshold=filter_rot_threshold, 
                     boundary_frames=filter_boundary_frames,
-                    gripper_threshold=filter_gripper_threshold
+                    gripper_threshold=filter_gripper_threshold,
+                    gripper_window=filter_gripper_window
                 )
                 valid_indices = np.where(valid_frame_mask)[0]
                 filtered_episode_length = len(valid_indices)
@@ -418,8 +424,7 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     gripper_stability_frames = 3        # Number of consecutive frames to confirm stability
                     
                     # Get gripper positions from ee_pose (8th element is gripper width)
-                    gripper_widths = gripper_pose_seq_filtered[:, 7] if gripper_pose_seq_filtered.shape[1] > 7 else np.ones(len(gripper_pose_seq_filtered)) * 0.08
-                    
+                    gripper_widths = gripper_pose_seq_filtered[:, -1] if gripper_pose_seq_filtered.shape[1] >= 7 else np.ones(len(gripper_pose_seq_filtered)) * 0.08
                     # Compute gripper width changes (difference between consecutive frames)
                     gripper_changes = np.abs(np.diff(gripper_widths))  # (T-1,)
                     
@@ -1155,6 +1160,7 @@ class RealDataset(BaseImageDataset):
             filter_rot_threshold=0.01,
             filter_boundary_frames=10,
             filter_gripper_threshold=0.001,
+            filter_gripper_window=3,
             # Data augmentation parameters
             augmentation_enabled=False,
             augmentation_translation_enabled=False,
@@ -1258,7 +1264,7 @@ class RealDataset(BaseImageDataset):
         
         # Add frame filtering to cache string
         if filter_static_frames:
-            cache_info_str += f'_filtered_p{filter_pos_threshold}_r{filter_rot_threshold}_b{filter_boundary_frames}_g{filter_gripper_threshold}'
+            cache_info_str += f'_filtered_p{filter_pos_threshold}_r{filter_rot_threshold}_b{filter_boundary_frames}_g{filter_gripper_threshold}_w{filter_gripper_window}'
         
         if use_cache:
             cache_zarr_path = os.path.join(dataset_dir, f'cache{cache_info_str}.zarr.zip')
@@ -1297,6 +1303,7 @@ class RealDataset(BaseImageDataset):
                             filter_rot_threshold=filter_rot_threshold,
                             filter_boundary_frames=filter_boundary_frames,
                             filter_gripper_threshold=filter_gripper_threshold,
+                            filter_gripper_window=filter_gripper_window,
                             )
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:

@@ -205,7 +205,7 @@ class Fusion():
         self.dtype = dtype
         
         # hyper-parameters
-        self.mu = 0.02
+        self.mu = 0.01
         
         # curr_obs_torch is a dict contains:
         # - 'dino_feats': (K, patch_h, patch_w, feat_dim) torch tensor, dino features
@@ -302,9 +302,10 @@ class Fusion():
         self.xmem_first_mask_loaded = False
         self.track_ids = [0]
         
-    def eval(self, pts, return_names=['dino_feats', 'mask'], return_inter=False):
+    def eval(self, pts, return_names=['dino_feats', 'mask'], return_inter=False, depth_weight=True):
         # :param pts: (N, 3) torch tensor in world frame
         # :param return_names: a set of {'dino_feats', 'mask'}
+        # :param depth_weight: bool, whether to apply depth-based weighting (farther points get lower weight)
         # :return: output: dict contains:
         #          - 'dist': (N) torch tensor, dist to the closest point on the surface
         #          - 'dino_feats': (N, f) torch tensor, the features of the points
@@ -346,14 +347,18 @@ class Fusion():
         # distance-based weight
         dist_weight = torch.exp(torch.clamp(self.mu-torch.abs(dist), max=0) / self.mu) # [rfn,pn]
         
-        # # normal-based weight
-        # fxfy = [torch.Tensor([self.curr_obs_torch['K'][i,0,0].item(), self.curr_obs_torch['K'][i,1,1].item()]) for i in range(self.num_cam)] # [rfn, 2]
-        # fxfy = torch.stack(fxfy, dim=0).to(self.device) # [rfn, 2]
-        # view_dir = pts_2d / fxfy[:, None, :] # [rfn,pn,2]
-        # view_dir = torch.cat([view_dir, torch.ones_like(view_dir[...,0:1])], dim=-1) # [rfn,pn,3]
-        # view_dir = view_dir / torch.norm(view_dir, dim=-1, keepdim=True) # [rfn,pn,3]
-        # dist_weight = torch.abs(torch.sum(view_dir * inter_normal, dim=-1)) # [rfn,pn]
-        # dist_weight = dist_weight * dist_valid.float() # [rfn,pn]
+        # optionally apply distance-based weight (farther points get lower weight)
+        if depth_weight:
+            # Use the interpolated depth as the distance from camera to surface point
+            reference_distance = 0.05  # meters
+            # Weight decreases with distance: weight = exp(-depth / reference_distance)
+            # This gives weight ratio of 5:1 between 0.3m and 0.6m
+            depth_weight_vals = torch.exp(-inter_depth / reference_distance)  # [rfn, pn]
+            
+            # combine with existing weight
+            dist_weight = dist_weight * depth_weight_vals  # [rfn, pn]
+
+        combined_weight = dist_weight  # [rfn, pn]
         
         dist = torch.clamp(dist, min=-self.mu, max=self.mu) # [rfn,pn]
         
@@ -381,8 +386,8 @@ class Fusion():
             # weighted sum
             # val = (inter_k * dist_weight.unsqueeze(-1)).sum(0) / (dist_weight.float().sum(0).unsqueeze(-1) + 1e-6) # [pn,k_dim]
             
-            # # valid-weighted sum
-            val = (inter_k * dist_valid.float().unsqueeze(-1) * dist_weight.unsqueeze(-1)).sum(0) / (dist_valid.float().sum(0).unsqueeze(-1) + 1e-6) # [pn,k_dim]
+            # valid-weighted sum with view angle consideration
+            val = (inter_k * dist_valid.float().unsqueeze(-1) * combined_weight.unsqueeze(-1)).sum(0) / (dist_valid.float().unsqueeze(-1) * combined_weight.unsqueeze(-1)).sum(0).clamp(min=1e-6) # [pn,k_dim]
             val[dist_all_invalid] = 0.0
             
             outputs[k] = val
