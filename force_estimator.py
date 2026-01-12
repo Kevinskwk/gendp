@@ -145,8 +145,8 @@ class ForceEstimator(ABC):
         
         # Debug: report outliers if any were filtered
         n_outliers = np.sum(~inlier_mask)
-        if n_outliers > 0:
-            print(f"DEBUG: Filtered {n_outliers}/{len(all_forces)} outlier force measurements")
+        # if n_outliers > 0:
+        #     print(f"DEBUG: Filtered {n_outliers}/{len(all_forces)} outlier force measurements")
         
         # Calculate total force: F_total = sum(f_jk)
         F_total = np.sum(filtered_forces, axis=0)  # (3,)
@@ -156,7 +156,10 @@ class ForceEstimator(ABC):
         for p, f in zip(filtered_coords, filtered_forces):
             M_total += np.cross(p, f)
         
-        # Return 6D wrench [F, M]
+        # Scale moment from N·m to N·cm (multiply by 100)
+        M_total = M_total * 100.0
+        
+        # Return 6D wrench [F (N), M (N·cm)]
         wrench = np.concatenate([F_total, M_total])
         return wrench
     
@@ -209,7 +212,6 @@ class ForceEstimator(ABC):
             tactile_coord_right,
             outlier_threshold=100,
         )
-        print("DEBUG: Computed wrench:", wrench)
         
         # Estimate forces at contact points
         forces = self.estimate_contact_forces(wrench, contact_points, **kwargs)
@@ -249,7 +251,8 @@ class SimpleForceEstimator(ForceEstimator):
             # Block for contact i
             G_i = np.zeros((6, 3))
             G_i[:3, :] = np.eye(3)  # Identity for force part
-            G_i[3:, :] = skew_symmetric(c_i)  # Skew-symmetric for moment part
+            # Scale by 100 to convert moment from N·m to N·cm (c_i is in meters)
+            G_i[3:, :] = 100.0 * skew_symmetric(c_i)  # Skew-symmetric for moment part
             
             # Place in grasp matrix
             A[:, 3*i:3*(i+1)] = G_i
@@ -323,37 +326,34 @@ class AnalyticalForceEstimator(ForceEstimator):
                 "Install it with: pip install cvxpy"
             )
     
-    def construct_grasp_matrix(self, 
-                              voxel_pcd: np.ndarray, 
-                              normals: np.ndarray) -> np.ndarray:
+    def construct_grasp_matrix(self, contact_points: np.ndarray) -> np.ndarray:
         """
-        Construct the grasp matrix G for voxel point cloud.
+        Construct the grasp matrix A for contact points with unconstrained force directions.
         
-        For N voxel points, constructs a (6, N) matrix where each column i represents
-        the 6D wrench contribution of a unit force at point i acting along normal n_i:
-        col_i = [n_i; c_i × n_i]
+        For N contact points, constructs a (6, 3N) matrix where each contact
+        contributes a (6, 3) block: [I_3x3; [c_i]_×]
+        This allows forces at each contact to have arbitrary 3D directions.
         
         Args:
-            voxel_pcd: (N, 3) array of voxel point coordinates (in gripper frame)
-            normals: (N, 3) array of inward-pointing surface normals
+            contact_points: (N, 3) array of contact point coordinates (in gripper frame)
             
         Returns:
-            (6, N) grasp matrix
+            (6, 3N) grasp matrix
         """
-        N = len(voxel_pcd)
-        G = np.zeros((6, N))
+        N = len(contact_points)
+        A = np.zeros((6, 3 * N))
         
-        for i in range(N):
-            c_i = voxel_pcd[i]  # Position
-            n_i = normals[i]    # Normal direction
+        for i, c_i in enumerate(contact_points):
+            # Block for contact i
+            G_i = np.zeros((6, 3))
+            G_i[:3, :] = np.eye(3)  # Identity for force part
+            # Scale by 100 to convert moment from N·m to N·cm (c_i is in meters)
+            G_i[3:, :] = 100.0 * skew_symmetric(c_i)  # Skew-symmetric for moment part
             
-            # Force contribution
-            G[:3, i] = n_i
-            
-            # Moment contribution: c_i × n_i
-            G[3:, i] = np.cross(c_i, n_i)
+            # Place in grasp matrix
+            A[:, 3*i:3*(i+1)] = G_i
         
-        return G
+        return A
     
     def estimate_contact_forces(self,
                                 wrench: np.ndarray,
@@ -365,64 +365,86 @@ class AnalyticalForceEstimator(ForceEstimator):
         Estimate forces at contact points using convex optimization.
         
         Solves:
-            min_w ||G w - wrench||_2^2 + λ Σ(w_i^2 / (prob_weights_i + ε))
-            subject to: w_i ≥ 0
+            min_f ||A f - wrench||_2^2 + λ Σ(||f_i||_2^2 / (prob_weights_i + ε))
+            subject to: ||f_i||_2 <= 2 * (f_i · n_i)  (normal component >= 50% of magnitude)
+        
+        where f = [f_1; f_2; ...; f_N] is the stacked 3D force vector.
+        The constraint ensures the force component along the inward normal is at least
+        50% of the total force magnitude, preventing excessive tangential forces.
+        
+        Uses ECOS solver when normals are provided (SOC constraints), otherwise OSQP (QP).
         
         Args:
             wrench: (6,) net wrench [Fx, Fy, Fz, Mx, My, Mz]
             contact_points: (N, 3) array of contact point coordinates
             normals: (N, 3) array of inward-pointing surface normals
-                     If None, assumes upward normals [0, 0, 1]
+                     If None, no normal constraints are applied
             prob_weights: (N,) array of contact probabilities
                          If None, uses uniform weights of 1.0
             **kwargs: Additional arguments (unused)
             
         Returns:
-            (N, 3) array of estimated forces at each contact point (f_i = w_i * n_i)
+            (N, 3) array of estimated forces at each contact point
         """
         N = len(contact_points)
         
         if N == 0:
             return np.zeros((0, 3))
         
-        # Default normals to upward direction if not provided
-        if normals is None:
-            normals = np.tile([0.0, 0.0, 1.0], (N, 1))
-        
         # Default prob_weights to uniform if not provided
         if prob_weights is None:
             prob_weights = np.ones(N)
         
-        # Construct grasp matrix
-        G = self.construct_grasp_matrix(contact_points, normals)  # (6, N)
+        # Construct grasp matrix for unconstrained 3D forces
+        A = self.construct_grasp_matrix(contact_points)  # (6, 3N)
         
-        # Define optimization variable: scalar force magnitudes
-        w = self.cp.Variable(N)
+        # Define optimization variable: 3D force vectors (stacked)
+        f = self.cp.Variable(3 * N)
         
         # Wrench error term
-        wrench_error = self.cp.sum_squares(G @ w - wrench)
+        wrench_error = self.cp.sum_squares(A @ f - wrench)
         
-        # Regularization term: weighted L2 penalty
-        # weight_i = 1 / (prob_weights_i + epsilon)
-        reg_weights = 1.0 / (prob_weights + self.epsilon)
-        regularization = self.cp.sum(self.cp.multiply(reg_weights, self.cp.square(w)))
+        # Regularization term: weighted L2 penalty on force magnitudes
+        # For each contact i, we want to penalize ||f_i||^2 weighted by 1/(prob_weights_i + epsilon)
+        regularization = 0
+        for i in range(N):
+            f_i = f[3*i:3*(i+1)]  # 3D force at contact i
+            weight_i = 1.0 / (prob_weights[i] + self.epsilon)
+            regularization += weight_i * self.cp.sum_squares(f_i)
         
         # Objective: minimize wrench error + regularization
         objective = self.cp.Minimize(wrench_error + self.lambda_reg * regularization)
         
-        # Constraints: non-penetration (w_i >= 0)
-        constraints = [w >= 0]
+        # Constraints: non-penetration (f_i · n_i >= 0.5 * ||f_i||_2) if normals are provided
+        # This ensures force component along inward normal is at least 50% of total force magnitude
+        constraints = []
+        if normals is not None:
+            for i in range(N):
+                f_i = f[3*i:3*(i+1)]  # 3D force at contact i
+                n_i = normals[i]      # Normal at contact i
+                
+                # Reformulate as SOC constraint for convexity:
+                # f_i · n_i >= 0.5 * ||f_i||_2
+                # Equivalent to: ||f_i||_2 <= 2 * (f_i · n_i)
+                # Which is a second-order cone constraint
+                constraints.append(self.cp.norm(f_i, 2) <= 2.0 * (f_i @ n_i))
         
         # Formulate and solve problem
         problem = self.cp.Problem(objective, constraints)
         
         try:
-            # Try OSQP first (fast for QP)
-            problem.solve(solver=self.cp.OSQP, verbose=False)
-            
-            if problem.status not in ['optimal', 'optimal_inaccurate']:
-                # Fallback to ECOS
+            # If we have SOC constraints (normals provided), use ECOS (conic solver)
+            # Otherwise use OSQP (faster for pure QP)
+            if normals is not None:
+                # SOC constraints require a conic solver
                 problem.solve(solver=self.cp.ECOS, verbose=False)
+            else:
+                # Pure QP without SOC constraints - use OSQP
+                problem.solve(solver=self.cp.OSQP, verbose=False)
+                
+                if problem.status not in ['optimal', 'optimal_inaccurate']:
+                    # Fallback to ECOS
+                    problem.solve(solver=self.cp.ECOS, verbose=False)
                 
         except Exception as e:
             print(f"Warning: Optimization failed with error: {e}")
@@ -434,13 +456,13 @@ class AnalyticalForceEstimator(ForceEstimator):
             return np.zeros((N, 3))
         
         # Extract solution
-        w_opt = w.value
+        f_opt = f.value
         
-        if w_opt is None:
+        if f_opt is None:
             return np.zeros((N, 3))
         
-        # Compute force vectors: f_i = w_i * n_i
-        forces = w_opt.reshape(-1, 1) * normals  # (N, 3)
+        # Reshape to (N, 3)
+        forces = f_opt.reshape(N, 3)
         
         return forces
     
@@ -515,7 +537,7 @@ def plot_wrench_history(wrenches: List[np.ndarray],
     # Moment components (bottom row)
     ax_mx = fig.add_subplot(gs[1, 1])
     ax_mx.plot(timesteps, wrenches_array[:, 3], 'c-', linewidth=2, label='Mx')
-    ax_mx.set_ylabel('Moment (Nm)', fontsize=12)
+    ax_mx.set_ylabel('Moment (N·cm)', fontsize=12)
     ax_mx.set_xlabel('Timestep', fontsize=12)
     ax_mx.set_title('Moment X', fontsize=14, fontweight='bold')
     ax_mx.grid(True, alpha=0.3)
@@ -523,7 +545,7 @@ def plot_wrench_history(wrenches: List[np.ndarray],
     
     ax_my = fig.add_subplot(gs[2, 0])
     ax_my.plot(timesteps, wrenches_array[:, 4], 'm-', linewidth=2, label='My')
-    ax_my.set_ylabel('Moment (Nm)', fontsize=12)
+    ax_my.set_ylabel('Moment (N·cm)', fontsize=12)
     ax_my.set_xlabel('Timestep', fontsize=12)
     ax_my.set_title('Moment Y', fontsize=14, fontweight='bold')
     ax_my.grid(True, alpha=0.3)
@@ -531,7 +553,7 @@ def plot_wrench_history(wrenches: List[np.ndarray],
     
     ax_mz = fig.add_subplot(gs[2, 1])
     ax_mz.plot(timesteps, wrenches_array[:, 5], 'y-', linewidth=2, label='Mz')
-    ax_mz.set_ylabel('Moment (Nm)', fontsize=12)
+    ax_mz.set_ylabel('Moment (N·cm)', fontsize=12)
     ax_mz.set_xlabel('Timestep', fontsize=12)
     ax_mz.set_title('Moment Z', fontsize=14, fontweight='bold')
     ax_mz.grid(True, alpha=0.3)

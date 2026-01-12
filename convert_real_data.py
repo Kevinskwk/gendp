@@ -29,7 +29,7 @@ import pickle
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
-import yaml
+import time
 
 import numpy as np
 import torch
@@ -61,6 +61,8 @@ from force_estimator import (
     smooth_normals,
     plot_wrench_history
 )
+
+from contact_field.utils.data_utils import compute_contact_forces_from_vectors
 
 
 def transform_to_gripper_frame(points: np.ndarray, ee_pose_7d: np.ndarray) -> np.ndarray:
@@ -129,7 +131,8 @@ CONTACT_Z_THRESHOLD = 0.015  # Contact when object is within this distance to z=
 TACTILE_CHANGE_THRESHOLD = 0.001  # Threshold for detecting tactile change (normal force)
 CONTACT_FORCE_SCALE = 100  # Scale factor for converting tactile to contact force magnitude
 CONTACT_MODE = 'top_k'  # 'single', 'top_k', or 'threshold'
-CONTACT_TOP_K = 5  # For 'top_k' mode
+# CONTACT_MODE = 'single'  # 'single', 'top_k', or 'threshold'
+CONTACT_TOP_K = 10  # For 'top_k' mode
 CONTACT_DEPTH_THRESHOLD = 0.015  # For 'threshold' mode
 
 # Force estimator parameters
@@ -145,17 +148,60 @@ shape_meta = {
         'reference_frame': 'robot',
         'distill_dino': True,
         'distill_obj': 'scraper',
+        # 'distill_obj': 'crayon_new',
         'view_keys': ['camera_front', 'camera_left', 'camera_right'],
         'N_gripper': 100,
         'N_obj': 256,
         'N_env': 512,
+        # scraper
+        # 'boundaries': {
+        #   'x_lower': 0.4,
+        #   'x_upper': 0.65,
+        #   'y_lower': -0.15,
+        #   'y_upper': 0.15,
+        #   'z_lower': -0.03,
+        #   'z_upper': 0.4,
+        # },
+        # 'obj_boundaries': {
+        #   'x_lower': 0.3,
+        #   'x_upper': 0.7,
+        #   'y_lower': -0.15,
+        #   'y_upper': 0.15,
+        #   'z_lower': 0.0,
+        #   'z_upper': 0.4,
+        # },
+        # 'env_boundaries': {
+        #   'x_lower': 0.41,
+        #   'x_upper': 0.57,
+        #   'y_lower': -0.14,
+        #   'y_upper': 0.13,
+        #   'z_lower': -0.03,
+        #   'z_upper': 0.17,
+        # },
+        # crayon_cross
         'boundaries': {
-            'x_lower': 0.3,
-            'x_upper': 0.7,
-            'y_lower': -0.2,
-            'y_upper': 0.2,
-            'z_lower': -0.03,
-            'z_upper': 0.5,
+          'x_lower': 0.3,
+          'x_upper': 0.7,
+          'y_lower': -0.2,
+          'y_upper': 0.2,
+          'z_lower': -0.03,
+          'z_upper': 0.5,
+        },
+        'env_boundaries': {
+          'x_lower': 0.4,
+          'x_upper': 0.65,
+          'y_lower': -0.1,
+          'y_upper': 0.1,
+          'z_lower': -0.1,
+          'z_upper': 0.15,
+        },
+        'obj_boundaries': {
+          'x_lower': 0.3,
+          'x_upper': 0.7,
+          'y_lower': -0.2,
+          'y_upper': 0.2,
+          'z_lower': 0.0,
+          'z_upper': 0.25,
         },
         'resize_ratio': 0.5
     }
@@ -514,7 +560,8 @@ def convert_hdf5_to_dataset(hdf5_path: str,
                             fusion: Optional[Fusion] = None,
                             kin_helper: Optional[KinHelper] = None,
                             include_front_rgb: bool = True,
-                            force_estimator_config: Optional[Dict] = None) -> Tuple[str, str]:
+                            force_estimator_config: Optional[Dict] = None,
+                            compute_wrench_error: bool = False) -> Tuple[str, str]:
     """
     Convert a single HDF5 file to dataset format.
     
@@ -534,6 +581,7 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             - 'method': 'simple' or 'analytical'
             - 'lambda_reg': regularization weight for analytical
             - 'epsilon': epsilon for analytical
+        compute_wrench_error: Whether to compute and save wrench error statistics (default: False)
         
     Returns:
         Tuple of (main_file_path, contact_file_path)
@@ -578,6 +626,10 @@ def convert_hdf5_to_dataset(hdf5_path: str,
     env_point_clouds = []
     contact_vectors_list = []
     wrench_history = []  # Track wrench over time
+    wrench_errors = []  # Track wrench error over time
+    force_errors = []  # Track force component error
+    moment_errors = []  # Track moment component error
+    regularization_errors = []  # Track regularization error
     
     # Point cloud boundaries for filtering
     boundaries = {
@@ -593,9 +645,24 @@ def convert_hdf5_to_dataset(hdf5_path: str,
     prev_tactile_left = None
     prev_tactile_right = None
     
-    # NOTE: Reference tactile computation is handled by dataset.py, not here
-    # We only store raw tactile data in pickle files
+    # Get force estimator configuration
+    if force_estimator_config is None:
+        force_estimator_config = {
+            'method': FORCE_ESTIMATOR_METHOD,
+            'lambda_reg': FORCE_ESTIMATOR_LAMBDA,
+            'epsilon': FORCE_ESTIMATOR_EPSILON
+        }
     
+    force_estimator_method = force_estimator_config.get('method', FORCE_ESTIMATOR_METHOD)
+    force_estimator_lambda = force_estimator_config.get('lambda_reg', FORCE_ESTIMATOR_LAMBDA)
+    force_estimator_epsilon = force_estimator_config.get('epsilon', FORCE_ESTIMATOR_EPSILON)
+
+    force_estimator = create_force_estimator(
+        method=force_estimator_method,
+        lambda_reg=force_estimator_lambda,
+        epsilon=force_estimator_epsilon
+    )
+
     # Process each timestep
     for step_idx in tqdm(range(num_steps), desc=f"Converting {episode_name}"):
         # === Process Tactile Data ===
@@ -673,7 +740,15 @@ def convert_hdf5_to_dataset(hdf5_path: str,
                 'safety_margin': 0.0,
                 'global_z_threshold': 0.01
             }
-            
+            # Crayon
+            # gripper_crop_params = {
+            #     'tool_length': 0.15,
+            #     'tool_width': 0.02,
+            #     'gripper_finger_length': 0.13,
+            #     'safety_margin': 0.0,
+            #     'global_z_threshold': 0.01,
+            #     'auto_estimate_plane': True
+            # }
             result = d3fields_proc(
                 fusion=fusion,
                 shape_meta=shape_meta,
@@ -687,8 +762,8 @@ def convert_hdf5_to_dataset(hdf5_path: str,
                 exclude_threshold=0.01,
                 use_obj_bg_seg=True,
                 gripper_pose_seq=observations['ee_pose'][step_idx:step_idx+1],
-                use_gripper_crop=True,
-                gripper_crop_params=gripper_crop_params
+                seg_method='gripper_crop',
+                seg_params=gripper_crop_params
             )
             
             if len(result) == 7:
@@ -724,27 +799,6 @@ def convert_hdf5_to_dataset(hdf5_path: str,
                 object_boundaries=OBJECT_BOUNDARIES,
                 env_boundaries=ENV_BOUNDARIES
             )
-        
-        # === Compute Contact Information ===
-        # Compute contact depth for each object point
-        contact_depths = compute_contact_depth(object_pointcloud, z_plane=0.01)
-        
-        # Add contact depth as 4th dimension to object points
-        obj_pcd_with_depth = np.concatenate([
-            object_pointcloud,
-            contact_depths.reshape(-1, 1)
-        ], axis=1)  # Shape: (N, 4)
-        
-        # Sample/pad to target size
-        obj_pcd_sampled = sample_or_pad_pointcloud(obj_pcd_with_depth, num_object_points)
-        env_pcd_sampled = sample_or_pad_pointcloud(env_pointcloud, num_env_points)
-        
-        # Add dummy 4th dimension (contact depth = 0) to env points for consistency
-        if env_pcd_sampled.shape[1] == 3:
-            env_pcd_sampled = np.concatenate([
-                env_pcd_sampled,
-                np.zeros((env_pcd_sampled.shape[0], 1))
-            ], axis=1)
         
         # === Process Robot State (must happen before contact vectors) ===
         # Get end-effector pose
@@ -800,6 +854,27 @@ def convert_hdf5_to_dataset(hdf5_path: str,
         tactile_coord_left, tactile_coord_right = get_tactile_marker_coordinates(ee_pose_7d, gripper_pos)
         
         # === Compute Contact Information ===
+        t0 = time.time()
+        # Compute contact depth for each object point
+        contact_depths = compute_contact_depth(object_pointcloud, z_plane=0.01)
+        
+        # Add contact depth as 4th dimension to object points
+        obj_pcd_with_depth = np.concatenate([
+            object_pointcloud,
+            contact_depths.reshape(-1, 1)
+        ], axis=1)  # Shape: (N, 4)
+        
+        # Sample/pad to target size
+        obj_pcd_sampled = sample_or_pad_pointcloud(obj_pcd_with_depth, num_object_points)
+        env_pcd_sampled = sample_or_pad_pointcloud(env_pointcloud, num_env_points)
+        
+        # Add dummy 4th dimension (contact depth = 0) to env points for consistency
+        if env_pcd_sampled.shape[1] == 3:
+            env_pcd_sampled = np.concatenate([
+                env_pcd_sampled,
+                np.zeros((env_pcd_sampled.shape[0], 1))
+            ], axis=1)
+        
         # Check if object is close to ground plane for reference frame management
         min_z = np.min(object_pointcloud[:, 2]) if len(object_pointcloud) > 0 else float('inf')
         is_close = min_z < CONTACT_Z_THRESHOLD
@@ -811,19 +886,7 @@ def convert_hdf5_to_dataset(hdf5_path: str,
         
         # Extract normals from object point cloud if using analytical estimator
         obj_normals = None
-        
-        # Get force estimator configuration
-        if force_estimator_config is None:
-            force_estimator_config = {
-                'method': FORCE_ESTIMATOR_METHOD,
-                'lambda_reg': FORCE_ESTIMATOR_LAMBDA,
-                'epsilon': FORCE_ESTIMATOR_EPSILON
-            }
-        
-        force_estimator_method = force_estimator_config.get('method', FORCE_ESTIMATOR_METHOD)
-        force_estimator_lambda = force_estimator_config.get('lambda_reg', FORCE_ESTIMATOR_LAMBDA)
-        force_estimator_epsilon = force_estimator_config.get('epsilon', FORCE_ESTIMATOR_EPSILON)
-        
+                
         if force_estimator_method == 'analytical' and len(object_pointcloud) > 0:
             # Transform object points to gripper frame for normal estimation
             obj_points_gripper = transform_to_gripper_frame(object_pointcloud, ee_pose_7d)
@@ -832,19 +895,13 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             obj_normals = estimate_tool_normals(
                 obj_points_gripper, 
                 camera_location=np.array([0.0, 0.0, 0.15]),  # Camera roughly 5cm above gripper center
-                inward=True
+                inward=False
             )
             
             # Apply smoothing to reduce RealSense noise
             obj_normals = smooth_normals(obj_points_gripper, obj_normals, iterations=2)
         
-        # Compute contact vectors with force estimation
-        force_estimator = create_force_estimator(
-            method=force_estimator_method,
-            lambda_reg=force_estimator_lambda,
-            epsilon=force_estimator_epsilon
-        )
-        
+        # Compute contact vectors with force estimation        
         contact_vecs, wrench = compute_contact_vectors(
             object_pointcloud,
             force_field_left,
@@ -862,18 +919,99 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             normals=obj_normals,  # Pass extracted normals for analytical estimator
             prob_weights=None  # TODO: Extract contact probabilities if available
         )
+
+        # t1 = time.time()
+        # gt_contact_force = compute_contact_forces_from_vectors(
+        #     torch.from_numpy(obj_pcd_sampled[:, :3]), 
+        #     torch.from_numpy(obj_pcd_sampled[:, 3]),
+        #     [contact_vecs[i] for i in range(contact_vecs.shape[0])], 
+        #     contact_depth_threshold=-0.002,
+        #     dist_lambda=100.0,
+        #     weight_method='inv_square',
+        #     force_clip_percentile=99.0,
+        #     normalize_per_point=True,
+        #     smooth_sigma=0.0
+        # )
+        # print(f"Contact computation time: {t1 - t0:.4f} seconds")
+        # average about 0.035s
         
         # Store wrench for plotting
         if wrench is not None:
             wrench_history.append(wrench)
+            
+            # Compute wrench error only if requested
+            if compute_wrench_error and len(contact_vecs) > 0:
+                # Extract contact points and force vectors from contact_vecs
+                # contact_vecs format: [pos_x, pos_y, pos_z, norm_x, norm_y, norm_z, force_magnitude, distance]
+                # Note: With unconstrained force directions, contact_vecs[:, 3:6] now contains
+                # the actual force direction (not necessarily the normal)
+                contact_pts_gripper = transform_to_gripper_frame(contact_vecs[:, :3], ee_pose_7d)
+                contact_force_vecs = contact_vecs[:, 3:6]  # Force direction vectors (3D)
+                force_magnitudes = contact_vecs[:, 6]  # Force magnitudes
+                
+                # Reconstruct full 3D force vectors: f_i = magnitude_i * direction_i
+                contact_forces = force_magnitudes.reshape(-1, 1) * contact_force_vecs  # (N, 3)
+                
+                # Construct grasp matrix A for 3D force vectors
+                # A @ f_stacked = wrench, where f_stacked = [f_1; f_2; ...; f_N]
+                N = len(contact_pts_gripper)
+                A = np.zeros((6, 3 * N))
+                for i in range(N):
+                    c_i = contact_pts_gripper[i]  # Position in gripper frame
+                    
+                    # Block for contact i: [I_3x3; [c_i]_x]
+                    G_i = np.zeros((6, 3))
+                    G_i[:3, :] = np.eye(3)  # Identity for force part
+                    # Scale by 100 to convert moment from N·m to N·cm (c_i is in meters)
+                    G_i[3:, :] = 100.0 * np.array([
+                        [0, -c_i[2], c_i[1]],
+                        [c_i[2], 0, -c_i[0]],
+                        [-c_i[1], c_i[0], 0]
+                    ])  # Skew-symmetric for moment part
+                    
+                    A[:, 3*i:3*(i+1)] = G_i
+                
+                # Flatten contact forces to match grasp matrix
+                f_stacked = contact_forces.flatten()  # (3N,)
+                
+                # Compute wrench from contact forces: A @ f_stacked
+                contact_wrench = A @ f_stacked  # (6,)
+                
+                # Compute wrench error: ||A @ f - wrench||_2^2
+                wrench_diff = contact_wrench - wrench
+                wrench_error = np.sum(wrench_diff ** 2)
+                
+                # Separate force and moment errors
+                force_diff = wrench_diff[:3]  # Force components [Fx, Fy, Fz]
+                moment_diff = wrench_diff[3:]  # Moment components [Mx, My, Mz]
+                
+                force_error = np.sum(force_diff ** 2)  # ||F_contact - F_tactile||_2^2
+                moment_error = np.sum(moment_diff ** 2)  # ||M_contact - M_tactile||_2^2
+                
+                # Compute regularization error: λ Σ(||f_i||_2^2 / (prob_weights_i + ε))
+                # This matches AnalyticalForceEstimator's regularization term
+                # For now, assume uniform prob_weights = 1.0 (no contact probability weighting)
+                prob_weights = np.ones(N)
+                reg_weights = 1.0 / (prob_weights + force_estimator_epsilon)
+                regularization_error = 0.0
+                for i in range(N):
+                    f_i = contact_forces[i]  # (3,)
+                    regularization_error += reg_weights[i] * np.sum(f_i ** 2)
+                regularization_error *= force_estimator_lambda
+                
+                wrench_errors.append(wrench_error)
+                force_errors.append(force_error)
+                moment_errors.append(moment_error)
+                regularization_errors.append(regularization_error)
+            # elif compute_wrench_error:
+                # # No contact points - wrench error is zero (no contact, no error)
+                # wrench_errors.append(0.0)
+                # force_errors.append(0.0)
+                # moment_errors.append(0.0)
         
         # Convert force fields to tensors (store RAW data - dataset.py will handle reference processing)
         force_field_left_tensor = torch.from_numpy(force_field_left).float()
         force_field_right_tensor = torch.from_numpy(force_field_right).float()
-        
-        # NOTE: We do NOT apply reference tactile processing here to avoid double-processing
-        # The dataset.py loader will handle reference tactile computation and application
-        # We only store the raw tactile force fields in the pickle files
         
         # === Create Observation ===
         obs = {
@@ -938,6 +1076,105 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             title=f"Net Wrench Over Time - {episode_name}"
         )
     
+    # Compute and save average wrench error (only if requested)
+    if compute_wrench_error and len(wrench_errors) > 0:
+        # Convert wrench_history to array for easier computation
+        wrenches_array = np.array(wrench_history)  # (T, 6)
+        
+        # Compute statistics
+        avg_wrench_error = np.mean(wrench_errors)
+        std_wrench_error = np.std(wrench_errors)
+        
+        avg_force_error = np.mean(force_errors)
+        std_force_error = np.std(force_errors)
+        
+        avg_moment_error = np.mean(moment_errors)
+        std_moment_error = np.std(moment_errors)
+        
+        avg_regularization_error = np.mean(regularization_errors)
+        std_regularization_error = np.std(regularization_errors)
+        
+        # Compute total objective: wrench_error + regularization_error
+        total_objectives = [w + r for w, r in zip(wrench_errors, regularization_errors)]
+        avg_total_objective = np.mean(total_objectives)
+        std_total_objective = np.std(total_objectives)
+        
+        # Compute tactile wrench magnitudes for percentage calculation
+        tactile_force_magnitudes = np.linalg.norm(wrenches_array[:, :3], axis=1)  # ||F_tactile||_2
+        tactile_moment_magnitudes = np.linalg.norm(wrenches_array[:, 3:], axis=1)  # ||M_tactile||_2
+        
+        avg_tactile_force_mag = np.mean(tactile_force_magnitudes)
+        avg_tactile_moment_mag = np.mean(tactile_moment_magnitudes)
+        
+        # Compute error percentages
+        # Force error percentage: sqrt(force_error) / avg_force_magnitude * 100
+        force_error_pct = (np.sqrt(avg_force_error) / avg_tactile_force_mag * 100) if avg_tactile_force_mag > 1e-8 else 0.0
+        moment_error_pct = (np.sqrt(avg_moment_error) / avg_tactile_moment_mag * 100) if avg_tactile_moment_mag > 1e-8 else 0.0
+        wrench_error_pct = (np.sqrt(avg_wrench_error) / np.mean(np.linalg.norm(wrenches_array, axis=1)) * 100) if len(wrenches_array) > 0 else 0.0
+        
+        # Print statistics
+        print(f"\n{'='*60}")
+        print(f"Wrench Error Statistics:")
+        print(f"{'='*60}")
+        print(f"Total Objective:       {avg_total_objective:.6f} ± {std_total_objective:.6f}")
+        print(f"  Wrench Error:        {avg_wrench_error:.6f} ± {std_wrench_error:.6f} ({wrench_error_pct:.2f}%)")
+        print(f"  Regularization:      {avg_regularization_error:.6f} ± {std_regularization_error:.6f}")
+        print(f"Force Error:           {avg_force_error:.6f} ± {std_force_error:.6f} ({force_error_pct:.2f}%)")
+        print(f"Moment Error:          {avg_moment_error:.6f} ± {std_moment_error:.6f} ({moment_error_pct:.2f}%)")
+        print(f"{'='*60}")
+        
+        # Save wrench error statistics to file
+        error_file_path = output_dir / f"{episode_name}_wrench_error.txt"
+        with open(error_file_path, 'w') as f:
+            f.write(f"Episode: {episode_name}\n")
+            f.write(f"{'='*60}\n")
+            f.write(f"\n")
+            f.write(f"Total Objective:\n")
+            f.write(f"  Average: {avg_total_objective:.6f}\n")
+            f.write(f"  Std Dev: {std_total_objective:.6f}\n")
+            f.write(f"  Min:     {np.min(total_objectives):.6f}\n")
+            f.write(f"  Max:     {np.max(total_objectives):.6f}\n")
+            f.write(f"\n")
+            f.write(f"Total Wrench Error (L2^2):\n")
+            f.write(f"  Average: {avg_wrench_error:.6f}\n")
+            f.write(f"  Std Dev: {std_wrench_error:.6f}\n")
+            f.write(f"  Error %: {wrench_error_pct:.2f}%\n")
+            f.write(f"  Min:     {np.min(wrench_errors):.6f}\n")
+            f.write(f"  Max:     {np.max(wrench_errors):.6f}\n")
+            f.write(f"\n")
+            f.write(f"Regularization Error:\n")
+            f.write(f"  Average: {avg_regularization_error:.6f}\n")
+            f.write(f"  Std Dev: {std_regularization_error:.6f}\n")
+            f.write(f"  Min:     {np.min(regularization_errors):.6f}\n")
+            f.write(f"  Max:     {np.max(regularization_errors):.6f}\n")
+            f.write(f"\n")
+            f.write(f"Force Error (L2^2):\n")
+            f.write(f"  Average: {avg_force_error:.6f}\n")
+            f.write(f"  Std Dev: {std_force_error:.6f}\n")
+            f.write(f"  Error %: {force_error_pct:.2f}%\n")
+            f.write(f"  Min:     {np.min(force_errors):.6f}\n")
+            f.write(f"  Max:     {np.max(force_errors):.6f}\n")
+            f.write(f"\n")
+            f.write(f"Moment Error (L2^2):\n")
+            f.write(f"  Average: {avg_moment_error:.6f}\n")
+            f.write(f"  Std Dev: {std_moment_error:.6f}\n")
+            f.write(f"  Error %: {moment_error_pct:.2f}%\n")
+            f.write(f"  Min:     {np.min(moment_errors):.6f}\n")
+            f.write(f"  Max:     {np.max(moment_errors):.6f}\n")
+            f.write(f"\n")
+            f.write(f"Average Tactile Wrench Magnitudes:\n")
+            f.write(f"  Force:  {avg_tactile_force_mag:.6f} N\n")
+            f.write(f"  Moment: {avg_tactile_moment_mag:.6f} N·cm\n")
+            f.write(f"\n")
+            f.write(f"Force Estimator Configuration:\n")
+            f.write(f"  Method:      {force_estimator_method}\n")
+            f.write(f"  lambda_reg:  {force_estimator_lambda}\n")
+            f.write(f"  epsilon:     {force_estimator_epsilon}\n")
+            f.write(f"\n")
+            f.write(f"Number of timesteps: {len(wrench_errors)}\n")
+        
+        print(f"Saved wrench error statistics to: {error_file_path}")
+    
     return str(main_file_path), str(contact_file_path)
 
 
@@ -963,6 +1200,7 @@ def main():
                        help='Force estimation method: simple (pseudo-inverse) or analytical (cvxpy optimization)')
     parser.add_argument('--force_lambda', type=float, default=0.01, help='Regularization weight for analytical force estimator')
     parser.add_argument('--force_epsilon', type=float, default=1e-6, help='Epsilon for analytical force estimator weight division')
+    parser.add_argument('--compute_wrench_error', action='store_true', help='Compute and save wrench error statistics')
 
     args = parser.parse_args()
     
@@ -1103,7 +1341,8 @@ def main():
                     fusion=fusion,
                     kin_helper=kin_helper,
                     include_front_rgb=True,  # Include front RGB for testing/visualization
-                    force_estimator_config=force_estimator_config
+                    force_estimator_config=force_estimator_config,
+                    compute_wrench_error=args.compute_wrench_error
                 )
                 converted_files.append((main_path, contact_path))
             except Exception as e:
@@ -1131,7 +1370,8 @@ def main():
                     fusion=fusion,
                     kin_helper=kin_helper,
                     include_front_rgb=False,  # No front RGB for training
-                    force_estimator_config=force_estimator_config
+                    force_estimator_config=force_estimator_config,
+                    compute_wrench_error=args.compute_wrench_error
                 )
                 converted_files.append((main_path, contact_path))
             except Exception as e:
