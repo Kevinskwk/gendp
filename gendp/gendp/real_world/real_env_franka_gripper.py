@@ -228,8 +228,10 @@ class RealEnvFranka:
             shm_manager=shm_manager,
             robot_ip=robot_ip,
             frequency=200,
-            Kx_scale=1.0,
-            Kxd_scale=np.array([2.0, 1.5, 2.0, 1.0, 1.0, 1.0]),
+            # Kx_scale=1.0*1.25,
+            # Kxd_scale=np.array([2.0, 1.5, 2.0, 1.0, 1.0, 1.0])*1.25,
+            Kx_scale=np.array([1.0, 1.0, 0.3, 1.0, 1.0, 1.0])*2,
+            Kxd_scale=np.array([2.0, 1.5, 0.6, 1.0, 1.0, 1.0])*2,
             joints_init=j_init,
             joints_init_duration=3.0,
             verbose=False,
@@ -239,14 +241,7 @@ class RealEnvFranka:
 
         self.realsense = realsense
         self.robot = robot
-        # self.kin_helper = KinHelper(robot_name='franka_ft300_robotiq_2f_140')
-        # left and right finger pose
-        # for link_idx, link in enumerate(self.kin_helper.sapien_robot.get_links()):
-        #     # print(link.name)
-        #     if link.name == 'left_gelsight':
-        #         self.left_gs_idx = link_idx
-        #     if link.name == 'right_gelsight':
-        #         self.right_gs_idx = link_idx
+
         # self.fixed_extri = get_extrinsic([0.924, -0.046, 0.256], [0.596, 0.584, -0.398, -0.380])
         self.cam_front_extri = get_extrinsic([0.8425395551524414, -0.23980856223114248, 0.32430529343304803],
                                     # [-0.7436835728382364, -0.42678910445821283, 0.2849678185522488, 0.42846137071605955])

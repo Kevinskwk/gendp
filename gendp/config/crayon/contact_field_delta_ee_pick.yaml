@@ -86,7 +86,8 @@ shape_meta:
         reference_frame: robot
         distill_dino: true
         # distill_obj: crayon_new
-        distill_obj: pencil_real
+        # distill_obj: pencil_real
+        distill_obj: crayon_v4
         view_keys:
         - camera_front
         - camera_left
@@ -197,7 +198,8 @@ task:
     # Contact field model settings
     # contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/joint_tools_mixed_focal_0.9_0.75_nobias_ref_diff_hist_smoothpc_pcd512_directional_20251101_171937/last.ckpt  # Path to contact field checkpoint
     # contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_focal_0.9_0.75_force_mag_dir_ada_weight_hist5_smoothpc_pcd256+512_20251109_122716/last.ckpt  # Path to contact field checkpoint
-    contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_1109_real_scraper_qp_dynamic_ref_20251231_170754/last.ckpt  # Path to contact field checkpoint
+    # contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_1109_real_scraper_qp_dynamic_ref_20251231_170754/last.ckpt  # Path to contact field checkpoint
+    contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_1109_real_scraper_corrected_lambda1_20260113_143028/last.ckpt
     contact_field_device: cuda  # Device for contact field inference
     # Frame filtering settings
     filter_static_frames: true  # Enable filtering of static frames
@@ -220,7 +222,8 @@ task:
   task_name: ${task_name}
 task_name: crayon_cross_contact_field
 # dataset_name: crayon_pickup_new
-dataset_name: pencil_pickup
+# dataset_name: pencil_pickup
+dataset_name: crayon_pickup_v2
 training:
   checkpoint_every: 250
   debug: false

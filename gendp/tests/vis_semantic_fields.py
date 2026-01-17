@@ -15,15 +15,21 @@ from d3fields.fusion import Fusion
 import scipy.spatial.transform as st
 
 ### hyper param
-# epi_range = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
-epi_range = [0, 1, 2, 3]
+# epi_range = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+# epi_range = [0, 1, 2, 3, 4, 5, 8, 9]
+epi_range = [0]
+# epi_range = [14, 15]
+# epi_range = [20, 21, 22, 23]
 vis_robot = True
 vis_action = False
+compute_feat_com = False
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
 # data_dir = f'{curr_dir}/../../data/pencil_pickup'
+# data_dir = f'{curr_dir}/../../data/crayon_pickup_left'
+data_dir = f'{curr_dir}/../../data/crayon_cross_z58'
 # data_dir = f'{curr_dir}/../../data/scraper_z73'
-data_dir = f'{curr_dir}/../../data/scrap_tool_test'
+# data_dir = f'{curr_dir}/../../data/scrap_tool_test'
 # data_dir = f'{curr_dir}/../../data/outputs/2025.10.02/19.47.25_train_diffusion_unet_hybrid_scraper_real'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
@@ -37,10 +43,9 @@ shape_meta = {
         'reference_frame': 'world',
         'distill_dino': True,
         # 'distill_obj': 'pencil',
-        # 'distill_obj': 'crayon_new',
+        'distill_obj': 'crayon_v4',
         # 'distill_obj': 'pencil_real',
-        'distill_obj': 'scraper',
-        # TODO: fix query text
+        # 'distill_obj': 'scraper',
         'query_text': 'dark green scraper tool',
         # 'query_text': 'crayon',
         # 'view_keys': ['left_bottom_view', 'right_bottom_view', 'left_top_view', 'right_top_view'],
@@ -50,15 +55,9 @@ shape_meta = {
         'N_obj': 256,
         'N_env': 512,
         'boundaries': {
-            # 'x_lower': 0.3,
-            # 'x_upper': 0.7,
-            # 'y_lower': -0.15,
-            # 'y_upper': 0.15,
-            # 'z_lower': -0.03,
-            # 'z_upper': 0.4,
-            'x_lower': 0.4,
-            'x_upper': 0.65,
-            'y_lower': -0.15,
+            'x_lower': 0.3,
+            'x_upper': 0.7,
+            'y_lower': -0.2,
             'y_upper': 0.15,
             'z_lower': -0.03,
             'z_upper': 0.4,
@@ -66,19 +65,39 @@ shape_meta = {
         'obj_boundaries': {
             'x_lower': 0.3,
             'x_upper': 0.7,
-            'y_lower': -0.15,
+            'y_lower': -0.2,
             'y_upper': 0.15,
             'z_lower': 0.0,
             'z_upper': 0.4
         },
+        # crayon_pickup
+        # 'env_boundaries': {
+        #     'x_lower': 0.41,
+        #     'x_upper': 0.7,
+        #     # 'x_upper': 0.57,
+        #     'y_lower': -0.14,
+        #     'y_upper': 0.13,
+        #     # 'z_lower': 0.1,
+        #     'z_lower': -0.03,
+        #     'z_upper': 0.17
+        # },
+        # crayon draw
+        # 'env_boundaries': {
+        #     'x_lower': 0.36,
+        #     'x_upper': 0.53,
+        #     'y_lower': -0.1,
+        #     'y_upper': 0.05,
+        #     'z_lower': -0.03,
+        #     'z_upper': 0.1
+        # },
+        # peeler
         'env_boundaries': {
-            'x_lower': 0.41,
-            'x_upper': 0.57,
-            'y_lower': -0.14,
-            'y_upper': 0.13,
-            # 'z_lower': 0.1,
-            'z_lower': -0.03,
-            'z_upper': 0.17
+            'x_lower': 0.3,
+            'x_upper': 0.6,
+            'y_lower': -0.2,
+            'y_upper': 0.2,
+            'z_lower': 0.0,
+            'z_upper': 0.1
         },
         'resize_ratio': 0.5
     }
@@ -98,6 +117,11 @@ for i in tqdm(epi_range):
     data_path = f'{data_dir}/episode_{i}.hdf5'
 
     data_dict, _ = load_dict_from_hdf5(data_path)
+    
+    # Track center of mass for this episode
+    y_com_list = []
+    y_center_list = []
+    y_delta_com_list = []
 
     # add meshes to visualize actions
     if vis_action:
@@ -144,6 +168,11 @@ for i in tqdm(epi_range):
             seg_method='gripper_crop',
             # seg_method='d3field_feat',
             seg_params={
+                'tool_length': 0.15,
+                'tool_width': 0.04,  # crayon
+                'gripper_finger_length': 0.1,
+                'safety_margin': 0.0,
+                # 'auto_estimate_plane': False,
                 'auto_estimate_plane': True,
                 'plane_margin': 0.012,
                 'plane_percentile': 20,
@@ -154,7 +183,7 @@ for i in tqdm(epi_range):
             }
         )
         t1 = time.time()
-        print(f'Frame {t} processing time: {t1 - t0:.3f} seconds')
+        # print(f'Frame {t} processing time: {t1 - t0:.3f} seconds')
         
         # Unpack the returned values
         if len(result) == 7:
@@ -190,6 +219,24 @@ for i in tqdm(epi_range):
             
             visualizer.update_pcd(obj_pcd_o3d, 'obj_pcd')
             visualizer.update_pcd(bg_pcd_o3d, 'bg_pcd')
+
+            if compute_feat_com:
+                # compute the distribution of bg feats along y axis
+                y_coords = bg_pcd[:, 1]  # Extract y coordinates
+                bg_feat_values = bg_feats[:, 0]  # Extract first feature dimension
+                
+                # Compute center of mass (weighted average) of feature intensity along y-axis
+                total_intensity = bg_feat_values.sum()
+                if total_intensity > 0:
+                    y_center_of_mass = (y_coords * bg_feat_values).sum() / total_intensity
+                    y_center = y_coords.mean()
+                    y_com_list.append(y_center_of_mass)
+                    y_center_list.append(y_center)
+                    y_delta_com_list.append(y_center_of_mass - y_center)
+                    # print(f'[Frame {t}] Background feature center of mass along Y axis: {y_center_of_mass:.4f}')
+                else:
+                    print(f'[Frame {t}] Warning: Total feature intensity is zero, cannot compute center of mass')
+            
         else:
             # Fallback to original behavior if segmentation is not available
             pcd, pcd_feats, _ = result
@@ -222,3 +269,18 @@ for i in tqdm(epi_range):
                 visualizer.update_triangle_mesh(f'action_{a_i}', tf=ee_target_pose_mat[a_i])
         
         visualizer.render()
+    
+    # Print episode statistics
+    if compute_feat_com:
+        if y_com_list:
+            avg_y_com = np.mean(y_com_list)
+            std_y_com = np.std(y_com_list)
+            avg_y_center = np.mean(y_center_list)
+            std_y_center = np.std(y_center_list)
+            avg_y_delta_com = np.mean(y_delta_com_list)
+            std_y_delta_com = np.std(y_delta_com_list)
+            print(f'\n[Episode {i}] Average Y-axis delta COM: {avg_y_delta_com:.4f} ± {std_y_delta_com:.4f} (over {len(y_delta_com_list)} frames)')
+            # print(f'\n[Episode {i}] Average Y-axis point center: {avg_y_center:.4f} ± {std_y_center:.4f} (over {len(y_center_list)} frames)')
+            # print(f'\n[Episode {i}] Average Y-axis feature COM: {avg_y_com:.4f} ± {std_y_com:.4f} (over {len(y_com_list)} frames)')
+        else:
+            print(f'\n[Episode {i}] No valid feature COM computed')

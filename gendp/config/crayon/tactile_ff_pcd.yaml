@@ -11,7 +11,7 @@ checkpoint:
     mode: max
     monitor_key: test_mean_score
 dataloader:
-  batch_size: 64
+  batch_size: 128
   num_workers: 8
   persistent_workers: true
   pin_memory: true
@@ -57,10 +57,16 @@ past_action_visible: false
 
 shape_meta:
   trim_tail: 0
+  include_tactile_as_pointcloud: true  # NEW: Merge tactile as point clouds into d3fields
+  
+  # Tactile history configuration
+  tactile_history:
+    enabled: true  # Enable tactile history
+    length: 5  # Number of historical timesteps to include (including current)
+  
   action:
     shape:
-    - 7  # delta_pos(3) + delta_rotvec(3) + gripper_open_close(1) for delta action
-    # - 10  # pos(3) + rot6d(6) + gripper_open_close(1) for abs ee_pose
+    - 7  # delta_pos(3) + delta_rotvec(3) + gripper_open_close(1)
     delta: true  # action is delta ee_pose
   obs:
     ee_pose:
@@ -77,8 +83,8 @@ shape_meta:
     #   - 9
     d3fields:
       shape:
-      - 11 # C (4 original + 3 RGB + 4 contact field channels: contact_prob + fx + fy + fz)
-      - 868 # N (256 obj + 512 env + 100 ee = 868 total points)
+      - 22 # C: 4 (distilled dino) + 3 (RGB) + 15 (tactile_ff: 3 channels * 5 timesteps)
+      - 994 # N: 256 (obj) + 512 (env) + 100 (gripper) + 126 (tactile = 63 left + 63 right)
       type: spatial
       info:
         reference_frame: robot
@@ -88,7 +94,7 @@ shape_meta:
         - camera_front
         - camera_left
         - camera_right
-        N_gripper: 100  # End-effector points (kept for backward compatibility)
+        N_gripper: 100
         N_obj: 256  # Object points (from contact field config)
         N_env: 512  # Environment points (from contact field config)
         boundaries:
@@ -112,23 +118,25 @@ shape_meta:
           y_upper: 0.15
           z_lower: 0.0
           z_upper: 0.25
-        gripper_crop_params:
-          tool_length: 0.15
-          tool_width: 0.04
-          gripper_finger_length: 0.1
-          safety_margin: 0.0
-          global_z_threshold: 0.01
-          auto_estimate_plane: True
-          plane_margin: 0.012
-          plane_percentile: 20
-          ransac_iterations: 50
-          ransac_distance_threshold: 0.01
         resize_ratio: 0.5
         add_rgb_channels: true
-        use_contact_field: true  # Enable contact field prediction
     
-  # Tactile sensor settings for data processing only (NOT used as policy input)
-  # These are used by the contact field model for prediction, but not encoded by TactileCore
+    # Tactile is now merged into d3fields as point clouds
+    # The following keys are kept for reference but not used as separate observations
+    # tactile_left_force_field:
+    #   shape:
+    #   - 6  # force field difference (3) + coordinates (3) = 6 channels (difference mode)
+    #   - 7  # height (rows)
+    #   - 9  # width (cols)
+    #   type: tactile
+    # tactile_right_force_field:
+    #   shape:
+    #   - 6  # force field difference (3) + coordinates (3) = 6 channels (difference mode)
+    #   - 7  # height (rows)
+    #   - 9  # width (cols)
+    #   type: tactile
+  
+  # Tactile settings stored separately since they're used by base keys
   tactile_settings:
     tactile_left:
       N: 7
@@ -194,13 +202,7 @@ task:
     shape_meta: ${shape_meta}
     use_cache: true
     val_ratio: 0.05
-    reference_tactile_use_difference: true
-    # Contact field model settings
-    # contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/joint_tools_mixed_focal_0.9_0.75_nobias_ref_diff_hist_smoothpc_pcd512_directional_20251101_171937/last.ckpt  # Path to contact field checkpoint
-    # contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_focal_0.9_0.75_force_mag_dir_ada_weight_hist5_smoothpc_pcd256+512_20251109_122716/last.ckpt  # Path to contact field checkpoint
-    # contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_1109_real_scraper_qp_dynamic_ref_20251231_170754/last.ckpt  # Path to contact field checkpoint
-    contact_field_checkpoint_path: /home/kevin/gendp/contact_field/checkpoints/concat_tools_mixed_1109_real_scraper_corrected_lambda1_20260113_143028/last.ckpt
-    contact_field_device: cuda  # Device for contact field inference
+    reference_tactile_use_difference: true  # true = difference (6 channels), false = stack (9 channels)
     # Frame filtering settings
     filter_static_frames: true  # Enable filtering of static frames
     filter_pos_threshold: 0.001  # Position displacement threshold in meters
@@ -220,13 +222,13 @@ task:
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
-task_name: crayon_cross_contact_field
-dataset_name: crayon_cross_var_z
+task_name: crayon_cross_tactile_ff_pcd_diff
+dataset_name: crayon_cross_var_zd
 training:
   checkpoint_every: 250
   debug: false
   device: cuda
-  device_id: 1
+  device_id: 0
   gradient_accumulate_every: 1
   lr_scheduler: cosine
   lr_warmup_steps: 500

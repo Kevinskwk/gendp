@@ -25,7 +25,7 @@ ema:
   min_value: 0.0
   power: 0.75
   update_after_step: 0
-exp_name: n_obs_steps_3_delta_ee_no_joint
+exp_name: n_obs_steps_3_delta_ee_no_joint_horizon_24_var_z_pos_aug_0.05
 horizon: 24
 keypoint_visible_rate: 1.0
 logging:
@@ -55,6 +55,7 @@ optimizer:
   lr: 0.0001
   weight_decay: 1.0e-06
 past_action_visible: false
+
 shape_meta:
   trim_tail: 0
   action:
@@ -79,13 +80,13 @@ shape_meta:
     #   - 9
     d3fields:
       shape:
-      - 8 # C (5 distilled + 3 RGB)
+      - 7 # C (4 distilled + 3 RGB)
       - 868 # N
       type: spatial
       info:
         reference_frame: robot
         distill_dino: true
-        distill_obj: crayon
+        distill_obj: crayon_v4
         view_keys:
         - camera_front
         - camera_left
@@ -100,8 +101,34 @@ shape_meta:
           y_upper: 0.2
           z_lower: -0.03
           z_upper: 0.5
+        env_boundaries:
+          x_lower: 0.36
+          x_upper: 0.53
+          y_lower: -0.1
+          y_upper: 0.05
+          z_lower: -0.03
+          z_upper: 0.1
+        obj_boundaries:
+          x_lower: 0.3
+          x_upper: 0.7
+          y_lower: -0.2
+          y_upper: 0.15
+          z_lower: 0.0
+          z_upper: 0.25
+        gripper_crop_params:
+          tool_length: 0.15
+          tool_width: 0.04
+          gripper_finger_length: 0.1
+          safety_margin: 0.0
+          global_z_threshold: 0.01
+          auto_estimate_plane: True
+          plane_margin: 0.012
+          plane_percentile: 20
+          ransac_iterations: 50
+          ransac_distance_threshold: 0.01
         resize_ratio: 0.5
         add_rgb_channels: true
+        use_contact_field: false  # Disable contact field prediction
 
 policy:
   _target_: gendp.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
@@ -150,12 +177,27 @@ task:
     shape_meta: ${shape_meta}
     use_cache: true
     val_ratio: 0.05
+    # Frame filtering settings
+    filter_static_frames: true  # Enable filtering of static frames
+    filter_pos_threshold: 0.001  # Position displacement threshold in meters
+    filter_rot_threshold: 0.01  # Rotation displacement threshold in radians (~0.57 degrees)
+    filter_boundary_frames: 5  # Number of frames to keep at beginning and end
+    filter_gripper_threshold: 0.001  # Gripper displacement threshold in meters
+    filter_gripper_window: 3
+    # Data augmentation settings
+    augmentation_enabled: true  # Enable data augmentation
+    augmentation_translation_enabled: true  # Enable translation augmentation
+    augmentation_translation_range_x: 0.00  # Translation range in x-axis (meters)
+    augmentation_translation_range_y: 0.00  # Translation range in y-axis (meters)
+    augmentation_translation_range_z: 0.05  # Translation range in z-axis (meters)
+    augmentation_mirror_enabled: false  # Enable mirror augmentation
+    augmentation_probability: 0.5  # Probability of applying augmentation (0.0-1.0)
   dataset_dir: ${data_root}/data/${dataset_name}
   name: ${task_name}
   shape_meta: ${shape_meta}
   task_name: ${task_name}
 task_name: crayon_cross_gendp
-dataset_name: crayon_cross
+dataset_name: crayon_cross_var_z
 training:
   checkpoint_every: 250
   debug: false

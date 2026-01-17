@@ -272,15 +272,19 @@ class RealEnvFranka:
             shm_manager=shm_manager,
             robot_ip=robot_ip,
             frequency=200,
-            Kx_scale=1.0*2,
-            Kxd_scale=np.array([2.0, 1.5, 2.0, 1.0, 1.0, 1.0])*2,
+            # Kx_scale=1.0*2,
+            # Kxd_scale=np.array([2.0, 1.5, 2.0, 1.0, 1.0, 1.0])*2,
+            Kx_scale=np.array([1.0, 1.0, 0.3, 1.0, 1.0, 1.0])*2,
+            Kxd_scale=np.array([2.0, 1.5, 0.6, 1.0, 1.0, 1.0])*2,
+            # Kx_scale=np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])*4,
+            # Kxd_scale=np.array([2.0, 1.5, 2.0, 1.0, 1.0, 1.0])*4,
             joints_init=j_init,
             joints_init_duration=3.0,
             verbose=False,
             receive_latency=robot_obs_latency,
             ctrl_mode=ctrl_mode,
         )
-
+                      
         self.realsense = realsense
         self.gelsight = gelsight
         self.robot = robot
