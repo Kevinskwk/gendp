@@ -1127,13 +1127,29 @@ class Fusion():
             # align instance mask id to the first frame
             print(self.curr_obs_torch['mask_label'])
             self.align_instance_mask_v3(queries, boundaries, expected_labels, voxel_size=voxel_size, merge_iou=merge_iou)
-            # Convert tensor to numpy array for xmem_process
-            color_np = (self.curr_obs_torch['color'].detach().cpu().numpy() * 255).astype(np.uint8)
-            self.curr_obs_torch[f'mask'] = self.xmem_process(color_np, self.curr_obs_torch['mask']).to(dtype=self.dtype)
+            
+            # Check if the mask actually has non-zero instances
+            if self.curr_obs_torch['mask'].max() == 0:
+                # Mask is all zeros (no actual instances detected)
+                print('Warning: Mask is all zeros after alignment, using background-only mask')
+                self.curr_obs_torch[f'mask'] = torch.zeros((self.num_cam, self.H, self.W, 1), device=self.device, dtype=self.dtype)
+                self.curr_obs_torch['consensus_mask_label'] = []
+                self.track_ids = [0]
+                self.xmem_first_mask_loaded = True
+            else:
+                # Convert tensor to numpy array for xmem_process
+                color_np = (self.curr_obs_torch['color'].detach().cpu().numpy() * 255).astype(np.uint8)
+                self.curr_obs_torch[f'mask'] = self.xmem_process(color_np, self.curr_obs_torch['mask']).to(dtype=self.dtype)
         elif self.xmem_first_mask_loaded and not use_sam:
-            # Convert tensor to numpy array for xmem_process
-            color_np = (self.curr_obs_torch['color'].detach().cpu().numpy() * 255).astype(np.uint8)
-            self.curr_obs_torch[f'mask'] = self.xmem_process(color_np, None).to(dtype=self.dtype) # [num_cam, H, W, num_instance]
+            # Check if there are any objects being tracked
+            if len(self.track_ids) <= 1:  # Only background
+                # No objects to track, return background-only mask
+                print('Warning: No objects being tracked, using background-only mask')
+                self.curr_obs_torch[f'mask'] = torch.zeros((self.num_cam, self.H, self.W, 1), device=self.device, dtype=self.dtype)
+            else:
+                # Convert tensor to numpy array for xmem_process
+                color_np = (self.curr_obs_torch['color'].detach().cpu().numpy() * 255).astype(np.uint8)
+                self.curr_obs_torch[f'mask'] = self.xmem_process(color_np, None).to(dtype=self.dtype) # [num_cam, H, W, num_instance]
         elif self.xmem_first_mask_loaded and use_sam:
             raise NotImplementedError
             query_mask = torch.zeros((self.num_cam, self.H, self.W), device=self.device)

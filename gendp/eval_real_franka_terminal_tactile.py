@@ -315,7 +315,7 @@ def get_init_poses(task='scraper'):
     Get initial poses for different tasks.
     
     Args:
-        task: Task name ('scraper' or 'crayon')
+        task: Task name ('scraper' or 'crayon' or 'peeler')
     
     Returns:
         Tuple of (joint_init, ee_init)
@@ -333,8 +333,11 @@ def get_init_poses(task='scraper'):
     elif task == 'crayon_pickup':
         j_init = np.array([-0.02994604781270027, 0.2991308569908142, -0.004555299412459135, -1.751071572303772, -0.06488428264856339, 2.0103297233581543, -0.827126145362854])
         ee_init = np.array([0.6353483200073242, -0.034808311611413956, 0.40055933594703674, 3.1242419555642567, 0.06814992618484839, 0.8098764046141207])
+    elif task == 'peeler':
+        j_init = np.array([0.4430449903011322, 0.14599213004112244, -0.4228723645210266, -2.158895492553711, -0.633222758769989, 2.1249563694000244, 1.2104625701904297])
+        ee_init = np.array([0.5450507402420044, 0.0065561020746827126, 0.3324163556098938, 2.6293177604675293, -0.41358718276023865, -0.6764812469482422])
     else:
-        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon', 'crayon_old', 'crayon_pickup'")
+        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon', 'crayon_pickup', 'peeler'")
     
     return j_init, ee_init
 
@@ -355,7 +358,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--n_action_steps', '-n', default=-1, type=int, help="Number of action steps to execute. -1 means invalid.")
 @click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
 @click.option('--save_viz_interval', default=30, type=int, help="Save visualization every N frames (0 to disable)")
-@click.option('--task', '-t', default='scraper', type=click.Choice(['scraper', 'crayon'], case_sensitive=False), help="Task name for initial pose (scraper or crayon)")
+@click.option('--task', '-t', default='scraper', type=click.Choice(['scraper', 'crayon', 'peeler'], case_sensitive=False), help="Task name for initial pose (scraper or crayon or peeler)")
 def main(input_dir, output, robot_ip, match_dataset, match_episode,
     vis_camera_idx, vis_d3fields,
     steps_per_inference, max_duration,

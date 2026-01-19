@@ -130,7 +130,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
         n_workers=None, max_inflight_tasks=None, fusion : Optional[Fusion]=None, robot_name='panda', expected_labels=None,
         exclude_colors=[], contact_field_model=None, contact_field_config=None, contact_field_device='cuda',
         reference_tactile_use_difference=False, filter_static_frames_enabled=True, 
-        filter_pos_threshold=0.001, filter_rot_threshold=0.01, filter_boundary_frames=10, filter_gripper_threshold=0.001, filter_gripper_window=3):
+        filter_pos_threshold=0.001, filter_rot_threshold=0.01, filter_boundary_frames=10, filter_gripper_threshold=0.001, filter_gripper_window=3,
+        seg_method='gripper_crop', seg_params=None):
     if n_workers is None:
         n_workers = multiprocessing.cpu_count()
     if max_inflight_tasks is None:
@@ -381,7 +382,8 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                         exclude_threshold=0.01,
                         use_obj_bg_seg=True,
                         gripper_pose_seq=gripper_pose_seq_filtered,
-                        seg_method='gripper_crop',
+                        seg_method=seg_method,
+                        seg_params=seg_params,
                     )
                     
                     # Unpack object and background point clouds
@@ -1168,10 +1170,19 @@ class RealDataset(BaseImageDataset):
             augmentation_translation_range_y=0.0,
             augmentation_translation_range_z=0.0,
             augmentation_mirror_enabled=False,
-            augmentation_probability=0.5
+            augmentation_probability=0.5,
+            # Segmentation method and parameters
+            seg_method='gripper_crop',
+            seg_params=None
             ):
         
         super().__init__()
+        
+        # Convert OmegaConf DictConfig to regular dict if needed
+        if seg_params is not None and hasattr(seg_params, '__dict__'):
+            from omegaconf import OmegaConf
+            if OmegaConf.is_config(seg_params):
+                seg_params = OmegaConf.to_container(seg_params, resolve=True)
         
         rotation_transformer = RotationTransformer(
             from_rep='euler_angles', to_rep=rotation_rep, from_convention='xyz')
@@ -1266,6 +1277,15 @@ class RealDataset(BaseImageDataset):
         if filter_static_frames:
             cache_info_str += f'_filtered_p{filter_pos_threshold}_r{filter_rot_threshold}_b{filter_boundary_frames}_g{filter_gripper_threshold}_w{filter_gripper_window}'
         
+        # Add segmentation method to cache string
+        cache_info_str += f'_seg_{seg_method}'
+        if seg_params is not None:
+            # Add key parameters to cache string for differentiation
+            if 'reverse_selection' in seg_params:
+                cache_info_str += f'_rev_{seg_params["reverse_selection"]}'
+            if seg_method == 'color_crop' and 'hsv_lower' in seg_params:
+                cache_info_str += f'_hsv'
+        
         if use_cache:
             cache_zarr_path = os.path.join(dataset_dir, f'cache{cache_info_str}.zarr.zip')
             cache_lock_path = cache_zarr_path + '.lock'
@@ -1304,6 +1324,8 @@ class RealDataset(BaseImageDataset):
                             filter_boundary_frames=filter_boundary_frames,
                             filter_gripper_threshold=filter_gripper_threshold,
                             filter_gripper_window=filter_gripper_window,
+                            seg_method=seg_method,
+                            seg_params=seg_params,
                             )
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:
@@ -1348,6 +1370,9 @@ class RealDataset(BaseImageDataset):
                 filter_rot_threshold=filter_rot_threshold,
                 filter_boundary_frames=filter_boundary_frames,
                 filter_gripper_threshold=filter_gripper_threshold,
+                filter_gripper_window=filter_gripper_window,
+                seg_method=seg_method,
+                seg_params=seg_params,
             )
         self.replay_buffer = replay_buffer
         if fusion is not None:

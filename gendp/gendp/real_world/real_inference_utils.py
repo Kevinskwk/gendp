@@ -955,6 +955,8 @@ def get_real_obs_dict(
         contact_field_device = 'cuda',
         tactile_processors: Optional[Dict] = None,
         reference_tactile_use_difference: bool = False,
+        seg_method: str = 'gripper_crop',
+        seg_params: Optional[Dict] = None,
         ) -> Dict[str, np.ndarray]:
     obs_dict_np = dict()
     obs_shape_meta = shape_meta['obs']
@@ -1148,7 +1150,8 @@ def get_real_obs_dict(
                     exclude_colors=exclude_colors,
                     use_obj_bg_seg=True,
                     gripper_pose_seq=env_obs['ee_pose'] if 'ee_pose' in env_obs else None,
-                    seg_method='gripper_crop',
+                    seg_method=seg_method,
+                    seg_params=seg_params,
                     include_rgb=include_rgb,
                 )
                 aggr_src_pts_ls, aggr_feats_ls, obj_pts_ls, obj_feats_ls, bg_pts_ls, bg_feats_ls, aggr_colors_ls = obj_bg_result

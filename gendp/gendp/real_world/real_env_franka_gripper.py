@@ -232,6 +232,8 @@ class RealEnvFranka:
             # Kxd_scale=np.array([2.0, 1.5, 2.0, 1.0, 1.0, 1.0])*1.25,
             Kx_scale=np.array([1.0, 1.0, 0.3, 1.0, 1.0, 1.0])*2,
             Kxd_scale=np.array([2.0, 1.5, 0.6, 1.0, 1.0, 1.0])*2,
+            # Kx_scale=np.array([1.0, 1.0, 0.5, 1.0, 1.0, 1.0])*4,
+            # Kxd_scale=np.array([2.0, 1.5, 1.0, 1.0, 1.0, 1.0])*4,
             joints_init=j_init,
             joints_init_duration=3.0,
             verbose=False,

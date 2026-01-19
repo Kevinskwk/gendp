@@ -318,7 +318,7 @@ def get_init_poses(task='scraper'):
     Get initial poses for different tasks.
     
     Args:
-        task: Task name ('scraper' or 'crayon')
+        task: Task name ('scraper' or 'crayon' or 'crayon_pickup' or 'peeler')
     
     Returns:
         Tuple of (joint_init, ee_init)
@@ -336,8 +336,11 @@ def get_init_poses(task='scraper'):
     elif task == 'crayon_pickup':
         j_init = np.array([-0.02994604781270027, 0.2991308569908142, -0.004555299412459135, -1.751071572303772, -0.06488428264856339, 2.0103297233581543, -0.827126145362854])
         ee_init = np.array([0.6353483200073242, -0.034808311611413956, 0.40055933594703674, 3.1242419555642567, 0.06814992618484839, 0.8098764046141207])
+    elif task == 'peeler':
+        j_init = np.array([0.4430449903011322, 0.14599213004112244, -0.4228723645210266, -2.158895492553711, -0.633222758769989, 2.1249563694000244, 1.2104625701904297])
+        ee_init = np.array([0.5450507402420044, 0.0065561020746827126, 0.3324163556098938, 2.6293177604675293, -0.41358718276023865, -0.6764812469482422])
     else:
-        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon', 'crayon_old', 'crayon_pickup'")
+        raise ValueError(f"Unknown task: {task}. Supported tasks: 'scraper', 'crayon', 'crayon_pickup', 'peeler'")
     
     return j_init, ee_init
 
@@ -358,7 +361,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--n_action_steps', '-n', default=-1, type=int, help="Number of action steps to execute. -1 means invalid.")
 @click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
 @click.option('--save_viz_interval', default=30, type=int, help="Save visualization every N frames (0 to disable)")
-@click.option('--task', '-t', default='crayon', type=click.Choice(['scraper', 'crayon', 'crayon_old', 'crayon_pickup']), help="Task to perform (scraper or crayon)")
+@click.option('--task', '-t', default='crayon', type=click.Choice(['scraper', 'crayon', 'crayon_pickup', 'peeler']), help="Task to perform (scraper or crayon or crayon_pickup or peeler)")
 def main(input_dir, output, robot_ip, match_dataset, match_episode,
     vis_camera_idx, vis_d3fields,
     steps_per_inference, max_duration,
@@ -492,6 +495,21 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
         )
         print("✅ Initialized right tactile processor")
 
+    # Extract segmentation config from checkpoint
+    seg_method = cfg.task.dataset.get('seg_method', 'gripper_crop')
+    seg_params = cfg.task.dataset.get('seg_params', None)
+    
+    # Convert OmegaConf to regular dict if needed
+    if seg_params is not None:
+        from omegaconf import OmegaConf
+        if OmegaConf.is_config(seg_params):
+            seg_params = OmegaConf.to_container(seg_params, resolve=True)
+    
+    print(f"📊 Segmentation config from checkpoint:")
+    print(f"   Method: {seg_method}")
+    if seg_params:
+        print(f"   Params: {seg_params}")
+
     # Start terminal input thread
     input_thread = threading.Thread(target=terminal_input_thread, daemon=True)
     input_thread.start()
@@ -539,7 +557,9 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                         contact_field_model=contact_field_model,
                         contact_field_device=contact_field_device,
                         tactile_processors=tactile_processors,
-                        reference_tactile_use_difference=reference_tactile_use_difference)
+                        reference_tactile_use_difference=reference_tactile_use_difference,
+                        seg_method=seg_method,
+                        seg_params=seg_params)
 
                     obs_dict = dict_apply(obs_dict_np, 
                         lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
@@ -735,7 +755,9 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                         contact_field_model=contact_field_model,
                                         contact_field_device=contact_field_device,
                                         tactile_processors=tactile_processors,
-                                        reference_tactile_use_difference=reference_tactile_use_difference)
+                                        reference_tactile_use_difference=reference_tactile_use_difference,
+                                        seg_method=seg_method,
+                                        seg_params=seg_params)
                                     t_obs_dict_end = time.perf_counter()
                                     # print(f"⏱️  [Timing] Get obs dict (fusion + contact field): {(t_obs_dict_end - t_obs_dict_start)*1000:.2f}ms")
                                     
