@@ -606,7 +606,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 query_boundaries = env_boundaries if seg_params.get('reverse_selection', False) else obj_boundaries
                 fusion.text_queries_for_inst_mask(query_texts, query_thresholds, query_boundaries, expected_labels=expected_labels, robot_pcd=dense_ee_pcd, voxel_size=0.03, merge_iou=0.15)
                 query_pcd = fusion.extract_masked_pcd(list(range(1, fusion.get_inst_num())), boundaries=query_boundaries)
-                print(f"[Timing] SAM segmentation: {time.time() - t_start_sam:.4f}s")
+                # print(f"[Timing] SAM segmentation: {time.time() - t_start_sam:.4f}s")
 
 
             # Step 2: Apply segmentation method to get object point cloud
@@ -651,7 +651,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 if distill_dino and all_feats.shape[0] > 0:
                     all_feats_tensor = torch.from_numpy(all_feats).to(device=fusion.device, dtype=fusion.dtype)
                     all_feats = fusion.eval_dist_to_sel_feats(all_feats_tensor, obj_name=distill_obj).detach().cpu().numpy()
-                print(f"[Timing] Feature extraction for d3field_feat: {time.time() - start_time:.4f}s")
+                # print(f"[Timing] Feature extraction for d3field_feat: {time.time() - start_time:.4f}s")
                 
                 # Apply threshold to determine object points
                 if all_feats.shape[0] > 0:
@@ -753,7 +753,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 env_mask = x_mask & y_mask & z_mask
                 bg_pcd = bg_pcd[env_mask]
 
-            print(f"[Timing] Segmentation ({seg_method}): {time.time() - seg_start_time:.4f}s, obj_pts={obj_pcd.shape[0]}, bg_pts={bg_pcd.shape[0]}")
+            # print(f"[Timing] Segmentation ({seg_method}): {time.time() - seg_start_time:.4f}s, obj_pts={obj_pcd.shape[0]}, bg_pts={bg_pcd.shape[0]}")
 
             # Step 3: Extract features from object and background point clouds
             feat_dim = 0
@@ -817,7 +817,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
             bg_src_pts = np.concatenate(bg_pts_list, axis=0) if bg_pts_list else np.zeros((0, 3), dtype=np.float32)
             bg_src_feats = torch.concat(bg_feat_list, axis=0).detach().cpu().numpy() if bg_feat_list else np.zeros((0, feat_dim), dtype=np.float32)
 
-            print(f"[Timing] Feature extraction for obj/bg: {time.time() - feat_start_time:.4f}s, feat_dim={feat_dim}")
+            # print(f"[Timing] Feature extraction for obj/bg: {time.time() - feat_start_time:.4f}s, feat_dim={feat_dim}")
 
             # Process RGB colors if enabled
             # if include_rgb:

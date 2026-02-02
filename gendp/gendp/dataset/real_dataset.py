@@ -1,8 +1,6 @@
 import glob
 import os
 import shutil
-import time
-import pickle
 from typing import Dict, Optional
 from pathlib import Path
 import torch
@@ -14,14 +12,11 @@ from tqdm import tqdm
 import concurrent.futures
 import h5py
 import cv2
-import open3d as o3d
 import scipy.spatial.transform as st
 from filelock import FileLock
-from threadpoolctl import threadpool_limits
-from omegaconf import OmegaConf, DictConfig
 import transforms3d
 import scipy.spatial.transform as st
-import yaml
+import hashlib
 
 from gendp.common.pytorch_util import dict_apply
 from gendp.common.replay_buffer import ReplayBuffer
@@ -30,7 +25,6 @@ from gendp.common.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
 from gendp.common.kinematics_utils import KinHelper
 from gendp.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
-from gendp.common.rob_mesh_utils import load_mesh, mesh_poses_to_pc
 from gendp.common.data_utils import d3fields_proc, convert_actions, convert_ee_pose_obs, load_dict_from_hdf5, modify_hdf5_from_dict
 from gendp.common.tactile_utils import TactileProcessor
 from gendp.dataset.base_dataset import BaseImageDataset
@@ -668,16 +662,21 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                             result_idx += 1
                             
                             obj_pcd = obj_pts_ls[t_idx]
+                            # Get use_contact_force from shape_meta
+                            use_contact_force_flag = shape_meta['obs'][key]['info'].get('use_contact_force', True)
                             pcd_with_contact = augment_pointcloud_with_contact_field(
                                 full_pointcloud=full_pcd,
                                 obj_pointcloud=obj_pcd,
                                 contact_prob=contact_prob,
-                                contact_force=contact_force
+                                contact_force=contact_force,
+                                use_contact_force=use_contact_force_flag
                             )
                             contact_field_pts_ls.append(pcd_with_contact)
                         else:
                             # No object or tactile data, pad with zeros
-                            zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                            use_contact_force_flag = shape_meta['obs'][key]['info'].get('use_contact_force', True)
+                            contact_channels = 4 if use_contact_force_flag else 1
+                            zeros_contact = np.zeros((full_pcd.shape[0], contact_channels), dtype=np.float32)
                             pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
                             contact_field_pts_ls.append(pcd_with_contact)
                     
@@ -688,8 +687,10 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                 if distill_dino:
                     for pts_idx, aggr_src_pts in enumerate(aggr_src_pts_ls):
                         if use_contact_field:
-                            # Extract contact field channels (last 4 channels)
-                            contact_channels = aggr_src_pts[:, -4:]
+                            # Extract contact field channels (last N channels)
+                            use_contact_force_flag = shape_meta['obs'][key]['info'].get('use_contact_force', True)
+                            contact_field_channels = 4 if use_contact_force_flag else 1
+                            contact_channels = aggr_src_pts[:, -contact_field_channels:]
                             # Concatenate: [xyz, dino_feats, rgb (if enabled), contact_field]
                             parts_to_concat = [
                                 aggr_src_pts[:, :3],  # xyz
@@ -1190,10 +1191,15 @@ class RealDataset(BaseImageDataset):
         # Load contact field model if checkpoint path is provided
         contact_field_model = None
         contact_field_config = None
+        contact_field_ckpt_hash = None
         if contact_field_checkpoint_path is not None:
             print(f"Loading contact field model from {contact_field_checkpoint_path}")
             contact_field_model, contact_field_config = load_model_and_config_from_checkpoint(contact_field_checkpoint_path, device=contact_field_device)
             print("✅ Contact field model loaded successfully")
+            
+            # Compute hash of checkpoint path for cache invalidation
+            contact_field_ckpt_hash = hashlib.md5(contact_field_checkpoint_path.encode()).hexdigest()[:6]
+            print(f"📝 Contact field checkpoint hash: {contact_field_ckpt_hash}")
             
             # Extract history configuration
             history_config = contact_field_config.get('data', {}).get('history', {})
@@ -1209,6 +1215,9 @@ class RealDataset(BaseImageDataset):
         # Add contact field to cache string if enabled with point allocation info
         if contact_field_model is not None:
             cache_info_str += '_contact_field'
+            # Add checkpoint hash to distinguish different models
+            if contact_field_ckpt_hash is not None:
+                cache_info_str += f'_{contact_field_ckpt_hash}'
             # Add N_obj and N_env to distinguish different contact field models
             if contact_field_config is not None:
                 downsampling_config = contact_field_config.get('data', {}).get('point_cloud_downsampling', {})
@@ -1217,6 +1226,11 @@ class RealDataset(BaseImageDataset):
                     cf_N_env = downsampling_config.get('env_points', 512)
                     cache_info_str += f'_obj{cf_N_obj}_env{cf_N_env}'
                     # print(f"📦 Cache will include contact field point allocation: obj={cf_N_obj}, env={cf_N_env}")
+            # Add use_contact_force flag to distinguish between contact prob only vs full contact field
+            if 'd3fields' in shape_meta.get('obs', {}):
+                use_contact_force_flag = shape_meta['obs']['d3fields'].get('info', {}).get('use_contact_force', True)
+                if not use_contact_force_flag:
+                    cache_info_str += '_prob_only'
         
         # Add include_tactile_as_pointcloud to cache string
         if shape_meta.get('include_tactile_as_pointcloud', False):

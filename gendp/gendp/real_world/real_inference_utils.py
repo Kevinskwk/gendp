@@ -743,7 +743,8 @@ def augment_pointcloud_with_contact_field(
     full_pointcloud: np.ndarray,
     obj_pointcloud: np.ndarray,
     contact_prob: np.ndarray,
-    contact_force: np.ndarray
+    contact_force: np.ndarray,
+    use_contact_force: bool = True
 ) -> np.ndarray:
     """
     Augment full point cloud with contact field data.
@@ -754,20 +755,27 @@ def augment_pointcloud_with_contact_field(
         obj_pointcloud: Object point cloud subset (N_obj, 3)
         contact_prob: Contact probabilities for object points (N_obj, 1)
         contact_force: Contact forces for object points (N_obj, 3)
+        use_contact_force: If True, include force channels; if False, only use contact_prob
     
     Returns:
-        Augmented point cloud (N_total, C+4) where last 4 channels are
-        [contact_prob, fx, fy, fz]
+        Augmented point cloud (N_total, C+4) if use_contact_force else (N_total, C+1)
+        Last channels are [contact_prob, fx, fy, fz] if use_contact_force
+        else [contact_prob]
     """
     N_obj = obj_pointcloud.shape[0]
     N_total = full_pointcloud.shape[0]
     N_bg = N_total - N_obj
     
     # Create contact field data for object points
-    obj_contact_field = np.concatenate([contact_prob, contact_force], axis=-1).astype(np.float32)  # (N_obj, 4)
+    if use_contact_force:
+        obj_contact_field = np.concatenate([contact_prob, contact_force], axis=-1).astype(np.float32)  # (N_obj, 4)
+        contact_channels = 4
+    else:
+        obj_contact_field = contact_prob.astype(np.float32)  # (N_obj, 1)
+        contact_channels = 1
     
     # Create zeros for background points
-    bg_contact_field = np.zeros((N_bg, 4), dtype=np.float32)
+    bg_contact_field = np.zeros((N_bg, contact_channels), dtype=np.float32)
     
     # Concatenate contact fields
     full_contact_field = np.concatenate([obj_contact_field, bg_contact_field], axis=0)
@@ -957,6 +965,7 @@ def get_real_obs_dict(
         reference_tactile_use_difference: bool = False,
         seg_method: str = 'gripper_crop',
         seg_params: Optional[Dict] = None,
+        use_contact_force = None,
         ) -> Dict[str, np.ndarray]:
     obs_dict_np = dict()
     obs_shape_meta = shape_meta['obs']
@@ -1133,6 +1142,11 @@ def get_real_obs_dict(
             # Check if RGB channels should be included from shape_meta
             include_rgb = attr['info'].get('add_rgb_channels', False)
             
+            # Check if contact force channels should be included
+            use_contact_force_from_meta = attr['info'].get('use_contact_force', True)
+            # Use parameter value if explicitly passed, otherwise use shape_meta value
+            use_contact_force_effective = use_contact_force if use_contact_force is not None else use_contact_force_from_meta
+            
             if use_contact_field:
                 # Run d3fields_proc with object/background segmentation
                 obj_bg_result = d3fields_proc(
@@ -1252,27 +1266,32 @@ def get_real_obs_dict(
                                         full_pointcloud=full_pcd,
                                         obj_pointcloud=obj_pcd,
                                         contact_prob=contact_prob,
-                                        contact_force=contact_force
+                                        contact_force=contact_force,
+                                        use_contact_force=use_contact_force_effective
                                     )
                                     contact_field_pts_ls.append(pcd_with_contact)
                                 else:
                                     # Gripper is open - use zero padding for contact field
-                                    zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                                    contact_channels = 4 if use_contact_force_effective else 1
+                                    zeros_contact = np.zeros((full_pcd.shape[0], contact_channels), dtype=np.float32)
                                     pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
                                     contact_field_pts_ls.append(pcd_with_contact)
                             else:
                                 # No ee_pose, pad with zeros
-                                zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                                contact_channels = 4 if use_contact_force_effective else 1
+                                zeros_contact = np.zeros((full_pcd.shape[0], contact_channels), dtype=np.float32)
                                 pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
                                 contact_field_pts_ls.append(pcd_with_contact)
                         else:
                             # No tactile data, pad with zeros
-                            zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                            contact_channels = 4 if use_contact_force_effective else 1
+                            zeros_contact = np.zeros((full_pcd.shape[0], contact_channels), dtype=np.float32)
                             pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
                             contact_field_pts_ls.append(pcd_with_contact)
                     else:
                         # No object point cloud or no tactile data, pad with zeros
-                        zeros_contact = np.zeros((full_pcd.shape[0], 4), dtype=np.float32)
+                        contact_channels = 4 if use_contact_force_effective else 1
+                        zeros_contact = np.zeros((full_pcd.shape[0], contact_channels), dtype=np.float32)
                         pcd_with_contact = np.concatenate([full_pcd, zeros_contact], axis=-1).astype(np.float32)
                         contact_field_pts_ls.append(pcd_with_contact)
                 
@@ -1307,8 +1326,9 @@ def get_real_obs_dict(
             
             if distill_dino and aggr_feats is not None:
                 if use_contact_field:
-                    # Extract contact field channels (last 4 channels) from aggr_src_pts
-                    contact_channels = aggr_src_pts[:, :, -4:]  # (T, N, 4)
+                    # Extract contact field channels (last N channels) from aggr_src_pts
+                    contact_field_channels = 4 if use_contact_force_effective else 1
+                    contact_channels = aggr_src_pts[:, :, -contact_field_channels:]  # (T, N, 1 or 4)
                     xyz = aggr_src_pts[:, :, :3]  # (T, N, 3)
                     # Concatenate: [xyz, dino_feats, contact_field]
                     parts_to_concat = [
@@ -1333,8 +1353,9 @@ def get_real_obs_dict(
                 # Need to add RGB channels if enabled
                 if aggr_colors is not None:
                     # Extract xyz and contact field channels
+                    contact_field_channels = 4 if use_contact_force_effective else 1
                     xyz = aggr_src_pts[:, :, :3]  # (T, N, 3)
-                    contact_channels = aggr_src_pts[:, :, -4:]  # (T, N, 4)
+                    contact_channels = aggr_src_pts[:, :, -contact_field_channels:]  # (T, N, 1 or 4)
                     # Concatenate: [xyz, rgb, contact_field]
                     aggr_pts_feats = np.concatenate([xyz, aggr_colors, contact_channels], axis=-1)
                 else:
