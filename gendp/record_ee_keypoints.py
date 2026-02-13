@@ -335,8 +335,8 @@ def main(output_dir, robot_ip, init_joints, vis_camera_idx, frequency, command_l
                     )
                     
                     # Save visualization images periodically
-                    if save_viz_interval > 0:
-                        save_visualization_images(vis_img, output_dir, iter_idx, save_viz_interval)
+                    # if save_viz_interval > 0:
+                    #     save_visualization_images(vis_img, output_dir, iter_idx, save_viz_interval)
                     
                     # Execute gripper control
                     joint_pos = obs['full_joint_pos']

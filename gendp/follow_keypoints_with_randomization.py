@@ -871,8 +871,8 @@ def main(keypoints_file, output_dir, robot_ip, init_joints, vis_camera_idx, freq
                         )
                     
                     # Save visualization images periodically
-                    if save_viz_interval > 0:
-                        save_visualization_images(vis_img, output_dir, iter_idx, save_viz_interval)
+                    # if save_viz_interval > 0:
+                    #     save_visualization_images(vis_img, output_dir, iter_idx, save_viz_interval)
                     
                     # Validate action shape before sending
                     if actions.shape != (7,):

@@ -166,4 +166,5 @@ cython_debug/
 *.mp4
 
 outputs/
-
+calibration_images/
+figures/
