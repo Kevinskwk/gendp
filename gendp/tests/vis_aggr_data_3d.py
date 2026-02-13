@@ -53,7 +53,7 @@ def sample_or_pad_pointcloud(pointcloud, colors, target_size):
 
 
 ### hyper param
-epi_range = [10]
+epi_range = [0]
 vis_robot = True
 vis_action = True
 apply_color_segmentation = False  # Set to True to apply color filtering
@@ -67,8 +67,11 @@ downsample_env_points = 512   # Number of environment points after downsampling
 
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
-data_dir = f'{curr_dir}/../../data/crayon_cross'
+# data_dir = f'{curr_dir}/../../data/crayon_cross'
 # data_dir = f'{curr_dir}/../../data/scraper_combined'
+# data_dir = f'{curr_dir}/../../data/scrap_tool_test'
+# data_dir = f'{curr_dir}/../../data/crayon_pickup_new'
+data_dir = f'{curr_dir}/../../data/crayon_cross_z_58'
 robot_name = 'panda'
 # cam_keys = ['right_bottom_view', 'left_bottom_view', 'right_top_view', 'left_top_view']
 # cam_keys = ['camera_wrist', 'camera_fixed']
@@ -118,16 +121,16 @@ OBJECT_BOUNDARIES = {
     'y_lower': -0.15,
     'y_upper': 0.15,
     'z_lower': 0.0,
-    'z_upper': 0.25,
+    'z_upper': 0.4,
 }
 
 ENV_BOUNDARIES = {
-    'x_lower': 0.4,
-    'x_upper': 0.6,
+    'x_lower': 0.36,
+    'x_upper': 0.53,
     'y_lower': -0.1,
     'y_upper': 0.05,
-    'z_lower': -0.1,
-    'z_upper': 0.01,
+    'z_lower': -0.03,
+    'z_upper': 0.1
 }
 
 
@@ -184,6 +187,11 @@ for i in tqdm(epi_range):
         intrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_intrinsics'][t] for cam_key in cam_keys])
         extrinsics = np.stack([data_dict['observations']['images'][f'{cam_key}_extrinsics'][t] for cam_key in cam_keys])
 
+        # Tune the extrinsics
+        # pose_0 = np.linalg.inv(extrinsics[2])
+        # pose_0[0:3, 3] += np.array([-0.025, -0.01, -0.005])  # Adjust position
+        # extrinsics[2] = np.linalg.inv(pose_0)
+
         boundaries = {
             'x_lower': 0.3,
             'x_upper': 0.7,
@@ -192,14 +200,7 @@ for i in tqdm(epi_range):
             'z_lower': -0.1,
             'z_upper': 0.5,
         }
-        # boundaries = {
-        #     'x_lower': -1,
-        #     'x_upper': 1,
-        #     'y_lower': -1,
-        #     'y_upper': 1,
-        #     'z_lower': -1,
-        #     'z_upper': 1,
-        # }
+
         pcd, pcd_colors = aggr_point_cloud_from_data(colors[:],
                                                      depths[:],
                                                      intrinsics[:],
@@ -241,6 +242,7 @@ for i in tqdm(epi_range):
                 pcd, gripper_pose_robot_base_6d, gripper_width,
                 tool_length=0.15,  # Expected tool length (adjust as needed)
                 tool_width=0.02,   # Expected tool width  
+                # tool_width=0.15,   # Expected tool width  
                 gripper_finger_length=0.1,  # Gripper finger length (adjust for your robot)
                 safety_margin=0.00,  # Safety margin
                 global_z_threshold=0.01  # Global Z threshold (adjust as needed)
@@ -253,7 +255,12 @@ for i in tqdm(epi_range):
             env_mask = ~tool_mask
             env_pcd = pcd[env_mask]
             env_colors = pcd_colors[env_mask]
-            
+
+            # print floor env pcd z stats (min, max, mean, 95 percentile, 99 percentile)
+            if len(env_pcd) > 0:
+                floor_pcd = env_pcd[env_pcd[:, 2] < 0.03]
+                print(f"Floor Env PCD Z stats: min={np.min(floor_pcd[:, 2]):.4f}, max={np.max(floor_pcd[:, 2]):.4f}, mean={np.mean(floor_pcd[:, 2]):.4f}, 95th={np.percentile(floor_pcd[:, 2], 95):.4f}, 99th={np.percentile(floor_pcd[:, 2], 99):.4f}")
+
             # Apply ENV_BOUNDARIES to environment points
             env_in_bounds = (
                 (env_pcd[:, 0] >= ENV_BOUNDARIES['x_lower']) & (env_pcd[:, 0] <= ENV_BOUNDARIES['x_upper']) &
@@ -371,7 +378,7 @@ for i in tqdm(epi_range):
             visualizer.update_pcd(pcd_o3d, 'pcd')
         visualizer.update_triangle_mesh('front', tf=np.linalg.inv(extrinsics[0]))
         visualizer.update_triangle_mesh('left', tf=np.linalg.inv(extrinsics[1]))
-        visualizer.update_triangle_mesh('right', tf=np.linalg.inv(extrinsics[1]))
+        visualizer.update_triangle_mesh('right', tf=np.linalg.inv(extrinsics[2]))
 
         # left_finger_pose, right_finger_pose = get_finger_poses(
         #     data_dict['observations']['left_finger_pos'][t],

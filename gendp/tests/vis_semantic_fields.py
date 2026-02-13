@@ -17,17 +17,19 @@ import scipy.spatial.transform as st
 ### hyper param
 # epi_range = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 # epi_range = [0, 1, 2, 3, 4, 5, 8, 9]
-epi_range = [0]
-# epi_range = [14, 15]
+# epi_range = [0, 15, 30, 45, 60, 75]
+epi_range = [23]
 # epi_range = [20, 21, 22, 23]
-vis_robot = True
+vis_robot = False
 vis_action = False
 compute_feat_com = False
 curr_dir = os.path.dirname(os.path.abspath(__file__))
 # data_dir = f'{curr_dir}/../../data/sapien_demo/pencil_insertion_demo'
-# data_dir = f'{curr_dir}/../../data/pencil_pickup'
+# data_dir = f'{curr_dir}/../../data/crayon_pickup_v2'
+data_dir = f'{curr_dir}/../../data/pencil_pickup'
 # data_dir = f'{curr_dir}/../../data/crayon_pickup_left'
-data_dir = f'{curr_dir}/../../data/crayon_cross_z58'
+# data_dir = f'{curr_dir}/../../data/peeler_carrot'
+# data_dir = f'{curr_dir}/../../data/peeler_test'
 # data_dir = f'{curr_dir}/../../data/scraper_z73'
 # data_dir = f'{curr_dir}/../../data/scrap_tool_test'
 # data_dir = f'{curr_dir}/../../data/outputs/2025.10.02/19.47.25_train_diffusion_unet_hybrid_scraper_real'
@@ -42,12 +44,16 @@ shape_meta = {
     'info': {
         'reference_frame': 'world',
         'distill_dino': True,
+        # 'distill_obj': 'peeler_v2',
         # 'distill_obj': 'pencil',
         'distill_obj': 'crayon_v4',
         # 'distill_obj': 'pencil_real',
         # 'distill_obj': 'scraper',
-        'query_text': 'dark green scraper tool',
+        # 'query_text': 'dark green scraper tool',
         # 'query_text': 'crayon',
+        # 'query_text': 'peeler',
+        'query_text': 'carrot',
+        'sam_threshold': 0.1,
         # 'view_keys': ['left_bottom_view', 'right_bottom_view', 'left_top_view', 'right_top_view'],
         'view_keys': ['front', 'left', 'right'],
         # 'N_gripper': 100,
@@ -66,21 +72,21 @@ shape_meta = {
             'x_lower': 0.3,
             'x_upper': 0.7,
             'y_lower': -0.2,
-            'y_upper': 0.15,
+            'y_upper': 0.2,
             'z_lower': 0.0,
             'z_upper': 0.4
         },
         # crayon_pickup
-        # 'env_boundaries': {
-        #     'x_lower': 0.41,
-        #     'x_upper': 0.7,
-        #     # 'x_upper': 0.57,
-        #     'y_lower': -0.14,
-        #     'y_upper': 0.13,
-        #     # 'z_lower': 0.1,
-        #     'z_lower': -0.03,
-        #     'z_upper': 0.17
-        # },
+        'env_boundaries': {
+            'x_lower': 0.41,
+            'x_upper': 0.7,
+            # 'x_upper': 0.57,
+            'y_lower': -0.14,
+            'y_upper': 0.13,
+            'z_lower': 0.1,
+            # 'z_lower': -0.03,
+            'z_upper': 0.17
+        },
         # crayon draw
         # 'env_boundaries': {
         #     'x_lower': 0.36,
@@ -91,14 +97,14 @@ shape_meta = {
         #     'z_upper': 0.1
         # },
         # peeler
-        'env_boundaries': {
-            'x_lower': 0.3,
-            'x_upper': 0.6,
-            'y_lower': -0.2,
-            'y_upper': 0.2,
-            'z_lower': 0.0,
-            'z_upper': 0.1
-        },
+        # 'env_boundaries': {
+        #     'x_lower': 0.3,
+        #     'x_upper': 0.6,
+        #     'y_lower': -0.2,
+        #     'y_upper': 0.2,
+        #     'z_lower': 0.0,
+        #     'z_upper': 0.1
+        # },
         'resize_ratio': 0.5
     }
 }
@@ -167,19 +173,25 @@ for i in tqdm(epi_range):
             gripper_pose_seq=ee_poses,
             seg_method='gripper_crop',
             # seg_method='d3field_feat',
+            # seg_method='sam',
             seg_params={
                 'tool_length': 0.15,
                 'tool_width': 0.04,  # crayon
+                # 'tool_width': 0.1,  # peeler
                 'gripper_finger_length': 0.1,
                 'safety_margin': 0.0,
-                # 'auto_estimate_plane': False,
-                'auto_estimate_plane': True,
+                # 'safety_margin': 0.003,
+                'global_z_threshold' : 0.025,
+                'auto_estimate_plane': False,
                 'plane_margin': 0.012,
                 'plane_percentile': 20,
                 'ransac_iterations': 50,
                 'ransac_distance_threshold': 0.01,
-                'feat_threshold': 0.25,
-                'use_any': False
+                'feat_threshold': 0.05,
+                'use_any': True,
+                'combine_with_gripper': True,
+                'gripper_combine_mode': 'intersection',
+                # 'reverse_selection': True,
             }
         )
         t1 = time.time()
@@ -208,8 +220,8 @@ for i in tqdm(epi_range):
             
             # Use different colormaps for object and background
             obj_cmap = colormaps.get_cmap('viridis')
-            bg_cmap = colormaps.get_cmap('Reds')
-            # bg_cmap = colormaps.get_cmap('viridis')
+            # bg_cmap = colormaps.get_cmap('Reds')
+            bg_cmap = colormaps.get_cmap('viridis')
 
             obj_colors = obj_cmap(obj_feats[:, 0])[:, :3]
             bg_colors = bg_cmap(bg_feats[:, 0])[:, :3]
