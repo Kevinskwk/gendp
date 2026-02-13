@@ -99,6 +99,33 @@ def transform_to_gripper_frame(points: np.ndarray, ee_pose_7d: np.ndarray) -> np
     return points_transformed.reshape(original_shape)
 
 
+def transform_to_world_frame(vectors: np.ndarray, ee_pose_7d: np.ndarray) -> np.ndarray:
+    """
+    Transform vectors from gripper frame to world frame.
+    
+    Args:
+        vectors: (N, 3) or (H, W, 3) vectors in gripper frame (e.g., force vectors)
+        ee_pose_7d: (7,) end-effector pose [x, y, z, qx, qy, qz, qw]
+        
+    Returns:
+        Vectors in world frame with same shape as input
+    """
+    original_shape = vectors.shape
+    vectors_flat = vectors.reshape(-1, 3)
+    
+    # Extract quaternion
+    quat = ee_pose_7d[3:]  # [qx, qy, qz, qw]
+    
+    # Create rotation matrix from quaternion
+    rot = R.from_quat(quat).as_matrix()
+    
+    # Transform vectors: v_world = R @ v_gripper
+    # Note: For vectors (not points), we only apply rotation, not translation
+    vectors_transformed = (rot @ vectors_flat.T).T
+    
+    return vectors_transformed.reshape(original_shape)
+
+
 # Segmentation parameters (same as in viz_contact_field_with_tactile_images.py)
 PURPLE_HUE_RANGE = (230, 240)
 PURPLE_SATURATION_RANGE = (50, 200)
@@ -129,11 +156,20 @@ ENV_BOUNDARIES = {
 # Contact detection parameters
 CONTACT_Z_THRESHOLD = 0.015  # Contact when object is within this distance to z=0.01 plane
 TACTILE_CHANGE_THRESHOLD = 0.001  # Threshold for detecting tactile change (normal force)
-CONTACT_FORCE_SCALE = 100  # Scale factor for converting tactile to contact force magnitude
-CONTACT_MODE = 'top_k'  # 'single', 'top_k', or 'threshold'
-# CONTACT_MODE = 'single'  # 'single', 'top_k', or 'threshold'
-CONTACT_TOP_K = 10  # For 'top_k' mode
+# CONTACT_MODE = 'lowest_k'  # 'single', 'top_k', 'threshold', or 'lowest_k'
+CONTACT_MODE = 'top_k'  # 'single', 'top_k', 'threshold', or 'lowest_k'
+CONTACT_TOP_K = 10  # For 'top_k' and 'lowest_k' modes
 CONTACT_DEPTH_THRESHOLD = 0.015  # For 'threshold' mode
+
+# Cropping parameters for 'lowest_k' mode (in gripper frame, meters)
+LOWEST_K_CROP_PARAMS = {
+    'x_min': -0.025,  # Minimum x in gripper frame
+    'x_max': 0.025,   # Maximum x in gripper frame (forward from gripper)
+    'y_min': -0.025,  # Minimum y in gripper frame
+    'y_max': 0.025,   # Maximum y in gripper frame
+    'z_min': 0.1,  # Minimum z in gripper frame
+    'z_max': 0.25,   # Maximum z in gripper frame (below gripper center)
+}
 
 # Force estimator parameters
 FORCE_ESTIMATOR_METHOD = 'analytical'  # 'simple' or 'analytical'
@@ -147,13 +183,14 @@ shape_meta = {
     'info': {
         'reference_frame': 'robot',
         'distill_dino': True,
-        'distill_obj': 'scraper',
-        # 'distill_obj': 'crayon_new',
+        # 'distill_obj': 'scraper',
+        'distill_obj': 'crayon_v4',
+        # 'distill_obj': 'peeler_v2',
         'view_keys': ['camera_front', 'camera_left', 'camera_right'],
         'N_gripper': 100,
         'N_obj': 256,
         'N_env': 512,
-        # scraper
+        # # scraper
         # 'boundaries': {
         #   'x_lower': 0.4,
         #   'x_upper': 0.65,
@@ -178,7 +215,7 @@ shape_meta = {
         #   'z_lower': -0.03,
         #   'z_upper': 0.17,
         # },
-        # crayon_cross
+        # crayon
         'boundaries': {
           'x_lower': 0.3,
           'x_upper': 0.7,
@@ -188,21 +225,71 @@ shape_meta = {
           'z_upper': 0.5,
         },
         'env_boundaries': {
-          'x_lower': 0.4,
-          'x_upper': 0.65,
+          'x_lower': 0.36,
+          'x_upper': 0.53,
           'y_lower': -0.1,
-          'y_upper': 0.1,
-          'z_lower': -0.1,
-          'z_upper': 0.15,
+          'y_upper': 0.05,
+          'z_lower': -0.03,
+          'z_upper': 0.1
         },
         'obj_boundaries': {
           'x_lower': 0.3,
           'x_upper': 0.7,
           'y_lower': -0.2,
-          'y_upper': 0.2,
+          'y_upper': 0.15,
           'z_lower': 0.0,
           'z_upper': 0.25,
         },
+        # crayon_pick_up
+        # 'boundaries': {
+        #   'x_lower': 0.3,
+        #   'x_upper': 0.7,
+        #   'y_lower': -0.2,
+        #   'y_upper': 0.2,
+        #   'z_lower': -0.03,
+        #   'z_upper': 0.5,
+        # },
+        # 'env_boundaries': {
+        #   'x_lower': 0.4,
+        #   'x_upper': 0.57,
+        #   'y_lower': -0.1,
+        #   'y_upper': 0.1,
+        #   'z_lower': -0.1,
+        #   'z_upper': 0.15,
+        # },
+        # 'obj_boundaries': {
+        #   'x_lower': 0.3,
+        #   'x_upper': 0.7,
+        #   'y_lower': -0.2,
+        #   'y_upper': 0.2,
+        #   'z_lower': 0.0,
+        #   'z_upper': 0.25,
+        # },
+        # peeler
+        # 'boundaries': {
+        #   'x_lower': 0.3,
+        #   'x_upper': 0.7,
+        #   'y_lower': -0.2,
+        #   'y_upper': 0.2,
+        #   'z_lower': -0.03,
+        #   'z_upper': 0.5,
+        # },
+        # 'env_boundaries': {
+        #   'x_lower': 0.3,
+        #   'x_upper': 0.6,
+        #   'y_lower': -0.2,
+        #   'y_upper': 0.2,
+        #   'z_lower': 0.02,
+        #   'z_upper': 0.1
+        # },
+        # 'obj_boundaries': {
+        #   'x_lower': 0.3,
+        #   'x_upper': 0.7,
+        #   'y_lower': -0.2,
+        #   'y_upper': 0.2,
+        #   'z_lower': 0.0,
+        #   'z_upper': 0.5,
+        # },
         'resize_ratio': 0.5
     }
 }
@@ -277,7 +364,10 @@ def detect_contact_with_tactile(obj_points: np.ndarray,
                                 tactile_threshold: float = TACTILE_CHANGE_THRESHOLD,
                                 contact_mode: str = 'single',
                                 top_k: int = 3,
-                                depth_threshold: float = 0.005) -> Tuple[bool, np.ndarray, np.ndarray]:
+                                depth_threshold: float = 0.005,
+                                ee_pose_7d: Optional[np.ndarray] = None,
+                                crop_params: Optional[Dict] = None,
+                                contact_plane_height: float = 0.01) -> Tuple[bool, np.ndarray, np.ndarray]:
     """
     Detect contact based on object proximity to ground plane and tactile response.
     
@@ -289,9 +379,12 @@ def detect_contact_with_tactile(obj_points: np.ndarray,
         prev_tactile_right: Reference right tactile force field (reference frame)
         z_threshold: Distance threshold to ground plane for contact
         tactile_threshold: Threshold for tactile force/torque change (default: 1.0)
-        contact_mode: Detection mode - 'single', 'top_k', or 'threshold'
-        top_k: Number of contact points to return (for 'top_k' mode)
+        contact_mode: Detection mode - 'single', 'top_k', 'threshold', or 'lowest_k'
+        top_k: Number of contact points to return (for 'top_k' and 'lowest_k' modes)
         depth_threshold: Depth threshold for 'threshold' mode (distance below z_plane)
+        ee_pose_7d: (7,) end-effector pose [x, y, z, qx, qy, qz, qw] (required for 'lowest_k' mode)
+        crop_params: Dict with cropping bounds in gripper frame (for 'lowest_k' mode)
+        contact_plane_height: Height of the contact plane in meters (default: 0.01)
         
     Returns:
         Tuple of (has_contact, contact_points, contact_indices)
@@ -303,9 +396,9 @@ def detect_contact_with_tactile(obj_points: np.ndarray,
     if len(obj_points) == 0:
         return False, np.zeros(3), 0.0
     
-    # Check if object is close to the ground plane
+    # Check if object is close to the contact plane
     min_z = np.min(obj_points[:, 2])
-    is_close = min_z < z_threshold
+    is_close = min_z < contact_plane_height + z_threshold
     
     # Extract shear force components (channels: [depth, shear_x, shear_y])
     shear_x_left = tactile_force_left[:, :, 1]
@@ -356,6 +449,7 @@ def detect_contact_with_tactile(obj_points: np.ndarray,
     has_contact = is_close and has_tactile_change
     
     if not has_contact:
+        print(f'No contact! min_z={min_z}, contact_plane_height={contact_plane_height}, is_close={is_close}, has_tactile_change={has_tactile_change}')
         return False, np.zeros((0, 3)), np.array([], dtype=int)
     
     # Find contact points based on mode
@@ -373,18 +467,54 @@ def detect_contact_with_tactile(obj_points: np.ndarray,
         contact_points = obj_points[contact_indices]
         
     elif contact_mode == 'threshold':
-        # All points within depth threshold
+        # All points within depth threshold below contact plane
         z_coords = obj_points[:, 2]
-        # z_plane = 0.01  # Ground plane height
-        # depths = z_plane - z_coords
-        # contact_mask = depths > depth_threshold
-        contact_mask = z_coords < depth_threshold
+        # Points are in contact if they are below: contact_plane_height + depth_threshold
+        # This allows depth_threshold to act as a margin below the plane
+        contact_mask = z_coords < (contact_plane_height + depth_threshold)
         contact_indices = np.where(contact_mask)[0]
         
         if len(contact_indices) == 0:
             # No points meet threshold, fallback to single lowest point
             lowest_idx = np.argmin(z_coords)
             contact_indices = np.array([lowest_idx])
+        
+        contact_points = obj_points[contact_indices]
+        
+    elif contact_mode == 'lowest_k':
+        # Top k lowest points within gripper-centered cropping region
+        if ee_pose_7d is None:
+            raise ValueError("ee_pose_7d is required for 'lowest_k' contact mode")
+        
+        if crop_params is None:
+            crop_params = LOWEST_K_CROP_PARAMS
+        
+        # Transform object points to gripper frame
+        obj_points_gripper = transform_to_gripper_frame(obj_points, ee_pose_7d)
+        
+        # Apply cropping in gripper frame
+        crop_mask = (
+            (obj_points_gripper[:, 0] >= crop_params['x_min']) &
+            (obj_points_gripper[:, 0] <= crop_params['x_max']) &
+            (obj_points_gripper[:, 1] >= crop_params['y_min']) &
+            (obj_points_gripper[:, 1] <= crop_params['y_max']) &
+            (obj_points_gripper[:, 2] >= crop_params['z_min']) &
+            (obj_points_gripper[:, 2] <= crop_params['z_max'])
+        )
+        
+        cropped_indices = np.where(crop_mask)[0]
+        
+        if len(cropped_indices) == 0:
+            # No points in crop region, fallback to single lowest point in world frame
+            lowest_idx = np.argmin(obj_points[:, 2])
+            contact_indices = np.array([lowest_idx])
+        else:
+            # Get z coordinates (in world frame) for cropped points
+            cropped_z_coords = obj_points[cropped_indices, 2]
+            # Sort by z coordinate and take top k lowest
+            sorted_cropped_indices = np.argsort(cropped_z_coords)
+            selected_indices = sorted_cropped_indices[:min(top_k, len(sorted_cropped_indices))]
+            contact_indices = cropped_indices[selected_indices]
         
         contact_points = obj_points[contact_indices]
     else:
@@ -407,7 +537,8 @@ def compute_contact_vectors(obj_points: np.ndarray,
                            prob_weights: Optional[np.ndarray] = None,
                            contact_mode: str = 'single',
                            top_k: int = 3,
-                           depth_threshold: float = 0.005) -> np.ndarray:
+                           depth_threshold: float = 0.005,
+                           contact_plane_height: float = 0.01) -> np.ndarray:
     """
     Compute contact vectors for points in contact using force estimation.
     
@@ -429,6 +560,7 @@ def compute_contact_vectors(obj_points: np.ndarray,
         contact_mode: Detection mode - 'single', 'top_k', or 'threshold'
         top_k: Number of contact points to return (for 'top_k' mode)
         depth_threshold: Depth threshold for 'threshold' mode
+        contact_plane_height: Height of the contact plane in meters (default: 0.01)
         
     Returns:
         (M, 8) array of contact vectors where M is number of contact points
@@ -436,11 +568,15 @@ def compute_contact_vectors(obj_points: np.ndarray,
     has_contact, contact_points, contact_indices = detect_contact_with_tactile(
         obj_points, tactile_force_left, tactile_force_right,
         prev_tactile_left, prev_tactile_right, z_threshold,
-        contact_mode=contact_mode, top_k=top_k, depth_threshold=depth_threshold
+        contact_mode=contact_mode, top_k=top_k, depth_threshold=depth_threshold,
+        ee_pose_7d=ee_pose_7d,
+        contact_plane_height=contact_plane_height
     )
     
     if not has_contact:
         return np.array([]).reshape(0, 8), None
+    
+    # import pdb; pdb.set_trace()
     
     # Transform coordinates from world frame to gripper frame
     tactile_coord_left_gripper = transform_to_gripper_frame(tactile_coord_left, ee_pose_7d)
@@ -474,6 +610,7 @@ def compute_contact_vectors(obj_points: np.ndarray,
             tactile_force_right_scaled = (tactile_force_right - prev_tactile_right) * np.array([DEPTH_SCALE, SHEAR_SCALE, SHEAR_SCALE])
 
             # Compute with analytical estimator
+            # Note: Force transformation from sensor to gripper frame is handled inside the estimator
             wrench, contact_forces = force_estimator.compute_contact_forces_from_tactile(
                 tactile_force_left_scaled,
                 tactile_force_right_scaled,
@@ -483,6 +620,7 @@ def compute_contact_vectors(obj_points: np.ndarray,
                 normals=contact_normals_input,
                 prob_weights=contact_prob_weights
             )
+            print(contact_forces)
         else:
             # Scale tactile forces into calibrated unit (N)
             DEPTH_SCALE = 100
@@ -491,6 +629,7 @@ def compute_contact_vectors(obj_points: np.ndarray,
             tactile_force_right_scaled = (tactile_force_right - prev_tactile_right) * np.array([DEPTH_SCALE, SHEAR_SCALE, SHEAR_SCALE])
 
             # Simple estimator
+            # Note: Force transformation from sensor to gripper frame is handled inside the estimator
             wrench, contact_forces = force_estimator.compute_contact_forces_from_tactile(
                 tactile_force_left_scaled,
                 tactile_force_right_scaled,
@@ -499,9 +638,12 @@ def compute_contact_vectors(obj_points: np.ndarray,
                 contact_points_gripper  # (M, 3)
             )
         
+        # Transform contact forces from gripper frame to world frame
+        contact_forces_world = transform_to_world_frame(contact_forces, ee_pose_7d)
+        
         # Process each contact point
         contact_vectors = []
-        for i, (contact_pt, force_vec) in enumerate(zip(contact_points, contact_forces)):
+        for i, (contact_pt, force_vec) in enumerate(zip(contact_points, contact_forces_world)):
             force_magnitude = np.linalg.norm(force_vec)
             
             # Normalize to get force direction (contact normal)
@@ -512,12 +654,12 @@ def compute_contact_vectors(obj_points: np.ndarray,
                 contact_normal = np.array([0.0, 0.0, 1.0])
             
             # Distance to ground plane
-            distance = 0.01 - contact_pt[2]
+            distance = contact_plane_height - contact_pt[2]
             
             # Build contact vector: [pos_x, pos_y, pos_z, norm_x, norm_y, norm_z, force, distance]
             contact_vector = np.concatenate([
-                contact_pt,  # Position (3)
-                contact_normal,  # Normal direction (3)
+                contact_pt,  # Position (3) - world frame
+                contact_normal,  # Normal direction (3) - world frame
                 [force_magnitude],  # Force magnitude (1)
                 [distance]  # Distance/penetration depth (1)
             ])
@@ -530,7 +672,7 @@ def compute_contact_vectors(obj_points: np.ndarray,
         for contact_pt in contact_points:
             contact_normal = np.array([0.0, 0.0, 1.0])
             force_magnitude = 0.0
-            distance = 0.01 - contact_pt[2]
+            distance = contact_plane_height - contact_pt[2]
             
             contact_vector = np.concatenate([
                 contact_pt,
@@ -561,7 +703,9 @@ def convert_hdf5_to_dataset(hdf5_path: str,
                             kin_helper: Optional[KinHelper] = None,
                             include_front_rgb: bool = True,
                             force_estimator_config: Optional[Dict] = None,
-                            compute_wrench_error: bool = False) -> Tuple[str, str]:
+                            compute_wrench_error: bool = False,
+                            plot_wrench: bool = False,
+                            contact_plane_height: float = 0.01) -> Tuple[str, str]:
     """
     Convert a single HDF5 file to dataset format.
     
@@ -582,7 +726,9 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             - 'lambda_reg': regularization weight for analytical
             - 'epsilon': epsilon for analytical
         compute_wrench_error: Whether to compute and save wrench error statistics (default: False)
-        
+        plot_wrench: Whether to generate and save wrench plot (default: False)
+        contact_plane_height: Height of the contact plane in meters (default: 0.01)
+
     Returns:
         Tuple of (main_file_path, contact_file_path)
     """
@@ -733,21 +879,42 @@ def convert_hdf5_to_dataset(hdf5_path: str,
         # Segment point cloud
         if use_semantic_segmentation and fusion is not None and kin_helper is not None:
             # Use semantic segmentation
-            gripper_crop_params = {
+            # Scraper
+            # seg_params = {
+            #     'tool_length': 0.15,
+            #     'tool_width': 0.15,
+            #     'gripper_finger_length': 0.1,
+            #     'safety_margin': 0.0,
+            #     'global_z_threshold': 0.01
+            # }
+            # Crayon
+            seg_params = {
                 'tool_length': 0.15,
-                'tool_width': 0.15,
+                'tool_width': 0.04,
                 'gripper_finger_length': 0.1,
                 'safety_margin': 0.0,
-                'global_z_threshold': 0.01
+                'global_z_threshold': 0.01,
+                'auto_estimate_plane': True,
+                'plane_margin': 0.012,
+                'plane_percentile': 20,
+                'ransac_iterations': 50,
+                'ransac_distance_threshold': 0.01
             }
-            # Crayon
-            # gripper_crop_params = {
+            # Peeler
+            # seg_params={
             #     'tool_length': 0.15,
-            #     'tool_width': 0.02,
-            #     'gripper_finger_length': 0.13,
-            #     'safety_margin': 0.0,
-            #     'global_z_threshold': 0.01,
-            #     'auto_estimate_plane': True
+            #     'tool_width': 0.1,  # peeler
+            #     'gripper_finger_length': 0.1,
+            #     'safety_margin': 0.00,
+            #     'global_z_threshold': 0.025,
+            #     'auto_estimate_plane': False,
+            #     'feat_threshold': 0.05,
+            #     'use_any': False,
+            #     'combine_with_gripper': True,
+            #     'gripper_combine_mode': 'intersection',
+            #     'reverse_selection': True,
+            #     'query_texts': ['carrot'],
+            #     'query_thresholds': 0.1
             # }
             result = d3fields_proc(
                 fusion=fusion,
@@ -763,7 +930,7 @@ def convert_hdf5_to_dataset(hdf5_path: str,
                 use_obj_bg_seg=True,
                 gripper_pose_seq=observations['ee_pose'][step_idx:step_idx+1],
                 seg_method='gripper_crop',
-                seg_params=gripper_crop_params
+                seg_params=seg_params
             )
             
             if len(result) == 7:
@@ -856,7 +1023,7 @@ def convert_hdf5_to_dataset(hdf5_path: str,
         # === Compute Contact Information ===
         t0 = time.time()
         # Compute contact depth for each object point
-        contact_depths = compute_contact_depth(object_pointcloud, z_plane=0.01)
+        contact_depths = compute_contact_depth(object_pointcloud, z_plane=contact_plane_height)
         
         # Add contact depth as 4th dimension to object points
         obj_pcd_with_depth = np.concatenate([
@@ -875,11 +1042,11 @@ def convert_hdf5_to_dataset(hdf5_path: str,
                 np.zeros((env_pcd_sampled.shape[0], 1))
             ], axis=1)
         
-        # Check if object is close to ground plane for reference frame management
+        # Check if object is close to contact plane for reference frame management
         min_z = np.min(object_pointcloud[:, 2]) if len(object_pointcloud) > 0 else float('inf')
-        is_close = min_z < CONTACT_Z_THRESHOLD
+        is_close = min_z < contact_plane_height + CONTACT_Z_THRESHOLD
         
-        # Update reference frame when object is not close to ground plane
+        # Update reference frame when object is not close to contact plane
         if not is_close:
             prev_tactile_left = force_field_left.copy()
             prev_tactile_right = force_field_right.copy()
@@ -895,7 +1062,7 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             obj_normals = estimate_tool_normals(
                 obj_points_gripper, 
                 camera_location=np.array([0.0, 0.0, 0.15]),  # Camera roughly 5cm above gripper center
-                inward=False
+                inward=True
             )
             
             # Apply smoothing to reduce RealSense noise
@@ -917,7 +1084,8 @@ def convert_hdf5_to_dataset(hdf5_path: str,
             top_k=CONTACT_TOP_K,
             depth_threshold=CONTACT_DEPTH_THRESHOLD,
             normals=obj_normals,  # Pass extracted normals for analytical estimator
-            prob_weights=None  # TODO: Extract contact probabilities if available
+            prob_weights=None,  # TODO: Extract contact probabilities if available
+            contact_plane_height=contact_plane_height
         )
 
         # t1 = time.time()
@@ -944,13 +1112,20 @@ def convert_hdf5_to_dataset(hdf5_path: str,
                 # Extract contact points and force vectors from contact_vecs
                 # contact_vecs format: [pos_x, pos_y, pos_z, norm_x, norm_y, norm_z, force_magnitude, distance]
                 # Note: With unconstrained force directions, contact_vecs[:, 3:6] now contains
-                # the actual force direction (not necessarily the normal)
+                # the actual force direction (not necessarily the normal) in WORLD frame
                 contact_pts_gripper = transform_to_gripper_frame(contact_vecs[:, :3], ee_pose_7d)
-                contact_force_vecs = contact_vecs[:, 3:6]  # Force direction vectors (3D)
+                contact_force_dirs_world = contact_vecs[:, 3:6]  # Force direction vectors (3D) in world frame
                 force_magnitudes = contact_vecs[:, 6]  # Force magnitudes
                 
-                # Reconstruct full 3D force vectors: f_i = magnitude_i * direction_i
-                contact_forces = force_magnitudes.reshape(-1, 1) * contact_force_vecs  # (N, 3)
+                # Transform force directions from world frame to gripper frame
+                # For vectors (not points), only apply rotation, not translation
+                quat = ee_pose_7d[3:]  # [qx, qy, qz, qw]
+                rot = R.from_quat(quat).as_matrix()
+                rot_inv = rot.T  # World-to-gripper rotation
+                contact_force_dirs_gripper = (rot_inv @ contact_force_dirs_world.T).T  # (N, 3)
+                
+                # Reconstruct full 3D force vectors in gripper frame: f_i = magnitude_i * direction_i
+                contact_forces = force_magnitudes.reshape(-1, 1) * contact_force_dirs_gripper  # (N, 3) in gripper frame
                 
                 # Construct grasp matrix A for 3D force vectors
                 # A @ f_stacked = wrench, where f_stacked = [f_1; f_2; ...; f_N]
@@ -1068,7 +1243,7 @@ def convert_hdf5_to_dataset(hdf5_path: str,
     print(f"  - Contact vectors: {len(contact_vectors_list)} timesteps")
     
     # Plot wrench history if available
-    if len(wrench_history) > 0:
+    if plot_wrench and len(wrench_history) > 0:
         wrench_plot_path = output_dir / f"{episode_name}_wrench.png"
         plot_wrench_history(
             wrench_history,
@@ -1201,6 +1376,8 @@ def main():
     parser.add_argument('--force_lambda', type=float, default=0.01, help='Regularization weight for analytical force estimator')
     parser.add_argument('--force_epsilon', type=float, default=1e-6, help='Epsilon for analytical force estimator weight division')
     parser.add_argument('--compute_wrench_error', action='store_true', help='Compute and save wrench error statistics')
+    parser.add_argument('--plot_wrench', action='store_true', help='Plot wrench history for each episode')
+    parser.add_argument('--contact_plane_height', type=float, default=0.01, help='Height of the contact plane (default: 0.01m)')
 
     args = parser.parse_args()
     
@@ -1342,7 +1519,9 @@ def main():
                     kin_helper=kin_helper,
                     include_front_rgb=True,  # Include front RGB for testing/visualization
                     force_estimator_config=force_estimator_config,
-                    compute_wrench_error=args.compute_wrench_error
+                    compute_wrench_error=args.compute_wrench_error,
+                    plot_wrench=args.plot_wrench,
+                    contact_plane_height=args.contact_plane_height
                 )
                 converted_files.append((main_path, contact_path))
             except Exception as e:
@@ -1371,7 +1550,9 @@ def main():
                     kin_helper=kin_helper,
                     include_front_rgb=False,  # No front RGB for training
                     force_estimator_config=force_estimator_config,
-                    compute_wrench_error=args.compute_wrench_error
+                    compute_wrench_error=args.compute_wrench_error,
+                    plot_wrench=args.plot_wrench,
+                    contact_plane_height=args.contact_plane_height
                 )
                 converted_files.append((main_path, contact_path))
             except Exception as e:

@@ -31,6 +31,52 @@ def skew_symmetric(v: np.ndarray) -> np.ndarray:
     ])
 
 
+def transform_tactile_forces_to_gripper_frame(forces: np.ndarray, 
+                                              is_left_sensor: bool = False) -> np.ndarray:
+    """
+    Transform tactile force vectors from sensor frame to gripper frame.
+    
+    The tactile sensors face each other across the gripper y-axis.
+    - Right sensor: positioned at +y
+    - Left sensor: positioned at -y
+    
+    Sensor coordinate system corrections:
+    - Depth (normal force) sign needs to be flipped
+    - Shear_y is anti-aligned with gripper Z (needs negation)
+    - Shear_x aligns with gripper X
+    
+    Additionally, the right sensor is rotated 180° around z-axis relative to left.
+    
+    Args:
+        forces: (7, 9, 3) or (H, W, 3) force vectors in sensor frame [depth, shear_x, shear_y]
+                These are forces exerted ONTO the sensor (action forces)
+        is_left_sensor: True if this is the left sensor, False for right
+        
+    Returns:
+        Force vectors in gripper frame with same shape as input
+    """
+    original_shape = forces.shape
+    forces_flat = forces.reshape(-1, 3)
+    
+    # First, correct sensor coordinate system mapping to gripper frame
+    # [depth, shear_x, shear_y] → [±depth, shear_x, -shear_y]
+    coord_correction = np.array([[-1, 0, 0],   # Negate depth
+                                  [0, 1, 0],    # Keep shear_x
+                                  [0, 0, -1]])  # Negate shear_y (anti-aligned with gripper Z)
+    forces_flat = (coord_correction @ forces_flat.T).T
+    
+    # Then apply sensor-specific transformation
+    # The left sensor (at -y) needs x-axis flipped relative to the right sensor
+    if is_left_sensor:  # Left sensor needs x-flip
+        # Flip x-axis only: x → -x, y → -y, z → z
+        sensor_to_gripper_local = np.array([[-1, 0, 0],
+                                            [0, -1, 0],
+                                            [0, 0, 1]])
+        forces_flat = (sensor_to_gripper_local @ forces_flat.T).T
+    
+    return forces_flat.reshape(original_shape)
+
+
 def estimate_tool_normals(tool_pcd_np, camera_location=np.array([0, 0, 0]), inward=True):
     """
     Estimates and orients normals for a raw point cloud.
@@ -105,8 +151,10 @@ class ForceEstimator(ABC):
         Calculate the net wrench from tactile sensor data with outlier filtering.
         
         Args:
-            tactile_force_left: (7, 9, 3) left tactile force field [fx, fy, fz]
-            tactile_force_right: (7, 9, 3) right tactile force field [fx, fy, fz]
+            tactile_force_left: (7, 9, 3) left tactile force field [depth, shear_x, shear_y]
+                               in sensor frame
+            tactile_force_right: (7, 9, 3) right tactile force field [depth, shear_x, shear_y]
+                                in sensor frame
             tactile_coord_left: (7, 9, 3) left tactile marker coordinates in gripper frame
             tactile_coord_right: (7, 9, 3) right tactile marker coordinates in gripper frame
             outlier_threshold: Threshold in MAD units for outlier detection (default: 3.0)
@@ -114,6 +162,15 @@ class ForceEstimator(ABC):
         Returns:
             (6,) wrench vector [Fx, Fy, Fz, Mx, My, Mz]
         """
+        # Transform force vectors from sensor frame to gripper frame
+        # Account for 180° rotation between left and right sensors
+        tactile_force_left = transform_tactile_forces_to_gripper_frame(
+            tactile_force_left, is_left_sensor=True
+        )
+        tactile_force_right = transform_tactile_forces_to_gripper_frame(
+            tactile_force_right, is_left_sensor=False
+        )
+        
         # Flatten the tactile arrays
         forces_left = tactile_force_left.reshape(-1, 3)  # (63, 3)
         forces_right = tactile_force_right.reshape(-1, 3)  # (63, 3)
