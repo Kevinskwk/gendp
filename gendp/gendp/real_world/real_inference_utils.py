@@ -1323,14 +1323,15 @@ def get_real_obs_dict(
 
             # Handle features based on distill_dino and contact field settings
             distill_dino = attr['info']['distill_dino'] if 'distill_dino' in attr['info'] else False
+            include_distilled_features = attr['info'].get('include_distilled_features', True)
             
-            if distill_dino and aggr_feats is not None:
+            if distill_dino and include_distilled_features and aggr_feats is not None:
                 if use_contact_field:
                     # Extract contact field channels (last N channels) from aggr_src_pts
                     contact_field_channels = 4 if use_contact_force_effective else 1
                     contact_channels = aggr_src_pts[:, :, -contact_field_channels:]  # (T, N, 1 or 4)
                     xyz = aggr_src_pts[:, :, :3]  # (T, N, 3)
-                    # Concatenate: [xyz, dino_feats, contact_field]
+                    # Concatenate: [xyz, dino_feats, rgb (if enabled), contact_field]
                     parts_to_concat = [
                         xyz,
                         aggr_feats,  # dino features
@@ -1348,7 +1349,7 @@ def get_real_obs_dict(
 
                     aggr_pts_feats = np.concatenate(parts_to_concat, axis=-1)
             elif use_contact_field:
-                # contact_field=True but distill_dino=False
+                # contact_field=True but distill_dino=False or include_distilled_features=False
                 # aggr_src_pts contains [xyz, contact_field] from contact field processing
                 # Need to add RGB channels if enabled
                 if aggr_colors is not None:
@@ -1361,7 +1362,7 @@ def get_real_obs_dict(
                 else:
                     # No RGB channels, use as is
                     aggr_pts_feats = aggr_src_pts
-            elif use_dino or distill_dino:
+            elif (use_dino or distill_dino) and include_distilled_features:
                 if aggr_feats is not None:
                     aggr_pts_feats = np.concatenate([aggr_src_pts, aggr_feats], axis=-1)
                 else:

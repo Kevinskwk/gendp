@@ -342,6 +342,9 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     #   'reverse_selection' (bool): If True, inverts the segmentation mask (keeps non-selected points as object)
     boundaries = shape_meta['info']['boundaries']
     
+    # Check if distilled features should be included in output
+    include_distilled_features = shape_meta['info'].get('include_distilled_features', True)
+    
     # Support separate boundaries for object and environment
     # If obj_boundaries and env_boundaries are specified, use them; otherwise use same boundaries
     if 'obj_boundaries' in shape_meta['info'] and 'env_boundaries' in shape_meta['info']:
@@ -357,6 +360,11 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
     distill_dino = shape_meta['info']['distill_dino'] if 'distill_dino' in shape_meta['info'] else False
     distill_obj = shape_meta['info']['distill_obj'] if 'distill_obj' in shape_meta['info'] else False
     include_rgb = shape_meta['info'].get('add_rgb_channels', False)
+    
+    # Extract features from DINO but don't include them in output if include_distilled_features is False
+    # We still need to extract DINO features for segmentation even if not included in output
+    extract_dino_for_seg = distill_dino or use_obj_bg_seg
+    include_feats_in_output = include_distilled_features and distill_dino
 
     # Default query texts and thresholds from shape_meta (can be overridden by seg_params)
     default_query_text = shape_meta['info']['query_text'] if 'query_text' in shape_meta['info'] else distill_obj
@@ -521,7 +529,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         }
         
         t_start_update = time.time()
-        fusion.update(obs, update_dino=(use_dino or distill_dino or use_obj_bg_seg))
+        fusion.update(obs, update_dino=(use_dino or extract_dino_for_seg))
         
         # compute robot pcd
         if 'panda' in teleop_robot.robot_name:
@@ -574,7 +582,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         # post process robot pcd
         ee_pcd_tensor = torch.from_numpy(ee_pcd).to(device=fusion.device, dtype=fusion.dtype)
         
-        if use_dino or distill_dino or use_obj_bg_seg:
+        if use_dino or extract_dino_for_seg:
             return_names = ['dino_feats']
             if include_rgb:
                 return_names.append('color')
@@ -836,13 +844,15 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 src_colors_list = []
         else:
             obj_pcd = fusion.extract_pcd_in_box(boundaries=boundaries, downsample=True, downsample_r=0.004, excluded_pts=robot_pcd, exclude_threshold=exclude_threshold, exclude_colors=exclude_colors)
-            src_feat_list, src_pts_list, _, src_colors_list = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or distill_dino), include_rgb=include_rgb)
-            if distill_dino:
+            src_feat_list, src_pts_list, _, src_colors_list = fusion.select_features_from_pcd(obj_pcd, N_total - ee_pcd.shape[0], per_instance=True, use_seg=use_seg, use_dino=(use_dino or extract_dino_for_seg), include_rgb=include_rgb)
+            if distill_dino and include_feats_in_output:
                 all_feats_tensor = torch.concat(src_feat_list, axis=0)
                 src_feat_list = [fusion.eval_dist_to_sel_feats(all_feats_tensor, obj_name=distill_obj)]
+            elif not include_feats_in_output:
+                src_feat_list = []  # Don't include features in output
         
         aggr_src_pts = np.concatenate(src_pts_list, axis=0) # (N, 3)
-        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (use_dino or distill_dino or use_obj_bg_seg) else None # (N, feat_dim)
+        aggr_feats = torch.concat(src_feat_list, axis=0).detach().cpu().numpy() if (include_feats_in_output and len(src_feat_list) > 0) else None # (N, feat_dim)
         
         # Process RGB colors if enabled
         if include_rgb and len(src_colors_list) > 0:
@@ -852,15 +862,19 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         
         aggr_src_pts = np.concatenate([aggr_src_pts, ee_pcd], axis=0)
         
-        # Handle feature concatenation based on distill_dino setting
-        if distill_dino:
-            # Distill EE features first
-            ee_feats_distilled = fusion.eval_dist_to_sel_feats(ee_feats, obj_name=distill_obj,).detach().cpu().numpy()
-            # aggr_feats already contains distilled features (from pre-segmentation distillation)
-            aggr_feats = np.concatenate([aggr_feats, ee_feats_distilled], axis=0) if (use_dino or distill_dino or use_obj_bg_seg) else None
+        # Handle feature concatenation based on distill_dino and include_feats_in_output settings
+        if include_feats_in_output:
+            if distill_dino:
+                # Distill EE features first
+                ee_feats_distilled = fusion.eval_dist_to_sel_feats(ee_feats, obj_name=distill_obj,).detach().cpu().numpy()
+                # aggr_feats already contains distilled features (from pre-segmentation distillation)
+                aggr_feats = np.concatenate([aggr_feats, ee_feats_distilled], axis=0) if (use_dino or extract_dino_for_seg) else None
+            else:
+                # Use raw DINO features
+                aggr_feats = np.concatenate([aggr_feats, ee_feats.detach().cpu().numpy()], axis=0) if (use_dino or extract_dino_for_seg) else None
         else:
-            # Use raw DINO features
-            aggr_feats = np.concatenate([aggr_feats, ee_feats.detach().cpu().numpy()], axis=0) if (use_dino or distill_dino or use_obj_bg_seg) else None
+            # Don't include distilled features in output
+            aggr_feats = None
         
         # Concatenate RGB colors with ee colors (ee gets actual RGB from images)
         if aggr_colors is not None:
@@ -868,19 +882,24 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         
         # Store object and background data for separate return
         if use_obj_bg_seg:
-            # Determine which features to use (distilled or raw)
-            if distill_dino:
-                ee_feats_to_use = ee_feats_distilled
+            if include_feats_in_output:
+                # Determine which features to use (distilled or raw)
+                if distill_dino:
+                    ee_feats_to_use = ee_feats_distilled
+                else:
+                    ee_feats_to_use = ee_feats.detach().cpu().numpy()
+                
+                # Add end-effector features to both object and background
+                obj_pts = obj_src_pts if obj_src_pts.shape[0] > 0 else np.zeros((0, 3))
+                obj_feats = obj_src_feats if obj_src_feats.shape[0] > 0 else np.zeros((0, ee_feats_to_use.shape[1]))
+                bg_with_ee_pts = np.concatenate([bg_src_pts, ee_pcd], axis=0) if bg_src_pts.shape[0] > 0 else ee_pcd
+                bg_with_ee_feats = np.concatenate([bg_src_feats, ee_feats_to_use], axis=0) if bg_src_feats.shape[0] > 0 else ee_feats_to_use
             else:
-                ee_feats_to_use = ee_feats.detach().cpu().numpy()
-            
-            # Add end-effector features to both object and background
-            # obj_with_ee_pts = np.concatenate([obj_src_pts, ee_pcd], axis=0) if obj_src_pts.shape[0] > 0 else ee_pcd
-            # obj_with_ee_feats = np.concatenate([obj_src_feats, ee_feats_to_use], axis=0) if obj_src_feats.shape[0] > 0 else ee_feats_to_use
-            obj_pts = obj_src_pts if obj_src_pts.shape[0] > 0 else np.zeros((0, 3))
-            obj_feats = obj_src_feats if obj_src_feats.shape[0] > 0 else np.zeros((0, ee_feats_to_use.shape[1]))
-            bg_with_ee_pts = np.concatenate([bg_src_pts, ee_pcd], axis=0) if bg_src_pts.shape[0] > 0 else ee_pcd
-            bg_with_ee_feats = np.concatenate([bg_src_feats, ee_feats_to_use], axis=0) if bg_src_feats.shape[0] > 0 else ee_feats_to_use
+                # No features in output, just return None for features
+                obj_pts = obj_src_pts if obj_src_pts.shape[0] > 0 else np.zeros((0, 3))
+                obj_feats = None
+                bg_with_ee_pts = np.concatenate([bg_src_pts, ee_pcd], axis=0) if bg_src_pts.shape[0] > 0 else ee_pcd
+                bg_with_ee_feats = None
             
             # Transform to reference frame
             if reference_frame == 'robot':
@@ -888,20 +907,22 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
                 bg_with_ee_pts = (np.linalg.inv(robot_base_pose_in_world_seq[t, 0]) @ np.concatenate([bg_with_ee_pts, np.ones((bg_with_ee_pts.shape[0], 1))], axis=-1).T).T[:, :3]
             
             obj_pts_ls.append(obj_pts.astype(np.float32))
-            obj_feats_ls.append(obj_feats.astype(np.float32))
+            obj_feats_ls.append(obj_feats.astype(np.float32) if obj_feats is not None else None)
             bg_pts_ls.append(bg_with_ee_pts.astype(np.float32))
-            bg_feats_ls.append(bg_with_ee_feats.astype(np.float32))
+            bg_feats_ls.append(bg_with_ee_feats.astype(np.float32) if bg_with_ee_feats is not None else None)
         
         try:
             # When using contact field with explicit N_obj and N_env, adjust expected total
             if use_obj_bg_seg and N_obj is not None and N_env is not None:
                 expected_total = N_obj + N_env + ee_pcd.shape[0]
                 assert aggr_src_pts.shape[0] == expected_total, f"Expected {expected_total} points (obj={N_obj} + env={N_env} + ee={ee_pcd.shape[0]}), got {aggr_src_pts.shape[0]}"
-                assert aggr_feats.shape[0] == expected_total if (use_dino or distill_dino or use_obj_bg_seg) else True
+                if aggr_feats is not None:
+                    assert aggr_feats.shape[0] == expected_total, f"Expected {expected_total} features, got {aggr_feats.shape[0]}"
             else:
                 # Legacy behavior
                 assert aggr_src_pts.shape[0] == N_total, f"Expected {N_total} points, got {aggr_src_pts.shape[0]}"
-                assert aggr_feats.shape[0] == N_total if (use_dino or distill_dino or use_obj_bg_seg) else True
+                if aggr_feats is not None:
+                    assert aggr_feats.shape[0] == N_total, f"Expected {N_total} features, got {aggr_feats.shape[0]}"
         except AssertionError as e:
             raise RuntimeError(f'Point count mismatch: {str(e)}')
         
@@ -913,7 +934,7 @@ def d3fields_proc(fusion, shape_meta, color_seq, depth_seq, extri_seq, intri_seq
         
         # save to list
         aggr_src_pts_ls.append(aggr_src_pts.astype(np.float32))
-        aggr_feats_ls.append(aggr_feats.astype(np.float32) if (use_dino or distill_dino or use_obj_bg_seg) else None)
+        aggr_feats_ls.append(aggr_feats.astype(np.float32) if aggr_feats is not None else None)
         aggr_colors_ls.append(aggr_colors.astype(np.float32) if aggr_colors is not None else None)
         
         # t_total = time.time() - t_frame_start

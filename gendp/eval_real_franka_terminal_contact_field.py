@@ -332,7 +332,7 @@ def get_init_poses(task='scraper'):
         # j_init = np.array([-0.24010226130485535, 0.196928933262825, 0.042084839195013046, -2.0691111087799072, -0.015080037526786327, 2.2436816692352295, -0.9613606929779053])
         # ee_init = np.array([0.5646023154258728, -0.11422417312860489, 0.33527788519859314, -3.125333787179658, 0.015434648044571952, 0.7722765841437812])
         j_init = np.array([-0.0576937198638916, 0.1947079300880432, -0.15080676972866058, -2.1874563694000244, 0.07048400491476059, 2.297914981842041, -1.03273606300354])
-        ee_init = np.array([0.5336876511573792, -0.1110101044178009, 0.292540580034256, -3.061252805867689, 0.0250784083987452, 0.7778451946853177])
+        ee_init = np.array([0.5336876511573792, -0.1110101044178009, 0.292540580034256-0.03, -3.061252805867689, 0.0250784083987452, 0.7778451946853177])
     elif task == 'crayon_pickup':
         j_init = np.array([-0.02994604781270027, 0.2991308569908142, -0.004555299412459135, -1.751071572303772, -0.06488428264856339, 2.0103297233581543, -0.827126145362854])
         ee_init = np.array([0.6353483200073242, -0.034808311611413956, 0.40055933594703674, 3.1242419555642567, 0.06814992618484839, 0.8098764046141207])
@@ -521,7 +521,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
 
     try:
         # unregister eval resolver before starting subprocesses
-        OmegaConf.clear_resolver("eval")
+        # OmegaConf.clear_resolver("eval")
         with SharedMemoryManager() as shm_manager:
             with KeystrokeCounter() as key_counter, \
                 RealEnvFranka(
@@ -544,7 +544,7 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
 
                 print("Warming up policy inference")
                 # re-register resolver for the main process
-                OmegaConf.register_new_resolver("eval", eval, replace=True)
+                # OmegaConf.register_new_resolver("eval", eval, replace=True)
                 obs = env.get_obs()
                 with torch.no_grad():
                     policy.reset()
@@ -640,8 +640,8 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             )
                             
                             # Save visualization images periodically
-                            if save_viz_interval > 0:
-                                save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
+                            # if save_viz_interval > 0:
+                            #     save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
                             
                             # Execute robot actions (maintain current position + gripper control)
                             # Check if we need to move to initial pose
@@ -832,9 +832,8 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                 )
                                 
                                 # Save visualization images periodically
-                                if save_viz_interval > 0:
-                                    save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
-                                t_viz_end = time.perf_counter()
+                                # if save_viz_interval > 0:
+                                #     save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
                                 # print(f"⏱️  [Timing] Visualization: {(t_viz_end - t_viz_start)*1000:.2f}ms")
 
                                 # Calculate how many actions were actually scheduled

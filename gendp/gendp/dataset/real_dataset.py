@@ -685,25 +685,30 @@ def _convert_real_to_dp_replay(store, shape_meta, dataset_dir, rotation_transfor
                     print(f"  ✅ Contact field processing complete for episode {epi_idx}")
 
                 if distill_dino:
+                    include_distilled_features = shape_meta['obs'][key]['info'].get('include_distilled_features', True)
                     for pts_idx, aggr_src_pts in enumerate(aggr_src_pts_ls):
                         if use_contact_field:
                             # Extract contact field channels (last N channels)
                             use_contact_force_flag = shape_meta['obs'][key]['info'].get('use_contact_force', True)
                             contact_field_channels = 4 if use_contact_force_flag else 1
                             contact_channels = aggr_src_pts[:, -contact_field_channels:]
-                            # Concatenate: [xyz, dino_feats, rgb (if enabled), contact_field]
+                            # Concatenate: [xyz, (dino_feats if include_distilled_features), rgb (if enabled), contact_field]
                             parts_to_concat = [
                                 aggr_src_pts[:, :3],  # xyz
-                                aggr_feats_ls[pts_idx],  # dino features
                             ]
+                            # Add dino features if enabled
+                            if include_distilled_features and aggr_feats_ls[pts_idx] is not None:
+                                parts_to_concat.append(aggr_feats_ls[pts_idx])  # dino features
                             # Add RGB channels if enabled
                             if aggr_colors_ls[pts_idx] is not None:
                                 parts_to_concat.append(aggr_colors_ls[pts_idx])  # RGB channels
                             parts_to_concat.append(contact_channels)  # contact field
                             aggr_src_pts_ls[pts_idx] = np.concatenate(parts_to_concat, axis=-1)
                         else:
-                            # Concatenate: [xyz, dino_feats, rgb (if enabled)]
-                            parts_to_concat = [aggr_src_pts, aggr_feats_ls[pts_idx]]
+                            # Concatenate: [xyz, (dino_feats if include_distilled_features), rgb (if enabled)]
+                            parts_to_concat = [aggr_src_pts]
+                            if include_distilled_features and aggr_feats_ls[pts_idx] is not None:
+                                parts_to_concat.append(aggr_feats_ls[pts_idx])
                             if aggr_colors_ls[pts_idx] is not None:
                                 parts_to_concat.append(aggr_colors_ls[pts_idx])  # RGB channels
                             aggr_src_pts_ls[pts_idx] = np.concatenate(parts_to_concat, axis=-1)
@@ -1264,6 +1269,7 @@ class RealDataset(BaseImageDataset):
             use_dino = False
             distill_dino = shape_meta['obs']['d3fields']['info'].get('distill_dino', False)
             include_rgb = shape_meta['obs']['d3fields']['info'].get('add_rgb_channels', False)
+            include_distilled_features = shape_meta['obs']['d3fields']['info'].get('include_distilled_features', True)
             if use_seg:
                 cache_info_str += '_seg'
             else:
@@ -1272,6 +1278,8 @@ class RealDataset(BaseImageDataset):
                 cache_info_str += '_no_dino'
             elif not use_dino and distill_dino:
                 cache_info_str += '_distill_dino'
+                if not include_distilled_features:
+                    cache_info_str += '_no_feat'
             else:
                 cache_info_str += '_dino'
             if include_rgb:

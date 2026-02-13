@@ -571,8 +571,8 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                             )
                             
                             # Save visualization images periodically
-                            if save_viz_interval > 0:
-                                save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
+                            # if save_viz_interval > 0:
+                            #     save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
                             
                             # Execute robot actions (maintain current position + gripper control)
                             # Check if we need to move to initial pose
@@ -779,9 +779,9 @@ def main(input_dir, output, robot_ip, match_dataset, match_episode,
                                 )
                                 
                                 # Save visualization images periodically
-                                if save_viz_interval > 0:
-                                    save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
-                                t_viz_end = time.perf_counter()
+                                # if save_viz_interval > 0:
+                                #     save_visualization_images(vis_img, output, iter_idx, save_viz_interval)
+                                # t_viz_end = time.perf_counter()
                                 # print(f"⏱️  [Timing] Visualization: {(t_viz_end - t_viz_start)*1000:.2f}ms")
 
                                 # wait for execution
