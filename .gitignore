@@ -168,3 +168,5 @@ cython_debug/
 outputs/
 calibration_images/
 figures/
+
+eval_results/
