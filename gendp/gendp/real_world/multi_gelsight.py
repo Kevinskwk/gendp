@@ -163,3 +163,85 @@ def repeat_to_list(x, n: int, cls):
         x = [x] * n
     assert len(x) == n
     return x
+
+if __name__ == '__main__':
+    import cv2
+    
+    # Default gelsight device IDs (matching real_env_franka_gripper_gelsight.py)
+    GELSIGHT_IDS = ['/dev/video-gs_mini_left', '/dev/video-gs_mini_right']
+    
+    print("Starting MultiGelsight visualization...")
+    print(f"Device IDs: {GELSIGHT_IDS}")
+    
+    # Create shared memory manager
+    shm_manager = SharedMemoryManager()
+    shm_manager.start()
+    
+    try:
+        # Initialize MultiGelsight
+        gelsight = MultiGelsight(
+            device_ids=GELSIGHT_IDS,
+            shm_manager=shm_manager,
+            resolution=(320, 240),
+            capture_fps=30,
+            put_fps=30,
+            put_downsample=False,
+            get_max_k=30,
+            verbose=True
+        )
+        
+        # Start the cameras
+        print("Starting cameras...")
+        gelsight.start(wait=True)
+        print("Cameras started! Press 'q' to quit.")
+        
+        # Visualization loop
+        vis_data = None
+        while True:
+            # Get latest frames from both gelsights
+            vis_data = gelsight.get(out=vis_data)
+            
+            # Extract RGB images from both cameras
+            images = []
+            for i, data in vis_data.items():
+                if 'color' in data:
+                    img = data['color']
+                    if len(img.shape) == 4:  # If shape is (T,H,W,C), take latest frame
+                        img = img[-1]
+                    # Convert RGB to BGR for OpenCV
+                    images.append(img)
+            
+            # Concatenate images horizontally
+            if len(images) == 2:
+                combined_img = np.hstack(images)
+                
+                # Add labels
+                cv2.putText(combined_img, 'Left', (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.putText(combined_img, 'Right', (images[0].shape[1] + 10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                
+                # Display
+                cv2.imshow('Multi GelSight Visualization', combined_img)
+            
+            # Check for quit key
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                print("\nQuitting...")
+                break
+            
+            time.sleep(1/30)  # 30 fps visualization
+    
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+    except Exception as e:
+        print(f"\nError: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Cleanup
+        print("Stopping cameras...")
+        gelsight.stop(wait=True)
+        cv2.destroyAllWindows()
+        shm_manager.shutdown()
+        print("Done!")
